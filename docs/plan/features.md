@@ -21,7 +21,8 @@
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
 | Unknown command → handoff | ✅ | any unrecognized input | says "handing off to the assistant" — the M4 escalation hook |
 | Mode sound cues | ✅ | sounds on control / assistant / send / sleep | audio feedback without watching the terminal (macOS sounds; swap for custom) |
-| Quit by voice | ✅ | say "quit Vox" (idle or in a mode) | exits the program; "vox" required so idle speech can't trigger it |
+| Quit by voice | ✅ | say "quit Vox" (idle or in a mode) | exits the program; "vox" required + phonetic variants so idle speech can't trigger it |
+| Switch modes mid-session | ✅ | "Hey Vox" in control / "take control" in assistant | jump between modes without dropping to idle first |
 | Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 
 ## In progress / next

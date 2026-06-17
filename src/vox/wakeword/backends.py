@@ -37,7 +37,8 @@ class WhisperWakeBackend:
             audio = capture_utterance(frames, self._cfg)
             if audio is None:
                 continue
-            label = self.match(self._transcriber.transcribe(audio))
+            text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
+            label = self.match(text)
             if label is not None:
                 return label
 
