@@ -62,6 +62,9 @@ class Config:
     assistant_silence_seconds: float = 1.2  # pause allowed in ASSISTANT mode before it sends
     max_utterance_seconds: float = 8.0
     listen_timeout_seconds: float = 6.0  # assistant mode: give up waiting (control mode keeps listening)
+    # Patient wait while the model tagged its reply [OPEN] (it expects you to respond). This is a
+    # safety cap so Vox can't hang forever — the LLM decides when to wait, not a hand-tuned heuristic.
+    assistant_open_timeout_seconds: float = 20.0
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
 
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
