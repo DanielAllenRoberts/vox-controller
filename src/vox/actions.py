@@ -1,8 +1,10 @@
-"""Deterministic command actions for CONTROL mode: open apps, go to websites."""
+"""Deterministic command actions for CONTROL mode: open apps and go to apps/websites."""
 
 import re
 import subprocess
 import urllib.parse
+
+from vox.config import CONFIG
 
 # Spoken name -> actual macOS app name, where they differ.
 _APP_ALIASES = {
@@ -13,7 +15,7 @@ _APP_ALIASES = {
     "code": "Visual Studio Code",
 }
 
-# Spoken site name -> URL, for "go to ...".
+# Spoken site name -> URL, for website navigation.
 _SITE_ALIASES = {
     "github": "https://github.com",
     "gmail": "https://mail.google.com",
@@ -27,6 +29,9 @@ _SITE_ALIASES = {
     "claude": "https://claude.ai",
 }
 
+# Chromium-family browsers share an AppleScript dictionary for tab creation.
+_CHROMIUM = {"Arc", "Google Chrome", "Brave Browser", "Microsoft Edge", "Chromium"}
+
 
 def handle(text: str) -> str:
     """Interpret a control-mode utterance and act. Returns a human-readable result."""
@@ -34,27 +39,22 @@ def handle(text: str) -> str:
     if intent is None:
         return f"no command matched: {text!r}"
     name, arg = intent
-    if name == "open_app":
-        return _open_app(arg)
-    if name == "go_to":
-        return _go_to(arg)
+    if name == "navigate":
+        return _navigate(arg)
     return f"unknown intent: {name}"
 
 
 def parse(text: str) -> tuple[str, str] | None:
-    """Map an utterance to an (intent, argument) pair, or None. Requires a verb.
+    """Map an utterance to an (intent, argument) pair, or None.
 
-    Uses search (not match) so a leaked wake word — "hey vox, open cursor" — still
-    finds the command.
+    "open X" and "go to X" both navigate — to the app if installed, else a website.
+    Uses search (not match) so a leaked wake word — "hey vox, open cursor" — still works.
     """
     t = text.lower().strip().rstrip(".!?")
-    m = re.search(r"\bopen\s+(?:the\s+)?(?:app\s+)?(.+)", t)
+    m = re.search(r"\b(?:open|go\s*to)\s+(?:the\s+)?(?:app\s+)?(.+)", t)
     if m:
-        app = re.sub(r"\s+app$", "", m.group(1).strip())  # "calculator app" -> "calculator"
-        return ("open_app", app)
-    m = re.search(r"\bgo\s*to\s+(.+)", t)
-    if m:
-        return ("go_to", m.group(1).strip())
+        target = re.sub(r"\s+app$", "", m.group(1).strip())  # "calculator app" -> "calculator"
+        return ("navigate", target)
     return None
 
 
@@ -75,28 +75,43 @@ def resolve_url(target: str) -> tuple[str, bool]:
     return "https://www.google.com/search?q=" + urllib.parse.quote_plus(target), False
 
 
-def _open_app(app: str) -> str:
-    name = resolve_app_name(app)
-    result = subprocess.run(["open", "-a", name], capture_output=True, text=True)
-    if result.returncode == 0:
-        return f"Opening {name}."
-    return f"Couldn't open {name!r} ({result.stderr.strip() or 'not found'})."
-
-
 def _app_exists(name: str) -> bool:
-    """True if an app with this name is installed — resolved via LaunchServices, no launch."""
+    """True if an app with this name is installed — via LaunchServices, no launch."""
     r = subprocess.run(["osascript", "-e", f'id of app "{name}"'], capture_output=True, text=True)
     return r.returncode == 0
 
 
-def _go_to(target: str) -> str:
-    # "go to X": prefer an installed app, else treat X as a website.
+def _browser_tab_script(browser: str, url: str) -> str | None:
+    """AppleScript to open `url` as a new tab in the browser's existing front window."""
+    if browser in _CHROMIUM or browser == "Safari":
+        return (f'tell application "{browser}"\n'
+                f'    activate\n'
+                f'    tell front window to make new tab with properties {{URL:"{url}"}}\n'
+                f'end tell')
+    return None
+
+
+def _open_url(url: str) -> None:
+    """Open a URL as a new tab in the preferred browser; fall back to the default opener.
+
+    (`open <url>` lets the browser pick window-vs-tab — Arc opens a new window — so we
+    drive the browser via AppleScript to get a tab in the existing window.)
+    """
+    script = _browser_tab_script(CONFIG.browser, url)
+    if script:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+    subprocess.run(["open", url], capture_output=True, text=True)
+
+
+def _navigate(target: str) -> str:
     name = resolve_app_name(target)
     if _app_exists(name):
         subprocess.run(["open", "-a", name], capture_output=True, text=True)
         return f"Opening {name}."
     url, confident = resolve_url(target)
-    subprocess.run(["open", url], capture_output=True, text=True)
+    _open_url(url)
     if confident:
         return f"Going to {url}."
     # Low confidence: today we flag it; once the assistant is wired (M4) this is
