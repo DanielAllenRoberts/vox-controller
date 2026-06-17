@@ -23,8 +23,12 @@
 
 | Command | Say | Result |
 |---|---|---|
-| Open / go to | "open <app>", "go to <app or site>" | app if installed, else a **known** site/domain (new browser tab) |
+| Open / go to | "open <app>", "go to <site>", "open a new <site>" | app if installed; known site **reuses an open tab** ("open new" forces a fresh one) |
 | Search | "search <query>", "search for <query>" | web search in your browser |
+| Switch browser tab | "go to my <name> tab" (**fuzzy** — mishears OK), "next/previous tab" | by name is reliable; index ("tab 10") is unreliable in Arc (52 tabs span spaces) |
+| Switch app window | "next window", "switch to my <name> window" | cycles front app's windows (⌘`); can't cross macOS Spaces (needs Accessibility) |
+| Switch desktop/Space | "next desktop", "previous desktop", "go to desktop <n>" | Ctrl+→/← (index needs the macOS shortcut enabled) |
+| Show/hide tabs | "show tabs", "hide tabs", "toggle sidebar" | toggles Arc's sidebar |
 | (anything else) | — | "handing off to the assistant" (no guessing) |
 
 ## Known site aliases (for "go to X")

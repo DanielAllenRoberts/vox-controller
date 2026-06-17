@@ -16,8 +16,12 @@
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
-| Open / go to (app or known site) | ✅ | "open Cursor" / "go to GitHub" | app if installed, else a known site/domain as a **new tab** (Arc/Chrome/Safari…); **unknown → hands off, never guesses** |
+| Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses an open tab** or makes one ("open new" forces a fresh tab); unknown → hands off |
 | Search the web | ✅ | "search <query>" in control mode | explicit web search in your browser |
+| Switch browser tabs | ✅ | "go to my GitHub tab" (fuzzy), "next tab" | by **name** (fuzzy — mishears/partials OK); index is unreliable in Arc (tabs span spaces) |
+| Switch app windows | ✅ | "next window", "switch to my work window" | cycles the frontmost app's windows (⌘`); can't cross macOS Spaces (Accessibility perm) |
+| Switch desktops / Spaces | ✅ | "next desktop", "go to desktop 2" | Ctrl+→/← (index needs "Switch to Desktop N" enabled in macOS) — the cross-Space window fix |
+| Show/hide tab sidebar | ✅ | "show tabs" / "hide tabs" / "toggle sidebar" | toggles Arc's sidebar (⌘S) |
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
 | Unknown command → handoff | ✅ | any unrecognized input | says "handing off to the assistant" — the M4 escalation hook |
 | Mode sound cues | ✅ | sounds on control / assistant / send / sleep | audio feedback without watching the terminal (macOS sounds; swap for custom) |
