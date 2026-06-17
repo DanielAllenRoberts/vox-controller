@@ -3,9 +3,9 @@
 Run:  uv run vox-diagnose              # uses the system default input
       uv run vox-diagnose 3            # test a specific device index
 
-Shows per-channel input level + live wake score, transcribes the capture with
-Whisper, saves it to vox-capture.wav, and sweeps software gain to see whether a
-too-quiet signal is why the wake model isn't firing.
+Shows per-channel input level + live wake score (for the control phrase),
+transcribes the capture with Whisper, saves it to vox-capture.wav, and sweeps
+software gain. Pinpoints permission / wiring / format / wake-model issues.
 """
 
 import sys
@@ -17,6 +17,9 @@ import sounddevice as sd
 from vox.config import CONFIG
 from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.openwakeword_detector import OpenWakeWordDetector
+
+WAKE = CONFIG.control_wake
+SPOKEN = CONFIG.control_spoken
 
 
 def _list_devices() -> None:
@@ -30,12 +33,12 @@ def _list_devices() -> None:
 
 
 def _max_score(audio_int16: np.ndarray) -> float:
-    """Run the wake model over a clip in 80ms frames and return the peak score."""
-    det = OpenWakeWordDetector(CONFIG.wake_word_model, CONFIG.wake_threshold)
+    """Run the wake model over a clip in 80 ms frames and return the peak score."""
+    det = OpenWakeWordDetector([WAKE], CONFIG.wake_threshold)
     step = CONFIG.frame_samples
     best = 0.0
     for i in range(0, len(audio_int16) - step, step):
-        best = max(best, det.score(audio_int16[i:i + step]))
+        best = max(best, det.scores(audio_int16[i:i + step])[WAKE])
     return best
 
 
@@ -49,12 +52,12 @@ def main() -> None:
     print(f"Using input device: {info['name']}  ({label}), capturing {n_ch} channel(s)\n")
 
     print("Loading wake model…")
-    detector = OpenWakeWordDetector(CONFIG.wake_word_model, CONFIG.wake_threshold)
+    detector = OpenWakeWordDetector([WAKE], CONFIG.wake_threshold)
     probe = detector._model.predict(np.zeros(CONFIG.frame_samples, dtype=np.int16))
-    print(f"  score keys = {list(probe.keys())} | looking up '{detector._key}'\n")
+    print(f"  score keys = {list(probe.keys())} | testing '{WAKE}'\n")
 
     seconds = 12
-    print(f'Say "{CONFIG.wake_word_spoken}" a few times — listening {seconds}s.')
+    print(f'Say "{SPOKEN}" a few times — listening {seconds}s.')
     print(f"Per-channel level + wake score (fires at {CONFIG.wake_threshold}).\n")
 
     state = {"rms": np.zeros(n_ch), "score": 0.0}
@@ -67,7 +70,7 @@ def main() -> None:
         rms = np.sqrt(np.mean(indata.astype(np.float32) ** 2, axis=0))
         state["rms"] = rms
         hot = int(np.argmax(rms))
-        state["score"] = detector.score(indata[:, hot].copy())
+        state["score"] = detector.scores(indata[:, hot].copy())[WAKE]
 
     peak_rms = np.zeros(n_ch)
     peak_score = 0.0
@@ -124,8 +127,7 @@ def main() -> None:
         print(f"→ Fires only when boosted (gain x{good}). Your input is quiet — turn up the")
         print(f"  interface gain, or I can apply ~{good}x software gain in capture.")
     else:
-        print("→ Even boosted, 'hey_jarvis' won't match your voice. Better to swap the")
-        print("  built-in word or train the real 'Hey Vox' than keep fighting it.")
+        print("→ Even boosted, the model won't match. Check onnxruntime is <1.21, or retune.")
 
 
 if __name__ == "__main__":

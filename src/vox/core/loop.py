@@ -1,11 +1,13 @@
-"""M0 loop: wait for the wake word, capture an utterance, transcribe, print it.
+"""The Vox daemon: a small state machine over wake phrases.
 
-No actions yet — opening apps and intent parsing arrive in M1+. The components
-(wake word, STT, output) sit behind interfaces so they can be swapped later.
+IDLE listens for activation phrases. The control phrase enters CONTROL mode
+(Dragon-style: transcribe + execute each command until a sleep phrase). The
+assistant phrase enters ASSISTANT mode (one-shot LLM request). See docs/plan/modes.md.
 """
 
 import numpy as np
 
+from vox import actions, assistant
 from vox.audio import MicStream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
@@ -14,25 +16,90 @@ from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.openwakeword_detector import OpenWakeWordDetector
 
 
-def _record_utterance(frames, cfg) -> np.ndarray:
-    """Collect frames after a wake trigger until a short silence or the max cap."""
-    collected: list[np.ndarray] = []
-    silent = 0
-    max_frames = int(cfg.max_utterance_seconds * cfg.sample_rate / cfg.frame_samples)
-    silence_limit = int(cfg.silence_seconds * cfg.sample_rate / cfg.frame_samples)
+def _rms(frame: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
 
-    for _ in range(max_frames):
+
+def _listen_utterance(frames, cfg):
+    """Wait for speech onset, then record until trailing silence.
+
+    Returns an int16 array, or None if no speech arrives within listen_timeout.
+    """
+    sr, fs = cfg.sample_rate, cfg.frame_samples
+    silence_limit = int(cfg.silence_seconds * sr / fs)
+    max_frames = int(cfg.max_utterance_seconds * sr / fs)
+    wait_frames = int(cfg.listen_timeout_seconds * sr / fs)
+
+    waited = 0
+    while True:
+        frame = next(frames)
+        if _rms(frame) >= cfg.speech_rms:
+            break
+        waited += 1
+        if waited >= wait_frames:
+            return None
+
+    collected = [frame]
+    silent = 0
+    while len(collected) < max_frames:
         frame = next(frames)
         collected.append(frame)
-        rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-        if rms < cfg.silence_rms:
+        if _rms(frame) < cfg.speech_rms:
             silent += 1
-            if silent >= silence_limit and len(collected) > silence_limit:
+            if silent >= silence_limit:
                 break
         else:
             silent = 0
+    return np.concatenate(collected)
 
-    return np.concatenate(collected) if collected else np.zeros(0, dtype=np.int16)
+
+def _is_sleep(text: str, cfg) -> bool:
+    t = text.lower()
+    return any(p in t for p in cfg.sleep_phrases)
+
+
+def _transcribe(transcriber, audio, cfg, out) -> str:
+    dur = len(audio) / cfg.sample_rate
+    with Timer() as stt:
+        text = transcriber.transcribe(audio)
+    cpu, mem = process_stats()
+    out.emit(f"  ⏱  audio {dur:.1f}s · stt {stt.seconds:.2f}s "
+             f"(rtf {stt.seconds / max(dur, 0.01):.2f}) · cpu {cpu:.0f}% · mem {mem:.0f}MB")
+    return text
+
+
+def _control_mode(frames, cfg, transcriber, out) -> None:
+    out.emit(f'● CONTROL MODE — commands like "open Safari". Say "{cfg.sleep_spoken}" to stop.')
+    while True:
+        audio = _listen_utterance(frames, cfg)
+        if audio is None:
+            out.emit(f"  (silence for {cfg.listen_timeout_seconds:.0f}s — sleeping)")
+            return
+        text = _transcribe(transcriber, audio, cfg, out)
+        if not text:
+            continue
+        if _is_sleep(text, cfg):
+            out.emit("○ Sleeping.")
+            return
+        out.emit(f"  you: {text!r}")
+        out.emit(f"  → {actions.handle(text)}")
+
+
+def _assistant_mode(frames, cfg, transcriber, out) -> None:
+    out.emit("● ASSISTANT MODE — ask something…")
+    audio = _listen_utterance(frames, cfg)
+    if audio is None:
+        out.emit("  (heard nothing — back to idle)")
+        return
+    text = _transcribe(transcriber, audio, cfg, out)
+    if not text:
+        out.emit("  (heard nothing — back to idle)")
+        return
+    if _is_sleep(text, cfg):
+        out.emit("○ Sleeping.")
+        return
+    out.emit(f"  you: {text!r}")
+    out.emit(f"  → {assistant.respond(text)}")
 
 
 def main() -> None:
@@ -41,28 +108,26 @@ def main() -> None:
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
-        detector = OpenWakeWordDetector(cfg.wake_word_model, cfg.wake_threshold)
+        detector = OpenWakeWordDetector([cfg.control_wake, cfg.assistant_wake], cfg.wake_threshold)
         transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type)
     out.emit(f"Models loaded in {load.seconds:.1f}s.")
 
-    out.emit(f'{cfg.assistant_name} is listening — say "{cfg.wake_word_spoken}", then speak. (Ctrl+C to quit)')
+    idle_msg = (f'Idle. Say "{cfg.control_spoken}" for control, '
+                f'"{cfg.assistant_spoken}" for the assistant. (Ctrl+C to quit)')
+    out.emit(idle_msg)
     try:
         with MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device) as mic:
             frames = mic.frames()
             for frame in frames:
-                if not detector.detect(frame):
+                fired = detector.fired(frame)
+                if fired is None:
                     continue
                 detector.reset()
-                out.emit("→ wake word detected, listening…")
-                audio = _record_utterance(frames, cfg)
-                audio_dur = len(audio) / cfg.sample_rate
-                with Timer() as stt:
-                    text = transcriber.transcribe(audio)
-                cpu, mem = process_stats()
-                out.emit(f"You said: {text!r}" if text else "(heard nothing)")
-                rtf = stt.seconds / max(audio_dur, 0.01)
-                out.emit(f"  ⏱  audio {audio_dur:.1f}s · stt {stt.seconds:.2f}s "
-                         f"(rtf {rtf:.2f}) · cpu {cpu:.0f}% · mem {mem:.0f}MB")
+                if fired == cfg.control_wake:
+                    _control_mode(frames, cfg, transcriber, out)
+                else:
+                    _assistant_mode(frames, cfg, transcriber, out)
+                out.emit(idle_msg)
     except KeyboardInterrupt:
         out.emit("\nStopped.")
 

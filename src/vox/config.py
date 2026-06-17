@@ -1,4 +1,4 @@
-"""Central configuration. Kept as plain values for M0; can move to env/file later."""
+"""Central configuration. Plain values for now; can move to env/file later."""
 
 from dataclasses import dataclass
 
@@ -8,23 +8,33 @@ class Config:
     # Identity
     assistant_name: str = "Vox"
 
-    # Wake word (M0 uses a stock openWakeWord model to prove the loop;
-    # a custom "Hey Vox" model is trained as the follow-up).
-    wake_word_model: str = "hey_jarvis"
-    wake_word_spoken: str = "Hey Jarvis"  # what actually triggers the stock M0 model; → "Hey Vox" after training
+    # --- Activation phrases ---
+    # Placeholder built-in openWakeWord models until custom "Vox" phrases are
+    # trained (then point these at the trained .onnx paths). The daemon listens
+    # for all of them at once.
+    control_wake: str = "hey_jarvis"      # enter CONTROL mode  (placeholder for "Vox, take control")
+    control_spoken: str = "Hey Jarvis"
+    assistant_wake: str = "hey_mycroft"   # enter ASSISTANT mode (placeholder for "Hey Vox")
+    assistant_spoken: str = "Hey Mycroft"
     wake_threshold: float = 0.5
 
-    # Audio capture — openWakeWord expects 16 kHz mono int16, 80 ms frames.
+    # Sleep / deactivate — matched in transcribed text (no model needed; we're
+    # already transcribing once a mode is active).
+    sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep")
+    sleep_spoken: str = "stand down"
+
+    # --- Audio capture --- openWakeWord expects 16 kHz mono int16, 80 ms frames.
     sample_rate: int = 16_000
     frame_samples: int = 1280
-    input_device: int | None = None  # None = system default; set an index shown by `python -m vox.diagnose`
+    input_device: int | None = None  # None = system default; index from `uv run vox-diagnose`
 
-    # Utterance capture (simple energy-based endpointing)
+    # --- Utterance capture (energy-based) ---
+    speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
+    silence_seconds: float = 0.8         # trailing silence that ends an utterance
     max_utterance_seconds: float = 8.0
-    silence_seconds: float = 0.8
-    silence_rms: float = 300.0
+    listen_timeout_seconds: float = 6.0  # give up waiting for speech in a mode
 
-    # Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU.
+    # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
     whisper_model: str = "base.en"
     whisper_compute_type: str = "int8"
 
