@@ -16,8 +16,10 @@
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
-| Dictation (speak-to-type) | ✅ | "start typing" → click a field → speak → "stop typing" | types at your cursor (frontmost app); "backspace"/"new line"/"delete" keywords; Tink/Sosumi start/stop sounds |
-| Assistant chat (LLM) | ✅ | "Hey Vox" → multi-turn chat | **provider-agnostic**: Claude API · DeepSeek/OpenAI-compatible · **Claude Code (Agent SDK/CLI) on your subscription — no API key** — set in `config.py`; keeps conversation context until "stand down" |
+| Dictation (speak-to-type) | ✅ | "Vox start typing" → click a field → speak → "stop typing" | types at your cursor (frontmost app); "backspace"/"new line"/"delete" keywords; Tink/Sosumi start/stop sounds; auto-exits on a long pause (toggle `dictation_exit_on_silence`) |
+| Assistant chat (LLM) | ✅ | "Hey Vox" → multi-turn chat | **provider-agnostic small/big brains**: Claude subscription (SDK/CLI, no key) · Anthropic/OpenAI/DeepSeek API · **local LLM** (Ollama/LM Studio via `llm_base_url`). Small brain answers and defers complex turns to the big brain (`[BIG]`). Keeps context until "stand down". ideas #17 |
+| Big brain / small brain (tiered models) | ✅ | set `small_brain_*` / `big_brain_*` in `config.py` | small = fast/cheap default (e.g. Haiku) for chat + command execution; big = powerful (e.g. Opus on Claude Max) — the small brain emits `[BIG]` to hand complex turns up. Each brain is any provider. ideas #17 |
+| Local / offline LLM | ✅ | brain `provider="openai"` + `llm_base_url="http://localhost:11434/v1"` | run a brain on a local OpenAI-compatible server (Ollama, LM Studio) — a fully offline assistant |
 | Conversation continuation (LLM-judged turn-taking) | ✅ | "Hey Vox", then ask it something open-ended | The model tags each reply **[OPEN]** (expects you to reply) or **[DONE]** (natural close); on [OPEN] Vox waits patiently instead of dropping to idle. No hand-tuned heuristic — a timer remains only as a safety cap. Tag is stripped before display |
 | One-shot command | ✅ | "Vox, open Safari" (from idle) | runs a single command without entering control mode |
 | Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses a tab in your current space** or makes one ("open new" forces fresh); unknown → hands off |
@@ -44,7 +46,7 @@
 | Feature | Status | Milestone / notes |
 |---|---|---|
 | LLM text commands | 🚧 | "write this" / "make this pretty" — compose/clean text via the LLM (builds on chat + dictation) |
-| LLM-as-executor (runs commands, not just explains) | 📋 | give the escalation LLM **gated tools to execute** Vox actions — bridges mis-wording instead of saying "I can't"; ideas #12 |
+| LLM-as-executor (runs commands, not just explains) | 🚧 | control-mode escalation hands the utterance to the **small brain**, which runs the matching Vox action (action-first, quiet cue) instead of saying "I can't". Provider-agnostic — works on your Claude subscription, an API, or a local LLM (no native tool-calling needed). ideas #12 |
 | Action-first / silent success | 💡 | execute with just a sound cue; speak only when ambiguous or asked — seamless; ideas #13 |
 | Self-wiring command learning | 💡 | capture LLM-resolved fallbacks → **learned rules** (instant next time), wired up in the background; ideas #14–15 |
 | Custom **"Vox" phrases** | 🚧 | train models → replace `hey_jarvis`/`hey_mycroft` placeholders (Colab; `wake-word-training.md`) |

@@ -11,7 +11,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from vox import actions, assistant, sounds
+from vox import actions, assistant, executor, sounds
 from vox.audio import MicStream, capture_utterance
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
@@ -92,10 +92,15 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
             out.emit("→ entering dictation…")
             return "dictation"
         out.emit(f"  you: {text!r}")
-        if actions.parse(text) is None:  # unknown command → escalate to the assistant (LLM)
-            out.emit(f"  🔊 {assistant.respond(text)}")
-        else:
+        if actions.parse(text) is not None:
             out.emit(f"  → {actions.handle(text)}")
+        else:  # uncertain → hand to the executor (fast model w/ Vox's tools): it acts, or replies
+            acted, msg = executor.execute(text)
+            if acted:
+                sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
+                out.emit(f"  ⚡ {msg}")
+            else:
+                out.emit(f"  🔊 {msg}")
 
 
 def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
@@ -136,7 +141,9 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
     out.emit('✎ DICTATION — click where you want text, then speak. Say "stop typing" to stop.')
     while True:
         audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
-        if audio is None:  # long pause → auto-exit so it can't get stuck
+        if audio is None:  # long pause
+            if not cfg.dictation_exit_on_silence:
+                continue  # setting: stay in dictation until an explicit "stop typing"
             sounds.play(cfg.sound_dictate_stop)
             out.emit("✎ Stopped typing.")
             return return_to

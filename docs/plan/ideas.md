@@ -146,6 +146,21 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Connects to:** #14 (what gets wired), #12 (executes first), and the learning layer.
 
+## 16. Timers, alarms & reminders (Echo-style, native macOS)
+
+**Vision:** "set a timer for 10 minutes", "remind me to call Sam at 3pm", "set an alarm for 7am" — like an Amazon Echo, but wired into **native Apple apps** so the reminders/alarms live where you already see them. Reminders should also be **spoken back** once Vox has a voice (TTS).
+
+**How it might work (per type):**
+- **Reminders — easy, scriptable now.** Apple's Reminders.app has full AppleScript support: `make new reminder with properties {name:"call Sam", remind me date:date "…"}`. Voice → the brain parses time + text → create the reminder → it fires natively. Spoken readback of due reminders once TTS (M2) lands.
+- **Timers / alarms — Clock.app isn't scriptable**, so use one of:
+  - **macOS Shortcuts** "Start Timer" / "Set Alarm" actions, invoked via `shortcuts run "<name>"` (or URL scheme) — real native Clock integration.
+  - **Vox's own timer** — a background thread that plays a sound (and speaks, once TTS) when it elapses. No native app, but dead simple; only runs while Vox does.
+- **Time parsing:** lean on the small brain to turn "in ten minutes" / "quarter past three" into a concrete datetime — pairs naturally with the executor's translate-to-command approach (#12).
+
+**Depends on / connects to:** TTS (M2) for spoken reminders; the brains/executor (#12, #17) for parsing + dispatch; could surface in the on-screen pet (#7) as a visible countdown.
+
+**Notes:** Reminders is the quick win (scriptable today). Timers via Shortcuts is the cleanest native path; the in-Vox timer is the simplest fallback.
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

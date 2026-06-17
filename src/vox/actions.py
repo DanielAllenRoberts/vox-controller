@@ -74,7 +74,7 @@ def _run(text: str) -> str:
         "window": _window, "window_move": _window_move, "window_index": _window_index,
         "desktop_move": _desktop_move, "desktop_index": _desktop_index,
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
-        "sidebar": _sidebar,
+        "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
     }
     return dispatch.get(name, lambda _: _handoff(text))(arg)
 
@@ -92,6 +92,10 @@ def parse(text: str) -> tuple[str, str] | None:
     # Browser/app: go back (⌘[).
     if re.search(r"\bgo back\b|\bnavigate back\b", t):
         return ("back", "")
+
+    # Close the current tab (⌘W).
+    if re.search(r"\bclose\s+(?:this\s+|the\s+|current\s+)?tabs?\b", t):
+        return ("close_tab", "")
 
     # Show / hide the tab sidebar (Arc).
     m = re.search(r"\b(show|hide|toggle)\s+(?:the\s+)?(?:tabs|sidebar)\b", t)
@@ -424,6 +428,13 @@ def _back(_: str) -> str:
     return "Back." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't go back ({out})")
 
 
+def close_tab() -> str:
+    # Close the current browser tab (⌘W). Activate the browser first so the keystroke lands there.
+    ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
+                   'tell application "System Events" to keystroke "w" using command down')
+    return "Closed the tab." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't close the tab ({out}).")
+
+
 def _app_cycle(app: str) -> str:
     # Click the app's Dock icon — cycles its windows even across Spaces (your manual trick).
     name = resolve_app_name(app)
@@ -515,6 +526,6 @@ def dictate(text: str) -> None:
 
 
 def _handoff(what: str) -> str:
-    # Anything the deterministic layer can't handle. Once the assistant (M4) is wired this
-    # hands off ("did you mean …?"); for now we just say so. See docs/plan/observations.md.
-    return f"Handing off to the assistant (not wired yet): {what!r}"
+    # Anything the deterministic layer can't handle. CONTROL mode escalates this to the
+    # executor / assistant (see core/loop.py); this string is just the fallback wording.
+    return f"Not sure how to do that: {what!r}"
