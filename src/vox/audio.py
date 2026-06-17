@@ -31,6 +31,15 @@ class MicStream:
         while True:
             yield self._queue.get()
 
+    def flush(self) -> None:
+        """Drop buffered frames (e.g. audio captured while Vox was speaking) so the next read
+        starts fresh — stops Vox from hearing and re-processing its own TTS."""
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+
     def __enter__(self) -> "MicStream":
         self._stream.start()
         return self

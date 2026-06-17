@@ -11,7 +11,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from vox import actions, assistant, executor, sounds
+from vox import actions, assistant, executor, sounds, tts
 from vox.audio import MicStream, capture_utterance
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
@@ -73,7 +73,7 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     return text
 
 
-def _control_mode(frames, cfg, transcriber, out) -> None:
+def _control_mode(frames, cfg, transcriber, out, mic) -> None:
     out.emit(f'● CONTROL MODE — e.g. "open Safari" or "go to GitHub". Say "{cfg.sleep_spoken}" to stop.')
     pending = []  # short clarification memory: when the brain asks a question, the next answer gets context
     while True:
@@ -112,14 +112,20 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
                 sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
                 out.emit(f"  ⚡ {msg}")
                 pending = []
-            else:
-                out.emit(f"  🔊 {msg}")
+            elif msg:
+                shown, spoken = assistant.split_say(msg)
+                out.emit(f"  🔊 {shown}")
+                tts.speak(spoken)
+                mic.flush()  # drop our own voice the mic caught while speaking (no self-feedback)
                 # brain asked something → remember this exchange so the next answer has context
-                pending = (pending + [("user", text), ("assistant", msg)])[-4:] \
-                    if msg.rstrip().endswith("?") else []
+                pending = (pending + [("user", text), ("assistant", shown)])[-4:] \
+                    if shown.rstrip().endswith("?") else []
+            else:  # the brain judged it chatter / not meant for Vox → stay silent
+                out.emit("  (ignored — sounded like chatter)")
+                pending = []
 
 
-def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
+def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
     out.emit('● ASSISTANT MODE — chat with me. Say "stand down" when done.')
     history = []
     expecting_answer = False  # set when the model tags its reply [OPEN] → wait patiently for you
@@ -152,8 +158,11 @@ def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
         reply, expecting_answer = assistant.respond_turn(text, history)  # model tags [OPEN]/[DONE]
-        history += [("user", text), ("assistant", reply)]
-        out.emit(f"  🔊 {reply}" + ("  (…your turn)" if expecting_answer else ""))
+        shown, spoken = assistant.split_say(reply)  # brain may pick a shorter spoken version
+        history += [("user", text), ("assistant", shown)]
+        out.emit(f"  🔊 {shown}" + ("  (…your turn)" if expecting_answer else ""))
+        tts.speak(spoken)
+        mic.flush()  # drop our own TTS audio so we don't hear ourselves
 
 
 def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
@@ -221,11 +230,11 @@ def main() -> None:
                 while label in ("control", "assistant", "dictation"):
                     if label == "control":
                         sounds.play(cfg.sound_control)
-                        label = _control_mode(frames, cfg, transcriber, out)
+                        label = _control_mode(frames, cfg, transcriber, out, mic)
                         from_control = label in ("assistant", "dictation")
                     elif label == "assistant":
                         sounds.play(cfg.sound_assistant)
-                        label = _assistant_mode(frames, cfg, transcriber, out,
+                        label = _assistant_mode(frames, cfg, transcriber, out, mic,
                                                 return_to="control" if from_control else None)
                         from_control = False
                     else:  # dictation

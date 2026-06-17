@@ -24,15 +24,23 @@ _SYSTEM = (
     "sums a list'): output  TYPE: <the full finished text to insert>\n"
     "  • Rewrite the text the user has SELECTED (e.g. 'make this pretty', 'fix the spelling', "
     "'make it formal', 'shorten this'): output  EDIT: <the rewrite instruction>\n"
+    "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
+    "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
     "Rules:\n"
+    "• Be autonomous — strongly prefer ACTING over asking. Make a sensible choice and do it; never "
+    "ask for confirmation. Questions slow the user down, so only ask when you genuinely cannot "
+    "proceed without one missing detail you can't infer (e.g. a search with no topic at all).\n"
     "• If it maps to a command, output just that command line (e.g. close tab).\n"
     "• For TYPE, write the actual finished text (no preamble, no quotes). For EDIT, give only the "
     "instruction — the selected text is fetched and rewritten in a separate step.\n"
-    "• If a command is missing one needed detail (e.g. a search with no query), ask for it: "
-    "CHAT: <short question>\n"
-    "• If it's a question or can't be done as a command, output: CHAT: <one short spoken sentence>\n"
+    "• To ask (rarely): CHAT: <short question>. For a real question or something you truly can't "
+    "do: CHAT: <one short spoken sentence>.\n"
+    "• Only when you're CONFIDENT it's background talk NOT addressed to Vox (overheard "
+    "conversation, third-person speech with no request for you) output exactly: IGNORE. A question "
+    "— or anything that might be meant for you — is NOT chatter; answer or do it. When unsure, do "
+    "NOT ignore.\n"
     "• Earlier turns may be shown for context (e.g. your own question + the user's answer) — use them.\n"
-    "• Transcripts may be garbled — infer intent. Output only the command / TYPE / EDIT / CHAT line."
+    "• Transcripts may be garbled — infer intent. Output only the command / TYPE / EDIT / CHAT / IGNORE line."
 )
 
 _EDIT_SYSTEM = (
@@ -63,6 +71,8 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     if not raw:
         return False, assistant.respond(text, history)
     upper = raw.upper()
+    if upper.startswith("IGNORE"):  # background chatter / not meant for Vox → stay silent
+        return False, ""
     if upper.startswith("CHAT:"):
         return False, raw.split(":", 1)[1].strip() or assistant.respond(text, history)
     if upper.startswith("TYPE:"):
@@ -70,6 +80,15 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     if upper.startswith("EDIT:"):
         instruction = raw.split(":", 1)[1].strip()
         return True, actions.edit_selection(lambda sel: _rewrite(sel, instruction))
+    if upper.startswith("LOOK:"):
+        if not CONFIG.screen_vision_enabled:
+            return False, "Screen vision is turned off."
+        question = raw.split(":", 1)[1].strip() or "What is on the screen?"
+        path = actions.capture_screen()
+        if not path:
+            return False, ("I couldn't capture the screen — enable Screen Recording for your "
+                           "terminal in System Settings → Privacy & Security.")
+        return False, assistant.look(question, path, brain="big")  # screen-reading needs the sharper eye
 
     command = raw.splitlines()[0].strip().strip('"').rstrip(".")
     if actions.parse(command) is None:
