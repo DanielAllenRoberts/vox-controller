@@ -2,7 +2,7 @@
 
 > How Vox switches between doing-what-you-say and talking-to-an-LLM, and which wake/sleep phrases we need to train to make that happen.
 >
-> **Status:** implemented in v1 with **placeholder** built-in wake words (`hey_jarvis` = control, `hey_mycroft` = assistant) and text-matched sleep ("stand down"). Custom "Vox" phrases swap in after training. Assistant mode's LLM call is stubbed until M4.
+> **Status:** implemented. Default wake backend is **Whisper-wake** (no training) — real phrases work now: **"take control"** → control, **"Hey Vox"** → assistant, **"stand down"** → sleep. A trained **openWakeWord** backend is selectable via `config.wake_backend` (the efficient path, once models are trained). Assistant mode's LLM call is stubbed until M4.
 
 ## The key insight
 

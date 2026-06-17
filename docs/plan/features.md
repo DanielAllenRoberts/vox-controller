@@ -8,14 +8,14 @@
 
 | Feature | Status | How to see it | Notes |
 |---|---|---|---|
-| Wake-word detection | ✅ | `uv run vox` → say **"Hey Jarvis"** | openWakeWord, stock `hey_jarvis` model |
+| Wake detection (pluggable) | ✅ | `uv run vox` → say **"take control"** or **"Hey Vox"** | **Whisper-wake** default (no training, any phrase); openWakeWord backend optional via `wake_backend` |
 | Local speech-to-text | ✅ | spoken words print after the wake word | faster-whisper `base.en`, on-device, **no API / no key** |
 | Mic + wake diagnostic | ✅ | `uv run vox-diagnose` | live per-channel level, wake score, Whisper readback, gain sweep |
 | Selectable input device | ✅ | `config.py: input_device` / `vox-diagnose <n>` | handles multi-device / interface setups |
 | Modular components | ✅ | architecture | wakeword / stt / io behind swappable interfaces |
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
-| Control mode (Dragon-style) | ✅ | say the control phrase, then commands | continuous; exits on sleep phrase or silence timeout |
+| Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
 | Open apps by voice | ✅ | "open Safari" in control mode | first real action (was M1) |
 | Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 

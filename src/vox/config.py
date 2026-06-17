@@ -18,6 +18,14 @@ class Config:
     assistant_spoken: str = "Hey Mycroft"
     wake_threshold: float = 0.5
 
+    # Wake backend: "whisper" = no training, matches phrases in transcribed speech
+    # (any phrase, incl. custom names); "openwakeword" = trained per-phrase models.
+    wake_backend: str = "whisper"
+    # Whisper-wake activation phrases (substring-matched in the lowercased transcript).
+    # "Vox" is uncommon, so include phonetic variants Whisper may produce.
+    control_phrases: tuple[str, ...] = ("take control", "control mode", "start control")
+    assistant_phrases: tuple[str, ...] = ("hey vox", "hey vaux", "hey vocks", "a vox", "hey fox", "hey box")
+
     # Sleep / deactivate — matched in transcribed text (no model needed; we're
     # already transcribing once a mode is active).
     sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep")
