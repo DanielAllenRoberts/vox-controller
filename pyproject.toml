@@ -9,10 +9,15 @@ dependencies = [
     "sounddevice>=0.4.6",
     "openwakeword>=0.6.0",
     "faster-whisper>=1.0.0",
+    # openWakeWord's bundled feature models silently return 0.0 scores on
+    # onnxruntime >= ~1.21 (verified: 1.27 -> 0.000, 1.20.1 -> 0.999 on the
+    # same audio). Pin to a known-good range until openWakeWord catches up.
+    "onnxruntime>=1.17,<1.21",
 ]
 
 [project.scripts]
 vox = "vox.core.loop:main"
+vox-diagnose = "vox.diagnose:main"
 
 # macOS-only project — restrict universal resolution to darwin so Linux-only
 # transitive deps (e.g. openWakeWord's tflite-runtime) don't block resolution.

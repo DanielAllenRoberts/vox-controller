@@ -17,6 +17,7 @@ class Config:
     # Audio capture — openWakeWord expects 16 kHz mono int16, 80 ms frames.
     sample_rate: int = 16_000
     frame_samples: int = 1280
+    input_device: int | None = None  # None = system default; set an index shown by `python -m vox.diagnose`
 
     # Utterance capture (simple energy-based endpointing)
     max_utterance_seconds: float = 8.0
