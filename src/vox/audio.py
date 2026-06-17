@@ -1,6 +1,7 @@
 """Microphone capture. Yields fixed-size int16 frames from the default input device."""
 
 import queue
+from collections import deque
 
 import numpy as np
 import sounddevice as sd
@@ -37,3 +38,41 @@ class MicStream:
     def __exit__(self, *exc) -> None:
         self._stream.stop()
         self._stream.close()
+
+
+def rms(frame: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+
+
+def capture_utterance(frames, cfg):
+    """Wait for speech onset (keeping a short pre-roll), then record until trailing
+    silence. Returns int16 audio, or None if no speech arrives within listen_timeout.
+    """
+    sr, fs = cfg.sample_rate, cfg.frame_samples
+    silence_limit = int(cfg.silence_seconds * sr / fs)
+    max_frames = int(cfg.max_utterance_seconds * sr / fs)
+    wait_frames = int(cfg.listen_timeout_seconds * sr / fs)
+
+    pre_roll = deque(maxlen=cfg.preroll_frames)
+    waited = 0
+    while True:
+        frame = next(frames)
+        if rms(frame) >= cfg.speech_rms:
+            break
+        pre_roll.append(frame)
+        waited += 1
+        if waited >= wait_frames:
+            return None
+
+    collected = list(pre_roll) + [frame]
+    silent = 0
+    while len(collected) < max_frames:
+        frame = next(frames)
+        collected.append(frame)
+        if rms(frame) < cfg.speech_rms:
+            silent += 1
+            if silent >= silence_limit:
+                break
+        else:
+            silent = 0
+    return np.concatenate(collected)

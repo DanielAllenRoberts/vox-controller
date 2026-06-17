@@ -1,19 +1,14 @@
-"""Wake-word detector interface. Implementations are swappable behind this Protocol."""
+"""Wake backend interface — pluggable wake-word detection. See vox/wakeword/backends.py."""
 
 from typing import Protocol
 
-import numpy as np
 
+class WakeBackend(Protocol):
+    prompt: str  # human-readable hint of what to say, shown when idle
 
-class WakeWordDetector(Protocol):
-    def fired(self, frame: np.ndarray) -> str | None:
-        """Return the name of the phrase that fired on this frame, or None."""
-        ...
+    def listen(self, frames) -> str:
+        """Block, pulling audio frames, until an activation phrase fires.
 
-    def scores(self, frame: np.ndarray) -> dict[str, float]:
-        """Return the confidence score for each loaded phrase."""
-        ...
-
-    def reset(self) -> None:
-        """Clear internal state after a trigger."""
+        Return a logical label such as 'control' or 'assistant'.
+        """
         ...
