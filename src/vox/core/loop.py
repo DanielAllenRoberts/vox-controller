@@ -20,10 +20,10 @@ def _is_sleep(text: str, cfg) -> bool:
     return any(p in t for p in cfg.sleep_phrases)
 
 
-def _transcribe(transcriber, audio, cfg, out) -> str:
+def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
-        text = transcriber.transcribe(audio)
+        text = transcriber.transcribe(audio, hotwords=hotwords)
     cpu, mem = process_stats()
     out.emit(f"  ⏱  audio {dur:.1f}s · stt {stt.seconds:.2f}s "
              f"(rtf {stt.seconds / max(dur, 0.01):.2f}) · cpu {cpu:.0f}% · mem {mem:.0f}MB")
@@ -36,7 +36,7 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
         audio = capture_utterance(frames, cfg)
         if audio is None:
             continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
-        text = _transcribe(transcriber, audio, cfg, out)
+        text = _transcribe(transcriber, audio, cfg, out, hotwords=cfg.command_hotwords)
         if not text:
             continue
         if _is_sleep(text, cfg):

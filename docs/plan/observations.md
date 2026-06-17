@@ -10,7 +10,7 @@
   2. The command layer guesses `.com` for any unknown single word with **no notion of confidence**.
 - **Solution A — reduce the mis-hear (bias the STT):** feed Whisper an `initial_prompt` / `hotwords` of our command verbs + the user's installed app names (Cursor, Arc, Safari…). Whisper then favours known terms, so "Cursor" beats "Casa". Cheap, attacks the root cause. *(Not yet implemented.)*
 - **Solution B — recover from uncertainty (escalate):** when the deterministic layer can't *confidently* resolve a target, **hand off to the assistant** instead of guessing. The assistant — knowing installed apps, common targets, and habits — reasons "‘Casa' isn't a known site… did you mean *Cursor*?" and confirms/corrects. The OpenClaw-style intelligent fallback.
-- **Status:** interim — `go to` now **flags low-confidence guesses** in its output (the escalation hook). Full escalation lands with **M4** (LLM behind the assistant); STT biasing can come sooner.
+- **Status:** ✅ improved (2026-06-17). Navigation now acts **only on known targets** (app / known site / real domain) — unknowns **hand off** instead of guessing (no more accidental `casa.com`, no googling your narration). Added explicit **"search X"**. And **hotword biasing** nudges STT toward "Cursor"/"Arc" over "Casa". Full LLM escalation still lands with **M4**.
 
 ## The principle this points to
 

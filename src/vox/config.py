@@ -50,6 +50,13 @@ class Config:
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
     whisper_model: str = "base.en"
     whisper_compute_type: str = "int8"
+    # Bias CONTROL-mode recognition toward command vocabulary + app names so
+    # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
+    command_hotwords: str = (
+        "open go to search stand down take control "
+        "cursor arc safari chrome github youtube gmail spotify notion "
+        "calculator terminal finder notes slack figma"
+    )
 
 
 CONFIG = Config()
