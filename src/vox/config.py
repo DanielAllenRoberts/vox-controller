@@ -45,6 +45,9 @@ class Config:
     # Restart the running process (re-exec — picks up code changes) by voice.
     restart_phrases: tuple[str, ...] = ("restart vox", "reboot vox", "restart yourself")
 
+    # Enter DICTATION (speak-to-type at the cursor) from control mode.
+    dictate_phrases: tuple[str, ...] = ("start typing", "start dictation", "begin typing", "dictate")
+
     # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
     log_file: str = "vox.log"
 
@@ -79,6 +82,8 @@ class Config:
     sound_assistant: str = "/System/Library/Sounds/Glass.aiff"   # entered assistant mode (listening)
     sound_send: str = "/System/Library/Sounds/Pop.aiff"          # assistant prompt captured / sent to the AI
     sound_sleep: str = "/System/Library/Sounds/Bottle.aiff"      # back to idle (stand down)
+    sound_dictate_start: str = "/System/Library/Sounds/Tink.aiff"    # started dictation (typing)
+    sound_dictate_stop: str = "/System/Library/Sounds/Sosumi.aiff"   # stopped dictation
 
 
 CONFIG = Config()

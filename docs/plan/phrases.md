@@ -34,6 +34,7 @@
 | Switch Arc profile | "profile <n>", "next/previous profile" | Ctrl+<n> (absolute) or ⌘⌥←→ (relative) |
 | Chain commands | "<cmd> and <cmd>" — e.g. "open Arc and search this" | runs both (only when both parse) |
 | Show/hide tabs | "show tabs", "hide tabs", "toggle sidebar" | toggles Arc's sidebar |
+| Dictation | "start typing" → speak → "stop typing" | types what you say at the cursor; edit words: "backspace", "new line", "delete that", "tab key" |
 | (anything else) | — | "handing off to the assistant" (no guessing) |
 
 ## Known site aliases (for "go to X")

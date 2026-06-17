@@ -51,6 +51,11 @@ def _is_control(text: str, cfg) -> bool:
     return any(p in t for p in cfg.control_phrases)
 
 
+def _is_dictate(text: str, cfg) -> bool:
+    t = normalize(text)
+    return any(p in t for p in cfg.dictate_phrases)
+
+
 def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
@@ -81,6 +86,9 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
         if _is_assistant(text, cfg):
             out.emit("→ switching to assistant…")
             return "assistant"
+        if _is_dictate(text, cfg):
+            out.emit("→ entering dictation…")
+            return "dictation"
         out.emit(f"  you: {text!r}")
         out.emit(f"  → {actions.handle(text)}")
 
@@ -112,6 +120,28 @@ def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
     return return_to
 
 
+def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
+    sounds.play(cfg.sound_dictate_start)
+    out.emit('✎ DICTATION — click where you want text, then speak. Say "stop typing" to stop.')
+    while True:
+        audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
+        if audio is None:
+            continue
+        text = _transcribe(transcriber, audio, cfg, out)
+        if not text:
+            continue
+        if _is_quit(text, cfg):
+            raise _Quit
+        if _is_restart(text, cfg):
+            raise _Restart
+        if "stop typing" in normalize(text) or _is_sleep(text, cfg):
+            sounds.play(cfg.sound_dictate_stop)
+            out.emit("✎ Stopped typing.")
+            return return_to
+        actions.dictate(text)
+        out.emit(f"  typed: {text!r}")
+
+
 def main() -> None:
     cfg = CONFIG
     out = ConsoleOutput(cfg.log_file)
@@ -137,14 +167,18 @@ def main() -> None:
                 # without dropping to idle. If the assistant was reached *from* control,
                 # it returns to control when done (instead of idling).
                 from_control = False
-                while label in ("control", "assistant"):
+                while label in ("control", "assistant", "dictation"):
                     if label == "control":
                         sounds.play(cfg.sound_control)
                         label = _control_mode(frames, cfg, transcriber, out)
-                        from_control = label == "assistant"
-                    else:
+                        from_control = label in ("assistant", "dictation")
+                    elif label == "assistant":
                         sounds.play(cfg.sound_assistant)
                         label = _assistant_mode(frames, cfg, transcriber, out,
+                                                return_to="control" if from_control else None)
+                        from_control = False
+                    else:  # dictation
+                        label = _dictation_mode(frames, cfg, transcriber, out,
                                                 return_to="control" if from_control else None)
                         from_control = False
                 out.emit(idle_msg)
