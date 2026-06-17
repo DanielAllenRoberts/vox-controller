@@ -14,13 +14,18 @@
 | Selectable input device | ✅ | `config.py: input_device` / `vox-diagnose <n>` | handles multi-device / interface setups |
 | Modular components | ✅ | architecture | wakeword / stt / io behind swappable interfaces |
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
+| Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
+| Control mode (Dragon-style) | ✅ | say the control phrase, then commands | continuous; exits on sleep phrase or silence timeout |
+| Open apps by voice | ✅ | "open Safari" in control mode | first real action (was M1) |
+| Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 
 ## In progress / next
 
 | Feature | Status | Milestone / notes |
 |---|---|---|
-| Custom **"Hey Vox"** wake word | 🚧 | train model → replace `hey_jarvis` (Colab; runbook in `wake-word-training.md`) |
-| Open apps by voice | 📋 | **M1** — first real action ("open Safari") |
+| Assistant mode (LLM) | 🚧 | state + speech capture done; LLM wiring is **M4** (stubbed for now) |
+| Custom **"Vox" phrases** | 🚧 | train models → replace `hey_jarvis`/`hey_mycroft` placeholders (Colab; `wake-word-training.md`) |
+| User-chosen assistant name | 💡 | let users name it & reference that name — later feature |
 | Package power in watts | 💡 | opt-in `powermetrics` reader (needs sudo) — later |
 
 ## Planned (from roadmap)

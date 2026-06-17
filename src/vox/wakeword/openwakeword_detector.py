@@ -1,4 +1,8 @@
-"""openWakeWord-backed detector. Open source, so we can adapt/contribute upstream."""
+"""openWakeWord-backed detector. Open source, so we can adapt/contribute upstream.
+
+Loads one or more phrase models (built-in names or .onnx paths) and scores them
+all per frame; `fired()` reports which phrase, if any, crossed the threshold.
+"""
 
 import os
 
@@ -8,21 +12,26 @@ from openwakeword.model import Model
 
 
 class OpenWakeWordDetector:
-    def __init__(self, model_name: str, threshold: float):
-        # Idempotent: downloads the feature extractors + named model on first run.
-        openwakeword.utils.download_models([model_name])
-        self._model = Model(wakeword_models=[model_name], inference_framework="onnx")
-        # openWakeWord keys predictions by basename-without-extension when given a
-        # file path, or by the name itself for built-ins — match both.
-        self._key = os.path.splitext(os.path.basename(model_name))[0]
+    def __init__(self, models: list[str], threshold: float):
+        # Map each identifier to openWakeWord's predict-dict key (basename without
+        # extension) BEFORE constructing Model — Model() mutates the list it is given
+        # (resolving names to versioned file paths), which would corrupt our keys.
+        self._keys = {m: os.path.splitext(os.path.basename(m))[0] for m in models}
+        for m in models:
+            openwakeword.utils.download_models([m])  # idempotent; no-op for custom paths
+        self._model = Model(wakeword_models=list(models), inference_framework="onnx")
         self._threshold = threshold
 
-    def score(self, frame: np.ndarray) -> float:
-        """Wake-word confidence for this frame, in [0, 1]."""
-        return float(self._model.predict(frame).get(self._key, 0.0))
+    def scores(self, frame: np.ndarray) -> dict[str, float]:
+        preds = self._model.predict(frame)
+        return {m: float(preds.get(k, 0.0)) for m, k in self._keys.items()}
 
-    def detect(self, frame: np.ndarray) -> bool:
-        return self.score(frame) >= self._threshold
+    def fired(self, frame: np.ndarray) -> str | None:
+        scores = self.scores(frame)
+        if not scores:
+            return None
+        best = max(scores, key=scores.get)
+        return best if scores[best] >= self._threshold else None
 
     def reset(self) -> None:
         reset = getattr(self._model, "reset", None)

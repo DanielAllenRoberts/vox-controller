@@ -1,6 +1,8 @@
 # Vox — Modes & Activation Design
 
-> How Vox switches between doing-what-you-say and talking-to-an-LLM, and which wake/sleep phrases we need to train to make that happen. Design in progress — phrases and behaviours below are proposals to lock down.
+> How Vox switches between doing-what-you-say and talking-to-an-LLM, and which wake/sleep phrases we need to train to make that happen.
+>
+> **Status:** implemented in v1 with **placeholder** built-in wake words (`hey_jarvis` = control, `hey_mycroft` = assistant) and text-matched sleep ("stand down"). Custom "Vox" phrases swap in after training. Assistant mode's LLM call is stubbed until M4.
 
 ## The key insight
 

@@ -20,6 +20,7 @@ Wake word (the assistant's name) → start listening → Whisper transcribes →
 ### M1 — Basic action execution
 Map simple intents to host actions. First action: **open an app** ("open Safari").
 - **Verify:** "open Safari" actually launches Safari; an unknown app fails gracefully.
+- **Status:** ✅ built (2026-06-17). Done as part of the mode state machine — `open <app>` runs in Control mode. Multi-phrase detection, parser, sleep, capture all verified offline; pending a live mic spin.
 
 ### M2 — Voice output (TTS)
 Give the assistant a voice; speak confirmations/responses.
