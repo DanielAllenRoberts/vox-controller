@@ -92,7 +92,10 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
             out.emit("→ entering dictation…")
             return "dictation"
         out.emit(f"  you: {text!r}")
-        out.emit(f"  → {actions.handle(text)}")
+        if actions.parse(text) is None:  # unknown command → escalate to the assistant (LLM)
+            out.emit(f"  🔊 {assistant.respond(text)}")
+        else:
+            out.emit(f"  → {actions.handle(text)}")
 
 
 def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
@@ -129,8 +132,10 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
     out.emit('✎ DICTATION — click where you want text, then speak. Say "stop typing" to stop.')
     while True:
         audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
-        if audio is None:
-            continue
+        if audio is None:  # long pause → auto-exit so it can't get stuck
+            sounds.play(cfg.sound_dictate_stop)
+            out.emit("✎ Stopped typing.")
+            return return_to
         text = _transcribe(transcriber, audio, cfg, out)
         if not text:
             continue
@@ -170,6 +175,7 @@ def main() -> None:
                     raise _Restart
                 if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
                     cmd = label[3:]
+                    sounds.play(cfg.sound_oneshot)  # quick "got it" cue
                     out.emit(f"⚡ {cmd!r} → {actions.handle(cmd)}")
                     out.emit(idle_msg)
                     continue
