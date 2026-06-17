@@ -31,7 +31,7 @@ def _transcribe(transcriber, audio, cfg, out) -> str:
 
 
 def _control_mode(frames, cfg, transcriber, out) -> None:
-    out.emit(f'● CONTROL MODE — commands like "open Safari". Say "{cfg.sleep_spoken}" to stop.')
+    out.emit(f'● CONTROL MODE — e.g. "open Safari" or "go to GitHub". Say "{cfg.sleep_spoken}" to stop.')
     while True:
         audio = capture_utterance(frames, cfg)
         if audio is None:

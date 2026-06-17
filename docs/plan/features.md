@@ -16,7 +16,8 @@
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
-| Open apps by voice | ✅ | "open Safari" in control mode | first real action (was M1) |
+| Open apps by voice | ✅ | "open Safari" in control mode | first real action (was M1); app-name aliases |
+| Go to (app or website) | ✅ | "go to Cursor" or "go to GitHub" | opens the app if installed, else the website (aliases + .com guess + search) |
 | Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 
 ## In progress / next
