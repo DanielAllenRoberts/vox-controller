@@ -21,6 +21,8 @@ Local-first · provider-agnostic · modular · privacy-conscious.
 - [`docs/plan/features.md`](docs/plan/features.md) — living feature registry: what works, what's planned, how to demo each.
 - [`docs/plan/modes.md`](docs/plan/modes.md) — control vs assistant modes + the wake/sleep phrases to train.
 - [`docs/plan/wake-word-training.md`](docs/plan/wake-word-training.md) — how to train a custom wake word.
+- [`docs/plan/observations.md`](docs/plan/observations.md) — running log of edge cases & ideas found while using Vox.
+- [`docs/plan/ideas.md`](docs/plan/ideas.md) — idea parking lot: bigger future directions (gaze input, coding/handoff mode, Claude-CLI voice callback).
 
 ## Project layout
 
