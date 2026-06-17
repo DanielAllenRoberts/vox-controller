@@ -62,15 +62,17 @@ def resolve_app_name(app: str) -> str:
     return _APP_ALIASES.get(app.lower().strip(), app.title())
 
 
-def resolve_url(target: str) -> str:
+def resolve_url(target: str) -> tuple[str, bool]:
+    """Return (url, confident). `confident` is False when we're only guessing — the
+    hook where a low-confidence target should later escalate to the assistant."""
     t = target.lower().strip().rstrip("/")
     if t in _SITE_ALIASES:
-        return _SITE_ALIASES[t]
+        return _SITE_ALIASES[t], True
     if "." in t:  # already looks like a domain
-        return t if t.startswith("http") else f"https://{t}"
-    if " " not in t:  # single word -> best-guess .com
-        return f"https://{t}.com"
-    return "https://www.google.com/search?q=" + urllib.parse.quote_plus(target)
+        return (t if t.startswith("http") else f"https://{t}"), True
+    if " " not in t:  # single word -> best-guess .com (a guess)
+        return f"https://{t}.com", False
+    return "https://www.google.com/search?q=" + urllib.parse.quote_plus(target), False
 
 
 def _open_app(app: str) -> str:
@@ -93,6 +95,10 @@ def _go_to(target: str) -> str:
     if _app_exists(name):
         subprocess.run(["open", "-a", name], capture_output=True, text=True)
         return f"Opening {name}."
-    url = resolve_url(target)
+    url, confident = resolve_url(target)
     subprocess.run(["open", url], capture_output=True, text=True)
-    return f"Going to {url}."
+    if confident:
+        return f"Going to {url}."
+    # Low confidence: today we flag it; once the assistant is wired (M4) this is
+    # where we hand off ("did you mean …?"). See docs/plan/observations.md.
+    return f'Going to {url} — but I wasn\'t sure; say "open <name>" if I misheard.'
