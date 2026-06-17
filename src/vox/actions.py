@@ -52,16 +52,28 @@ def _to_index(word: str) -> int | None:
 
 
 def handle(text: str) -> str:
-    """Interpret a control-mode utterance and act. Returns a human-readable result."""
+    """Interpret a control-mode utterance and act. Returns a human-readable result.
+
+    Chains "<cmd> and <cmd>" into two commands, but only when *both* halves parse
+    (so "search cats and dogs" isn't split).
+    """
+    parts = re.split(r"\s+and\s+", text.strip())
+    if len(parts) > 1 and all(parse(p) for p in parts):
+        return "  ·  ".join(_run(p) for p in parts)
+    return _run(text)
+
+
+def _run(text: str) -> str:
     intent = parse(text)
     if intent is None:
         return _handoff(text)
     name, arg = intent
     dispatch = {
-        "navigate": _navigate, "navigate_new": _navigate_new, "search": _search,
-        "tab": _tab, "tab_move": _tab_move, "tab_index": _tab_index,
+        "navigate": _navigate, "navigate_new": _navigate_new, "search": _search, "back": _back,
+        "tab": _tab, "tab_arrow": _tab_arrow, "tab_index": _tab_index,
         "window": _window, "window_move": _window_move, "window_index": _window_index,
         "desktop_move": _desktop_move, "desktop_index": _desktop_index,
+        "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar,
     }
     return dispatch.get(name, lambda _: _handoff(text))(arg)
@@ -71,15 +83,37 @@ def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None."""
     t = text.lower().strip().rstrip(".!?")
 
+    # Open a NEW tab (force fresh) — first, so "open a new youtube tab" isn't read as a switch.
+    m = re.search(r"\b(?:open|go\s*to)\s+(?:a\s+)?new\s+(.+)", t)
+    if m:
+        tgt = re.sub(r"^(?:the\s+)?", "", m.group(1).strip())
+        return ("navigate_new", re.sub(r"\s+(?:tab|app)$", "", tgt))
+
+    # Browser/app: go back (⌘[).
+    if re.search(r"\bgo back\b|\bnavigate back\b", t):
+        return ("back", "")
+
     # Show / hide the tab sidebar (Arc).
     m = re.search(r"\b(show|hide|toggle)\s+(?:the\s+)?(?:tabs|sidebar)\b", t)
     if m:
         return ("sidebar", m.group(1))
 
-    # Tab: relative (next/previous).
+    # Tab: jump to top/bottom of the current profile's tabs.
+    if re.search(r"\b(?:top|first)\s+tab\b|\bto\s+(?:the\s+)?top\b", t):
+        return ("tab_arrow", "up:30")
+    if re.search(r"\b(?:bottom|last)\s+tab\b|\bto\s+(?:the\s+)?bottom\b", t):
+        return ("tab_arrow", "down:30")
+    # Tab: relative movement (Arc sidebar vertical → ⌘⌥up/down; stays in your profile).
+    m = re.search(r"\btab\s+(up|down)\b", t)  # "tab up", "tab down"
+    if m:
+        return ("tab_arrow", f"{m.group(1)}:1")
+    m = re.search(r"\b(?:move\s+|go\s+)?(up|down)\s+(?:(\w+)\s+)?tabs?\b", t)
+    if m:
+        n = _to_index(m.group(2)) if m.group(2) else 1
+        return ("tab_arrow", f"{m.group(1)}:{n or 1}")
     m = re.search(r"\b(next|previous|prev)\s+tab\b", t)
     if m:
-        return ("tab_move", m.group(1))
+        return ("tab_arrow", "down:1" if m.group(1) == "next" else "up:1")
     # Tab: absolute — "last tab", "first tab", "tab 10", "the tenth tab".
     m = (re.search(r"\b(last|first)\s+tab\b", t)
          or re.search(r"\btab\s+(?:number\s+)?(\w+)\b", t)
@@ -109,18 +143,34 @@ def parse(text: str) -> tuple[str, str] | None:
     if m:
         return ("window", m.group(1).strip())
 
-    # Desktop / Space switching (macOS Mission Control).
-    m = re.search(r"\b(next|previous|prev)\s+desktop\b", t)
+    # Desktop / Space switching (macOS Mission Control). Synonyms: desktop / space / screen,
+    # plus "swipe left/right" (easier to say than "next desktop").
+    m = re.search(r"\bswipe\s+(left|right)\b", t)
+    if m:
+        return ("desktop_move", "next" if m.group(1) == "right" else "previous")
+    m = re.search(r"\b(next|previous|prev)\s+(?:desktop|space|screen)\b", t)
     if m:
         return ("desktop_move", "next" if m.group(1) == "next" else "previous")
-    m = (re.search(r"\bdesktop\s+(?:number\s+)?(\w+)\b", t)
-         or re.search(r"\b(?:go to|switch to|open)\s+(?:the\s+)?(\w+)\s+desktop\b", t))
+    m = (re.search(r"\b(?:desktop|space|screen)\s+(?:number\s+)?(\w+)\b", t)
+         or re.search(r"\b(?:go to|switch to|open)\s+(?:the\s+)?(\w+)\s+(?:desktop|space|screen)\b", t))
     if m and _to_index(m.group(1)) is not None:
         return ("desktop_index", str(_to_index(m.group(1))))
-    # Open a NEW tab (force a fresh tab even if one is already open).
-    m = re.search(r"\b(?:open|go\s*to)\s+(?:a\s+)?new\s+(?:the\s+)?(?:app\s+)?(.+)", t)
+    # Arc profile switching — relative (⌘⌥←/→) or absolute (Ctrl+<n>).
+    m = re.search(r"\b(next|previous|prev)\s+profile\b", t)
     if m:
-        return ("navigate_new", re.sub(r"\s+app$", "", m.group(1).strip()))
+        return ("profile_move", "next" if m.group(1) == "next" else "previous")
+    m = (re.search(r"\bprofile\s+(?:number\s+)?(\w+)\b", t)
+         or re.search(r"\b(?:go to|switch to|open)\s+(?:the\s+)?(\w+)\s+profile\b", t))
+    if m and _to_index(m.group(1)) is not None:
+        return ("profile", str(_to_index(m.group(1))))
+    # Cycle a specific app's windows across Spaces (simulated Dock-click) — "cursor
+    # window", "next cursor window", "cursor space", "switch cursor".
+    m = re.search(r"\b(?:next\s+)?([a-z][a-z ]*?)\s+(?:window|space|screen)\b", t)
+    if m and m.group(1).strip() not in ("the", "my", "a", "this", "next"):
+        return ("app_cycle", m.group(1).strip())
+    m = re.search(r"\b(?:switch|cycle|toggle)\s+(?:to\s+)?([a-z][a-z ]+)", t)
+    if m:
+        return ("app_cycle", m.group(1).strip())
     # Open / go to (app or known site).
     m = re.search(r"\b(?:open|go\s*to)\s+(?:the\s+)?(?:app\s+)?(.+)", t)
     if m:
@@ -177,11 +227,8 @@ def _navigate(target: str, force_new: bool = False) -> str:
         return f"Opening {name}."
     url = known_url(target)
     if url:
-        if not force_new:
-            i = _find_tab_for_url(url)
-            if i is not None:
-                _select_tab(CONFIG.browser, i + 1)
-                return f"Switched to existing {target} tab."
+        if not force_new and _reuse_tab(url):
+            return f"Switched to existing {target} tab."
         _open_url(url)
         return f"New {target} tab." if force_new else f"Going to {url}."
     return _handoff(target)
@@ -191,12 +238,34 @@ def _navigate_new(target: str) -> str:
     return _navigate(target, force_new=True)
 
 
-def _find_tab_for_url(url: str) -> int | None:
-    host = urllib.parse.urlparse(url).netloc
+def _reuse_tab(url: str) -> bool:
+    """Switch to an already-open tab for this URL *in the current space* (never jumping
+    to another profile). Returns True if reused.
+
+    Arc gives no way to know which space a pinned tab lives in, so we try the match and
+    check whether selecting it changed the active space — if it jumped to another
+    profile, we roll back and report no-reuse so the caller opens a fresh tab here.
+    """
+    host = urllib.parse.urlparse(url).netloc.replace('"', "")
     if not host:
-        return None
+        return False
+    if CONFIG.browser == "Arc":
+        # Reuse only tabs in the CURRENT space (reliable, never jumps profiles). Arc's
+        # async space-switch makes a cross-space "try & roll back" flaky, so we don't.
+        script = (
+            'tell application "Arc"\n    activate\n'
+            '    repeat with t in tabs of (active space of front window)\n'
+            f'        if URL of t contains "{host}" then\n            tell t to select\n            return "ok"\n        end if\n'
+            '    end repeat\n    return "none"\nend tell')
+        return _osa(script) == (True, "ok")
+    # Chrome family: no spaces — reuse any matching tab.
     ok, urls = _tab_urls(CONFIG.browser)
-    return next((i for i, u in enumerate(urls) if host in u), None) if ok else None
+    if ok:
+        i = next((j for j, u in enumerate(urls) if host in u), None)
+        if i is not None:
+            _select_tab(CONFIG.browser, i + 1)
+            return True
+    return False
 
 
 def _search(query: str) -> str:
@@ -262,25 +331,21 @@ def _tab(query: str) -> str:
     return f"Switched to {titles[i]!r}." if sok else f"Couldn't switch tab ({sout})."
 
 
-def _tab_move(direction: str) -> str:
-    expr = {"next": "idx + 1", "previous": "idx - 1", "prev": "idx - 1"}[direction]
-    b = CONFIG.browser
-    if b == "Arc":
-        script = (f'tell application "Arc"\n    set n to count of tabs of front window\n'
-                  f'    set aid to id of active tab of front window\n    set idx to 1\n'
-                  f'    repeat with i from 1 to n\n'
-                  f'        if id of tab i of front window is aid then set idx to i\n    end repeat\n'
-                  f'    set j to {expr}\n    if j < 1 then set j to n\n    if j > n then set j to 1\n'
-                  f'    tell tab j of front window to select\nend tell')
-    elif b in _CHROMIUM:
-        script = (f'tell application "{b}"\n    set n to count of tabs of front window\n'
-                  f'    set idx to active tab index of front window\n    set j to {expr}\n'
-                  f'    if j < 1 then set j to n\n    if j > n then set j to 1\n'
-                  f'    set active tab index of front window to j\nend tell')
-    else:
-        return f"Tab switching isn't wired up for {b} yet."
+def _tab_arrow(arg: str) -> str:
+    # Move between tabs with ⌘⌥up/down — stays within the current profile (unlike the
+    # full tab list, which spans all spaces). Arc's sidebar is vertical, hence up/down.
+    direction, n = arg.split(":")
+    code = 125 if direction == "down" else 126  # down / up arrow key code
+    n = max(1, min(int(n), 30))
+    script = (f'tell application "{CONFIG.browser}" to activate\n'
+              'tell application "System Events"\n'
+              f'    repeat {n} times\n'
+              f'        key code {code} using {{command down, option down}}\n'
+              '    end repeat\nend tell')
     ok, out = _osa(script)
-    return f"Tab: {direction}." if ok else f"Couldn't move tab ({out})."
+    if ok:
+        return f"Tab {direction}{f' ×{n}' if n > 1 else ''}."
+    return _perm_msg() if _is_perm_err(out) else f"Couldn't move tab ({out})."
 
 
 def _tab_index(arg: str) -> str:
@@ -331,6 +396,44 @@ def _desktop_move(direction: str) -> str:
     if ok:
         return f"Desktop: {direction}."
     return _perm_msg() if _is_perm_err(out) else f"Couldn't switch desktop ({out})."
+
+
+def _profile(arg: str) -> str:
+    # Arc switches profiles/spaces with Ctrl+<n> when it's focused.
+    ok, out = _osa('tell application "Arc" to activate\n'
+                   f'tell application "System Events" to keystroke "{arg}" using control down')
+    if ok:
+        return f"Profile {arg}."
+    return _perm_msg() if _is_perm_err(out) else f"Couldn't switch profile ({out})."
+
+
+def _profile_move(direction: str) -> str:
+    # Arc switches profiles/spaces with ⌘⌥←/→ when focused.
+    code = 124 if direction == "next" else 123  # right / left arrow
+    ok, out = _osa('tell application "Arc" to activate\n'
+                   f'tell application "System Events" to key code {code} using {{command down, option down}}')
+    if ok:
+        return f"Profile: {direction}."
+    return _perm_msg() if _is_perm_err(out) else f"Couldn't switch profile ({out})."
+
+
+def _back(_: str) -> str:
+    # Browser back — ⌘[ . Activate the browser first so the keystroke lands there.
+    ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
+                   'tell application "System Events" to keystroke "[" using command down')
+    return "Back." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't go back ({out})")
+
+
+def _app_cycle(app: str) -> str:
+    # Click the app's Dock icon — cycles its windows even across Spaces (your manual trick).
+    name = resolve_app_name(app)
+    if not _app_exists(name):
+        return f"No app called {name!r}."
+    ok, out = _osa(f'tell application "System Events" to tell process "Dock" '
+                   f'to click UI element "{name}" of list 1')
+    if ok:
+        return f"{name} window."
+    return _perm_msg() if _is_perm_err(out) else f"Couldn't cycle {name} ({out})."
 
 
 def _desktop_index(arg: str) -> str:

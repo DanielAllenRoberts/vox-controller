@@ -6,6 +6,9 @@ sleep phrase). The assistant label enters ASSISTANT mode (one-shot LLM request).
 See docs/plan/modes.md.
 """
 
+import os
+import sys
+
 from vox import actions, assistant, sounds
 from vox.audio import MicStream, capture_utterance
 from vox.config import CONFIG
@@ -19,9 +22,18 @@ class _Quit(Exception):
     """Raised to exit the whole program by voice."""
 
 
+class _Restart(Exception):
+    """Raised to re-exec the program (pick up code changes) by voice."""
+
+
 def _is_quit(text: str, cfg) -> bool:
     t = normalize(text)
     return any(p in t for p in cfg.quit_phrases)
+
+
+def _is_restart(text: str, cfg) -> bool:
+    t = normalize(text)
+    return any(p in t for p in cfg.restart_phrases)
 
 
 def _is_sleep(text: str, cfg) -> bool:
@@ -60,6 +72,8 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
             continue
         if _is_quit(text, cfg):
             raise _Quit
+        if _is_restart(text, cfg):
+            raise _Restart
         if _is_sleep(text, cfg):
             sounds.play(cfg.sound_sleep)
             out.emit("○ Sleeping.")
@@ -83,6 +97,8 @@ def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
         return return_to
     if _is_quit(text, cfg):
         raise _Quit
+    if _is_restart(text, cfg):
+        raise _Restart
     if _is_sleep(text, cfg):
         sounds.play(cfg.sound_sleep)
         out.emit("○ Sleeping.")
@@ -98,7 +114,7 @@ def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
 
 def main() -> None:
     cfg = CONFIG
-    out = ConsoleOutput()
+    out = ConsoleOutput(cfg.log_file)
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
@@ -115,6 +131,8 @@ def main() -> None:
                 label = wake.listen(frames)
                 if label == "quit":
                     raise _Quit
+                if label == "restart":
+                    raise _Restart
                 # A mode may return a follow-on label to chain into the other mode
                 # without dropping to idle. If the assistant was reached *from* control,
                 # it returns to control when done (instead of idling).
@@ -133,6 +151,9 @@ def main() -> None:
     except (KeyboardInterrupt, _Quit):
         sounds.play(cfg.sound_sleep)
         out.emit("\n👋 Quitting Vox.")
+    except _Restart:
+        out.emit("\n↻ Restarting Vox…")
+        os.execv(sys.executable, [sys.executable, "-m", "vox"])
 
 
 if __name__ == "__main__":

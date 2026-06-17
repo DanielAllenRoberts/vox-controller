@@ -78,6 +78,18 @@
 
 **Takeaway:** full fine-tuning is overkill for now; the **corrections-table + dynamic-hotwords + fuzzy-match** combo is very doable at this scale and would noticeably improve accent/phrasing handling over time.
 
+## 9. Conversation vs command detection
+
+**Vision:** Vox should tell whether you're *commanding it* vs *talking to a person*, and stay quiet during conversation — so real commands don't fire from chatter (see the ambient-audio note in `observations.md`).
+
+**Approaches (lightest → heaviest):**
+- **Grammar/shape heuristic:** only act on short, command-shaped utterances (verb-first, in the known grammar); ignore long conversational sentences. Cheap.
+- **Wake-per-command toggle:** optionally require the wake word before each command — unambiguous, less Dragon-like.
+- **Intent classifier:** a small model (or the LLM, M4) that labels "command vs conversation" per utterance. Robust.
+- **Personal tuning:** learns your command patterns over time (ties into #8 + the learning layer).
+
+**Note:** the no-guess handoff already makes stray chatter harmless; this is about *also* not firing real commands buried in conversation.
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

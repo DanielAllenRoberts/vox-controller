@@ -9,6 +9,7 @@
 | Enter **control** mode | "take control", "control mode", "start control" | |
 | Enter **assistant** mode | "Hey Vox" | + variants Whisper may hear: hey vaux, hey vocks, a vox, hey fox, hey box |
 | **Quit** Vox | "quit Vox", "close Vox", "exit Vox", "shut down Vox" | + quit/quick/close/exit × vox/fox/box variants (keyed to "vox" so idle chatter can't trigger it) |
+| **Restart** Vox | "restart Vox", "reboot Vox" | re-runs the process (picks up code changes) |
 
 ## While in a mode
 
@@ -25,9 +26,13 @@
 |---|---|---|
 | Open / go to | "open <app>", "go to <site>", "open a new <site>" | app if installed; known site **reuses an open tab** ("open new" forces a fresh one) |
 | Search | "search <query>", "search for <query>" | web search in your browser |
-| Switch browser tab | "go to my <name> tab" (**fuzzy** — mishears OK), "next/previous tab" | by name is reliable; index ("tab 10") is unreliable in Arc (52 tabs span spaces) |
+| Switch browser tab | "go to my <name> tab" (**fuzzy**), "next/previous tab", "move up/down <n> tabs" | by name, or ⌘⌥↑↓ relative (stays in your profile) |
+| Go back | "go back" | browser/app back (⌘[) |
 | Switch app window | "next window", "switch to my <name> window" | cycles front app's windows (⌘`); can't cross macOS Spaces (needs Accessibility) |
-| Switch desktop/Space | "next desktop", "previous desktop", "go to desktop <n>" | Ctrl+→/← (index needs the macOS shortcut enabled) |
+| Switch desktop/Space | "**swipe right/left**", "next space/screen/desktop", "go to desktop <n>" | Ctrl+→/← (index needs the macOS shortcut enabled) |
+| Cycle an app's windows | "cursor window", "next cursor window", "switch cursor" | crosses Spaces (Dock-click) |
+| Switch Arc profile | "profile <n>", "next/previous profile" | Ctrl+<n> (absolute) or ⌘⌥←→ (relative) |
+| Chain commands | "<cmd> and <cmd>" — e.g. "open Arc and search this" | runs both (only when both parse) |
 | Show/hide tabs | "show tabs", "hide tabs", "toggle sidebar" | toggles Arc's sidebar |
 | (anything else) | — | "handing off to the assistant" (no guessing) |
 
