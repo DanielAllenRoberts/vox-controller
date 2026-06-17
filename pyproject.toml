@@ -9,6 +9,7 @@ dependencies = [
     "sounddevice>=0.4.6",
     "openwakeword>=0.6.0",
     "faster-whisper>=1.0.0",
+    "psutil>=5.9",
     # openWakeWord's bundled feature models silently return 0.0 scores on
     # onnxruntime >= ~1.21 (verified: 1.27 -> 0.000, 1.20.1 -> 0.999 on the
     # same audio). Pin to a known-good range until openWakeWord catches up.

@@ -18,6 +18,9 @@ Local-first · provider-agnostic · modular · privacy-conscious.
 
 - [`docs/plan/overview.md`](docs/plan/overview.md) — vision, architecture, decisions log, data/secrets policy.
 - [`docs/plan/roadmap.md`](docs/plan/roadmap.md) — v1 goal, milestones (M0–M4), and backlog.
+- [`docs/plan/features.md`](docs/plan/features.md) — living feature registry: what works, what's planned, how to demo each.
+- [`docs/plan/modes.md`](docs/plan/modes.md) — control vs assistant modes + the wake/sleep phrases to train.
+- [`docs/plan/wake-word-training.md`](docs/plan/wake-word-training.md) — how to train a custom wake word.
 
 ## Project layout
 
