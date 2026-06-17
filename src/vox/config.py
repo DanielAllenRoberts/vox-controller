@@ -32,7 +32,8 @@ class Config:
     speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
     silence_seconds: float = 0.8         # trailing silence that ends an utterance
     max_utterance_seconds: float = 8.0
-    listen_timeout_seconds: float = 6.0  # give up waiting for speech in a mode
+    listen_timeout_seconds: float = 6.0  # assistant mode: give up waiting (control mode keeps listening)
+    preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
 
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
     whisper_model: str = "base.en"

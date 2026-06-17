@@ -5,6 +5,8 @@ IDLE listens for activation phrases. The control phrase enters CONTROL mode
 assistant phrase enters ASSISTANT mode (one-shot LLM request). See docs/plan/modes.md.
 """
 
+from collections import deque
+
 import numpy as np
 
 from vox import actions, assistant
@@ -30,16 +32,18 @@ def _listen_utterance(frames, cfg):
     max_frames = int(cfg.max_utterance_seconds * sr / fs)
     wait_frames = int(cfg.listen_timeout_seconds * sr / fs)
 
+    pre_roll = deque(maxlen=cfg.preroll_frames)
     waited = 0
     while True:
         frame = next(frames)
         if _rms(frame) >= cfg.speech_rms:
             break
+        pre_roll.append(frame)
         waited += 1
         if waited >= wait_frames:
             return None
 
-    collected = [frame]
+    collected = list(pre_roll) + [frame]
     silent = 0
     while len(collected) < max_frames:
         frame = next(frames)
@@ -73,8 +77,7 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
     while True:
         audio = _listen_utterance(frames, cfg)
         if audio is None:
-            out.emit(f"  (silence for {cfg.listen_timeout_seconds:.0f}s — sleeping)")
-            return
+            continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
         text = _transcribe(transcriber, audio, cfg, out)
         if not text:
             continue
