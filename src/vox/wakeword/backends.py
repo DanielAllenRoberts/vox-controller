@@ -18,6 +18,13 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", text.lower())).strip()
 
 
+def phrase_match(t: str, phrases) -> bool:
+    """True if any phrase occurs in the already-normalized text `t`. Also matches when Whisper
+    drops the inter-word space ("quit vox" heard as "quitvox") by comparing space-stripped too."""
+    t2 = t.replace(" ", "")
+    return any(p in t or p.replace(" ", "") in t2 for p in phrases)
+
+
 class WhisperWakeBackend:
     def __init__(self, label_phrases, transcriber, cfg, prompt, out=None):
         self._label_phrases = label_phrases  # list of (label, (phrase, ...))
@@ -29,7 +36,7 @@ class WhisperWakeBackend:
     def match(self, text: str) -> str | None:
         t = normalize(text)
         for label, phrases in self._label_phrases:
-            if any(p in t for p in phrases):
+            if phrase_match(t, phrases):
                 return label
         return None
 

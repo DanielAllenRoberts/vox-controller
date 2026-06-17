@@ -114,7 +114,9 @@ def _anthropic(text, history, model, system):
         _anthropic_client = Anthropic(api_key=key)
     msgs = [{"role": r, "content": c} for r, c in (history or [])] + [{"role": "user", "content": text}]
     try:
-        resp = _anthropic_client.messages.create(
+        # 45s cap (matches the SDK path) so a stalled request can't freeze the voice loop — the
+        # client otherwise defaults to ~10 min. On timeout the SDK raises and we fall through below.
+        resp = _anthropic_client.with_options(timeout=45.0).messages.create(
             model=model, max_tokens=CONFIG.llm_max_tokens, system=system, messages=msgs)
         return "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as exc:
@@ -133,7 +135,9 @@ def _openai(text, history, model, system):
             + [{"role": r, "content": c} for r, c in (history or [])]
             + [{"role": "user", "content": text}])
     try:
-        resp = _openai_client.chat.completions.create(
+        # 45s cap (matches the SDK/anthropic paths) so a stalled DeepSeek/local call can't freeze
+        # the voice loop — the client otherwise defaults to ~10 min.
+        resp = _openai_client.with_options(timeout=45.0).chat.completions.create(
             model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs)
         return (resp.choices[0].message.content or "").strip()
     except Exception as exc:
@@ -148,7 +152,7 @@ def _claude_sdk(text, history, model, system):
 
     convo = "\n".join(f"{'You' if r == 'user' else 'Vox'}: {c}" for r, c in (history or []))
     prompt = f"{convo + chr(10) if convo else ''}You: {text}"
-    opts = ClaudeAgentOptions(system_prompt=system, allowed_tools=[], max_turns=1, model=model)
+    opts = ClaudeAgentOptions(system_prompt=system, allowed_tools=[], max_turns=6, model=model)
 
     async def _run():
         parts = []
@@ -197,7 +201,7 @@ def _sdk_look(question, image_path, model):
 
     prompt = (f"Read the image file {image_path} — it's a screenshot of the user's Mac. "
               f"Then answer concisely for text-to-speech (1-2 sentences): {question}")
-    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=4,
+    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=8,
                               permission_mode="bypassPermissions", model=model)
 
     async def _run():
@@ -227,7 +231,7 @@ def _anthropic_look(question, image_path, model):
     with open(image_path, "rb") as f:
         data = base64.standard_b64encode(f.read()).decode()
     try:
-        resp = _anthropic_client.messages.create(
+        resp = _anthropic_client.with_options(timeout=90.0).messages.create(  # vision: 90s like the SDK path
             model=model, max_tokens=CONFIG.llm_max_tokens,
             messages=[{"role": "user", "content": [
                 {"type": "image",

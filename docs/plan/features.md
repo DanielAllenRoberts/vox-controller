@@ -31,9 +31,9 @@
 | Switch desktops / Spaces | ✅ | "swipe right/left", "next space", "go to desktop 2" | Ctrl+→/← — synonyms: desktop / space / screen / "swipe" (the cross-Space window fix) |
 | Cycle an app's windows | ✅ | "cursor window", "next cursor window", "switch cursor" | clicks the app's Dock icon — crosses Spaces, any app |
 | Switch Arc profile/space | ✅ | "profile two", "next profile" | Ctrl+<n> (absolute) or ⌘⌥←→ (relative) |
-| Show/hide tab sidebar | ✅ | "show tabs" / "hide tabs" / "toggle sidebar" | toggles Arc's sidebar (⌘S) |
+| Show/hide tab sidebar | ✅ | "show tabs" / "hide tabs" / "toggle sidebar" | clicks Arc's **View → Show/Hide Sidebar** menu item (robust — a focused web app can't swallow it like ⌘S; the item name reveals state so show/hide are exact). Tolerant of "side bar" / singular "tab". Needs Accessibility |
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
-| Unknown command → LLM escalation | ✅ | any unrecognized control command | a command that doesn't parse is sent to the assistant (LLM) and its answer is spoken — ask questions mid-commands without leaving control mode |
+| Unknown command → LLM escalation | ✅ | any unrecognized control command | a command that doesn't parse is sent to the assistant (LLM) and its answer is spoken — ask questions mid-commands without leaving control mode. **Policy is configurable** (`escalation_mode`): `"auto"` escalates anything the parser misses (default); `"keywords"` only escalates when the utterance contains an `escalation_keywords` trigger ("write", "make this", "vox", "I need help"…) — opt-in by phrasing, so ambient audio stops tripping the brain (issues.md O7). ideas #23 |
 | Mode sound cues | ✅ | sounds on control / assistant / send / sleep | audio feedback without watching the terminal (macOS sounds; swap for custom) |
 | Quit by voice | ✅ | say "quit Vox" (idle or in a mode) | exits the program; "vox" required + phonetic variants so idle speech can't trigger it |
 | Restart by voice | ✅ | say "restart Vox" | re-execs the process — picks up code changes without manual kill + rerun |
@@ -49,6 +49,7 @@
 | Screen vision ("look at my screen") | ✅ | "what does this say?" / "what's on my screen" / "read this error" | brain screenshots (`screencapture`), downscales, and reads it — runs on your Claude subscription via the SDK Read tool (no API key). Needs **Screen Recording** permission; sends one frame to the cloud; toggle `screen_vision_enabled`. ideas #18 |
 | Voice output (TTS) | ✅ | Vox speaks its 🔊 replies aloud | macOS `say` — local, instant, no model download; speaks conversational replies/questions/screen-reads, stays quiet on actions. Toggle `tts_enabled`, set `tts_voice`/`tts_rate`. Swap for Piper later (`tts.py`). **M2** |
 | Chatter ignore | ✅ | background talk it can't action → no response | the brain returns `IGNORE` for non-requests so stray speech doesn't get answered |
+| Barge-in (interrupt the AI) | ✅ | say "go to sleep" / "stop" / "quit" **while it's thinking** | the LLM call runs on a thread while Vox keeps listening; a stop phrase cancels it instantly instead of waiting for the response. Toggle `barge_in_enabled`. ideas #19 |
 | LLM-as-executor (runs commands, not just explains) | 🚧 | control-mode escalation hands the utterance to the **small brain**, which runs the matching Vox action (action-first, quiet cue) instead of saying "I can't". Provider-agnostic — works on your Claude subscription, an API, or a local LLM (no native tool-calling needed). ideas #12 |
 | Action-first / silent success | 💡 | execute with just a sound cue; speak only when ambiguous or asked — seamless; ideas #13 |
 | Self-wiring command learning | 💡 | capture LLM-resolved fallbacks → **learned rules** (instant next time), wired up in the background; ideas #14–15 |

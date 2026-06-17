@@ -79,6 +79,11 @@ class Config:
     # Patient wait while the model tagged its reply [OPEN] (it expects you to respond) — a safety
     # cap so it waits a bit longer when it asked YOU something, without hanging forever.
     assistant_open_timeout_seconds: float = 8.0
+
+    # Barge-in (idea #19): keep listening during a blocking LLM call so "go to sleep" / "stop" /
+    # "quit" can cancel it (no echo worries — Vox isn't speaking then). False = wait it out.
+    barge_in_enabled: bool = True
+    barge_in_poll_seconds: float = 0.8   # interrupt-listener re-check interval during a call
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
 
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
@@ -105,9 +110,9 @@ class Config:
     #   DeepSeek      : provider="openai", model="deepseek-chat", llm_base_url="https://api.deepseek.com", llm_api_key_env="DEEPSEEK_API_KEY"
     #   Local Ollama  : provider="openai", model="llama3.1",       llm_base_url="http://localhost:11434/v1", llm_api_key_env=<any dummy>
     #   Local LM Studio: provider="openai", model="<loaded model>", llm_base_url="http://localhost:1234/v1",  llm_api_key_env=<any dummy>
-    small_brain_provider: str = "claude_sdk"
-    small_brain_model: str = "claude-haiku-4-5-20251001"
-    big_brain_provider: str = "claude_sdk"
+    small_brain_provider: str = "openai"       # DeepSeek via its OpenAI-compatible API (trying it as the small brain)
+    small_brain_model: str = "deepseek-chat"   # back to Haiku: provider="anthropic", model="claude-haiku-4-5-20251001"
+    big_brain_provider: str = "claude_sdk"     # big/vision stays on the Claude subscription (no per-token cost)
     big_brain_model: str = "claude-opus-4-8"
     escalate_to_big_brain: bool = True   # let the small brain defer complex turns to the big brain
 
@@ -115,14 +120,31 @@ class Config:
     # e.g. "witty and concise", "warm and encouraging", "a dry, deadpan British butler".
     personality: str = ""
 
-    llm_base_url: str = ""               # for openai-compatible providers (DeepSeek, Ollama, LM Studio)
-    llm_api_key_env: str = "ANTHROPIC_API_KEY"  # env var holding the API key (openai/anthropic providers)
+    llm_base_url: str = "https://api.deepseek.com"  # openai-compatible providers (DeepSeek, Ollama, LM Studio); "" for none
+    llm_api_key_env: str = "DEEPSEEK_API_KEY"   # env var holding the API key (openai/anthropic providers). "ANTHROPIC_API_KEY" for the Anthropic API
     llm_max_tokens: int = 800   # headroom for composing text ("write me…"); chat stays short via the prompt
 
     # LLM-as-executor (idea #12): on an uncertain command, the small brain runs Vox's own
     # actions instead of just explaining. Provider-agnostic — works on the subscription/SDK and
     # local LLMs, no API key beyond whatever the small brain already uses. False = just chat.
     llm_executor_enabled: bool = True
+
+    # Escalation policy (idea #23): when control mode can't handle an utterance with its
+    # deterministic parser, how does it decide whether to hand it to the brain?
+    #   "auto"     = always escalate (current default; the 1-word/filler noise gate still applies).
+    #   "keywords" = escalate ONLY when the utterance contains an escalation keyword below; otherwise
+    #                ignore it. Strong mitigation for ambient audio tripping the LLM (issues.md O7) —
+    #                you opt in by phrasing ("Vox, write me…", "make this pretty", "I need help with…").
+    # A pending clarification (the brain asked YOU something) always escalates, keyword or not.
+    escalation_mode: str = "auto"
+    # Substring-matched (lowercased) when escalation_mode == "keywords". Grouped by what they reach:
+    escalation_keywords: tuple[str, ...] = (
+        "vox",                                                          # explicitly addressing Vox
+        "write", "compose", "draft",                                   # compose text at the cursor
+        "rewrite", "make this", "make it", "fix this", "fix the", "clean this",  # rewrite a selection
+        "summarize", "summarise", "explain", "what does this", "what's on", "read this", "look at",  # screen vision
+        "i need help", "help me", "learn",                             # general help / direct ask
+    )
 
     # Screen vision (idea #18): the brain can screenshot and "see" the screen when asked
     # ("what does this say?"). Sends ONE downscaled frame to the cloud brain — set False to disable.
