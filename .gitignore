@@ -1,0 +1,47 @@
+# This is a PUBLIC repo. Treat everything committed as permanently world-readable.
+# Keep secrets, runtime data, and large model artifacts OUT of version control.
+
+# --- Secrets (never commit) ---
+.env
+.env.*
+!.env.example
+
+# --- Local working instructions (kept out of the public repo) ---
+CLAUDE.md
+
+# --- Runtime data (software-managed local store) ---
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+
+# --- Models & caches (large; fetched/managed locally) ---
+models/
+*.bin
+*.pt
+*.onnx
+*.tflite
+
+# --- Audio scratch ---
+recordings/
+*.wav
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node (for any JS components) ---
+node_modules/
+
+# --- macOS / editors ---
+.DS_Store
+.vscode/
+.idea/
