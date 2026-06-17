@@ -1,4 +1,8 @@
-"""Deterministic command actions for CONTROL mode: open apps and go to apps/websites."""
+"""Deterministic command actions for CONTROL mode: open apps, go to apps/sites, search.
+
+Navigation only acts on what it KNOWS (installed app, known site, real domain). Unknown
+targets are NOT guessed — they hand off to the assistant. Web search is explicit ("search X").
+"""
 
 import re
 import subprocess
@@ -15,7 +19,7 @@ _APP_ALIASES = {
     "code": "Visual Studio Code",
 }
 
-# Spoken site name -> URL, for website navigation.
+# Known spoken site name -> URL. Navigation only opens sites it knows (no guessing).
 _SITE_ALIASES = {
     "github": "https://github.com",
     "gmail": "https://mail.google.com",
@@ -27,6 +31,21 @@ _SITE_ALIASES = {
     "hacker news": "https://news.ycombinator.com",
     "chatgpt": "https://chatgpt.com",
     "claude": "https://claude.ai",
+    "gemini": "https://gemini.google.com",
+    "netflix": "https://netflix.com",
+    "spotify": "https://open.spotify.com",
+    "amazon": "https://amazon.com",
+    "maps": "https://maps.google.com",
+    "calendar": "https://calendar.google.com",
+    "drive": "https://drive.google.com",
+    "docs": "https://docs.google.com",
+    "notion": "https://notion.so",
+    "linear": "https://linear.app",
+    "slack": "https://slack.com",
+    "figma": "https://figma.com",
+    "stack overflow": "https://stackoverflow.com",
+    "wikipedia": "https://wikipedia.org",
+    "twitch": "https://twitch.tv",
 }
 
 # Chromium-family browsers share an AppleScript dictionary for tab creation.
@@ -41,20 +60,25 @@ def handle(text: str) -> str:
     name, arg = intent
     if name == "navigate":
         return _navigate(arg)
+    if name == "search":
+        return _search(arg)
     return f"unknown intent: {name}"
 
 
 def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None.
 
-    "open X" and "go to X" both navigate — to the app if installed, else a website.
-    Uses search (not match) so a leaked wake word — "hey vox, open cursor" — still works.
+    "open X" / "go to X" both navigate (app if installed, else a known site). "search X"
+    runs an explicit web search. Uses search-anywhere so a leaked wake word still works.
     """
     t = text.lower().strip().rstrip(".!?")
     m = re.search(r"\b(?:open|go\s*to)\s+(?:the\s+)?(?:app\s+)?(.+)", t)
     if m:
         target = re.sub(r"\s+app$", "", m.group(1).strip())  # "calculator app" -> "calculator"
         return ("navigate", target)
+    m = re.search(r"\bsearch\s+(?:for\s+)?(.+)", t)
+    if m:
+        return ("search", m.group(1).strip())
     return None
 
 
@@ -62,17 +86,14 @@ def resolve_app_name(app: str) -> str:
     return _APP_ALIASES.get(app.lower().strip(), app.title())
 
 
-def resolve_url(target: str) -> tuple[str, bool]:
-    """Return (url, confident). `confident` is False when we're only guessing — the
-    hook where a low-confidence target should later escalate to the assistant."""
+def known_url(target: str) -> str | None:
+    """URL for a *known* target (site alias or real domain), else None — never a guess."""
     t = target.lower().strip().rstrip("/")
     if t in _SITE_ALIASES:
-        return _SITE_ALIASES[t], True
+        return _SITE_ALIASES[t]
     if "." in t:  # already looks like a domain
-        return (t if t.startswith("http") else f"https://{t}"), True
-    if " " not in t:  # single word -> best-guess .com (a guess)
-        return f"https://{t}.com", False
-    return "https://www.google.com/search?q=" + urllib.parse.quote_plus(target), False
+        return t if t.startswith("http") else f"https://{t}"
+    return None
 
 
 def _app_exists(name: str) -> bool:
@@ -92,11 +113,7 @@ def _browser_tab_script(browser: str, url: str) -> str | None:
 
 
 def _open_url(url: str) -> None:
-    """Open a URL as a new tab in the preferred browser; fall back to the default opener.
-
-    (`open <url>` lets the browser pick window-vs-tab — Arc opens a new window — so we
-    drive the browser via AppleScript to get a tab in the existing window.)
-    """
+    """Open a URL as a new tab in the preferred browser; fall back to the default opener."""
     script = _browser_tab_script(CONFIG.browser, url)
     if script:
         r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
@@ -110,10 +127,19 @@ def _navigate(target: str) -> str:
     if _app_exists(name):
         subprocess.run(["open", "-a", name], capture_output=True, text=True)
         return f"Opening {name}."
-    url, confident = resolve_url(target)
-    _open_url(url)
-    if confident:
+    url = known_url(target)
+    if url:
+        _open_url(url)
         return f"Going to {url}."
-    # Low confidence: today we flag it; once the assistant is wired (M4) this is
-    # where we hand off ("did you mean …?"). See docs/plan/observations.md.
-    return f'Going to {url} — but I wasn\'t sure; say "open <name>" if I misheard.'
+    return _handoff(target)
+
+
+def _search(query: str) -> str:
+    _open_url("https://www.google.com/search?q=" + urllib.parse.quote_plus(query))
+    return f"Searching for {query!r}."
+
+
+def _handoff(target: str) -> str:
+    # Unknown target — we do NOT guess. Once the assistant (M4) is wired this hands off
+    # ("did you mean …?"); for now we just say so. See docs/plan/observations.md.
+    return f"Don't recognize {target!r} — handing off to the assistant (not wired yet)."

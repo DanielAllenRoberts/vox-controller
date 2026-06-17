@@ -16,7 +16,10 @@
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
-| Open / go to (app or website) | ✅ | "open Cursor" / "go to GitHub" | both verbs: app if installed, else the website opened as a **new tab** in your browser (Arc/Chrome/Safari/Brave/Edge) |
+| Open / go to (app or known site) | ✅ | "open Cursor" / "go to GitHub" | app if installed, else a known site/domain as a **new tab** (Arc/Chrome/Safari…); **unknown → hands off, never guesses** |
+| Search the web | ✅ | "search <query>" in control mode | explicit web search in your browser |
+| Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
+| Unknown command → handoff | ✅ | any unrecognized target | says "handing off to the assistant" — the M4 escalation hook |
 | Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 
 ## In progress / next
