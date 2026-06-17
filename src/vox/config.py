@@ -42,6 +42,12 @@ class Config:
         "shut down vox",
     )
 
+    # Restart the running process (re-exec — picks up code changes) by voice.
+    restart_phrases: tuple[str, ...] = ("restart vox", "reboot vox", "restart yourself")
+
+    # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
+    log_file: str = "vox.log"
+
     # --- Audio capture --- openWakeWord expects 16 kHz mono int16, 80 ms frames.
     sample_rate: int = 16_000
     frame_samples: int = 1280
@@ -50,7 +56,7 @@ class Config:
     # --- Utterance capture (energy-based) ---
     speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
     silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
-    assistant_silence_seconds: float = 2.5  # longer pause allowed in ASSISTANT mode (stumble / gather your thoughts)
+    assistant_silence_seconds: float = 1.2  # pause allowed in ASSISTANT mode before it sends
     max_utterance_seconds: float = 8.0
     listen_timeout_seconds: float = 6.0  # assistant mode: give up waiting (control mode keeps listening)
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
@@ -62,8 +68,8 @@ class Config:
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
         "open go to search stand down take control hey vox quit close exit shut down "
-        "tab window next previous first last "
-        "cursor arc safari chrome github youtube gmail spotify notion chatgpt linkedin trello "
+        "tab window next previous first last desktop space screen swipe new "
+        "cursor arc safari chrome github youtube gmail spotify notion chatgpt linkedin trello amazon netflix "
         "calculator terminal finder notes slack figma"
     )
 

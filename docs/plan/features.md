@@ -16,16 +16,22 @@
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
-| Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses an open tab** or makes one ("open new" forces a fresh tab); unknown → hands off |
+| Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses a tab in your current space** or makes one ("open new" forces fresh); unknown → hands off |
+| Chain two commands | ✅ | "open Arc and search this" | runs both halves of "X and Y" (only when both parse) |
 | Search the web | ✅ | "search <query>" in control mode | explicit web search in your browser |
-| Switch browser tabs | ✅ | "go to my GitHub tab" (fuzzy), "next tab" | by **name** (fuzzy — mishears/partials OK); index is unreliable in Arc (tabs span spaces) |
+| Switch browser tabs | ✅ | "go to my GitHub tab" (fuzzy), "next tab", "move up 3 tabs" | by name (fuzzy) or ⌘⌥↑↓ relative — **stays in your profile** |
+| Go back | ✅ | "go back" | browser/app back (⌘[) |
 | Switch app windows | ✅ | "next window", "switch to my work window" | cycles the frontmost app's windows (⌘`); can't cross macOS Spaces (Accessibility perm) |
-| Switch desktops / Spaces | ✅ | "next desktop", "go to desktop 2" | Ctrl+→/← (index needs "Switch to Desktop N" enabled in macOS) — the cross-Space window fix |
+| Switch desktops / Spaces | ✅ | "swipe right/left", "next space", "go to desktop 2" | Ctrl+→/← — synonyms: desktop / space / screen / "swipe" (the cross-Space window fix) |
+| Cycle an app's windows | ✅ | "cursor window", "next cursor window", "switch cursor" | clicks the app's Dock icon — crosses Spaces, any app |
+| Switch Arc profile/space | ✅ | "profile two", "next profile" | Ctrl+<n> (absolute) or ⌘⌥←→ (relative) |
 | Show/hide tab sidebar | ✅ | "show tabs" / "hide tabs" / "toggle sidebar" | toggles Arc's sidebar (⌘S) |
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
 | Unknown command → handoff | ✅ | any unrecognized input | says "handing off to the assistant" — the M4 escalation hook |
 | Mode sound cues | ✅ | sounds on control / assistant / send / sleep | audio feedback without watching the terminal (macOS sounds; swap for custom) |
 | Quit by voice | ✅ | say "quit Vox" (idle or in a mode) | exits the program; "vox" required + phonetic variants so idle speech can't trigger it |
+| Restart by voice | ✅ | say "restart Vox" | re-execs the process — picks up code changes without manual kill + rerun |
+| Session logging | ✅ | output tee'd to `vox.log` | reviewable log of every session (gitignored) |
 | Switch modes mid-session | ✅ | "Hey Vox" in control / "take control" in assistant | jump between modes without dropping to idle first |
 | Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 

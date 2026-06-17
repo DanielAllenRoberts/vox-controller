@@ -19,6 +19,10 @@
 - **Window switching can't cross macOS Spaces.** A Cursor process with two windows on different desktops reports `count of windows = 1` to the Accessibility API — the other Space's window is invisible. ⌘`-cycling only works within the current Space.
 - **Win:** fuzzy tab matching (difflib) resolves "Moonshark"→Moonshot, "chat upt"→ChatGPT, and partial names — a cheap, reliable improvement (and a first taste of the personalised-matching idea in `ideas.md` #8).
 
+## 2026-06-17 — Ambient audio gets transcribed ("click click click", YouTube outros) 😄
+
+Control mode is a hot mic, so Whisper transcribes *everything* it hears: keyboard clicks → "click click click", clock sounds → "tick tock tick tock", and even a **playing YouTube video's narration** ("if you like this video please subscribe and like…"). All of it correctly **hands off** (no action) thanks to no-guess matching — harmless, just genuinely funny to watch Vox earnestly hand off a YouTuber's outro. The one real risk: a command buried in ambient speech (e.g. reading the hotword list aloud fired "next desktop"). Future mitigation: a confidence / voice-activity gate, or just "stand down" when not actively commanding.
+
 ## The principle this points to
 
 **Whenever a deterministic action is low-confidence or unmatched → escalate to the assistant.** This is the bridge between CONTROL mode (fast, deterministic) and ASSISTANT mode (LLM reasoning), and it's what makes the system feel smart rather than brittle. (See the tiered cascade in `overview.md`.)
