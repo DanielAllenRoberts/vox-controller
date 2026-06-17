@@ -7,7 +7,9 @@ See docs/plan/modes.md.
 """
 
 import os
+import subprocess
 import sys
+import threading
 
 from dotenv import load_dotenv
 
@@ -17,7 +19,7 @@ from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
 from vox.stt.whisper_transcriber import WhisperTranscriber
-from vox.wakeword.backends import make_backend, normalize
+from vox.wakeword.backends import make_backend, normalize, phrase_match
 
 
 class _Quit(Exception):
@@ -29,13 +31,11 @@ class _Restart(Exception):
 
 
 def _is_quit(text: str, cfg) -> bool:
-    t = normalize(text)
-    return any(p in t for p in cfg.quit_phrases)
+    return phrase_match(normalize(text), cfg.quit_phrases)
 
 
 def _is_restart(text: str, cfg) -> bool:
-    t = normalize(text)
-    return any(p in t for p in cfg.restart_phrases)
+    return phrase_match(normalize(text), cfg.restart_phrases)
 
 
 def _is_sleep(text: str, cfg) -> bool:
@@ -63,6 +63,28 @@ def _is_dictate(text: str, cfg) -> bool:
     return any(p in t for p in cfg.dictate_phrases)
 
 
+_NOISE_WORDS = {"and", "uh", "um", "ah", "oh", "so", "the", "a", "i", "yeah", "yep", "no",
+                "okay", "ok", "hmm", "mm", "mhm", "like", "you", "well", "but", "or", "is", "it"}
+
+
+def _looks_like_noise(text: str) -> bool:
+    """Short fragments / fillers — almost always background (a video, chatter). Don't escalate
+    these to the LLM."""
+    words = normalize(text).split()
+    return len(words) <= 1 or all(w in _NOISE_WORDS for w in words)
+
+
+def _wants_escalation(text: str, cfg) -> bool:
+    """Whether an utterance the deterministic parser couldn't handle should reach the brain.
+    In "auto" mode (default) everything does. In "keywords" mode it must contain an escalation
+    keyword — you opt the brain in by phrasing ("Vox, write me…"), so ambient audio stops tripping
+    the LLM (issues.md O7). A pending clarification bypasses this (handled by the caller)."""
+    if cfg.escalation_mode != "keywords":
+        return True
+    t = normalize(text)
+    return any(k in t for k in cfg.escalation_keywords)
+
+
 def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
@@ -75,16 +97,60 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     return text
 
 
+def _run_interruptible(work, frames, cfg, transcriber):
+    """Run work() (a blocking LLM call) on a thread while still listening, so the user can cancel
+    it by speaking a stop/sleep/quit/restart phrase (barge-in, idea #19). No echo worries — Vox
+    isn't speaking during the call. Returns (result, interrupt): interrupt is None if work
+    finished, else 'sleep' | 'quit' | 'restart'. An abandoned call finishes in the background and
+    its result is dropped (Python can't kill a thread)."""
+    if not cfg.barge_in_enabled:
+        return work(), None
+    box: dict = {}
+
+    def runner():
+        try:
+            box["result"] = work()
+        except Exception as exc:  # callees normally catch their own; don't lose it
+            box["error"] = exc
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    while t.is_alive():
+        audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
+        if audio is None:
+            continue  # silence — loop and re-check whether work() finished
+        text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
+        if not text:
+            continue
+        if _is_abort(text, cfg) or _is_sleep(text, cfg):
+            return None, "sleep"
+        if _is_quit(text, cfg):
+            return None, "quit"
+        if _is_restart(text, cfg):
+            return None, "restart"
+        # a clear new command / mode-switch mid-call → cut the LLM off and do THAT instead
+        if actions.parse(text) is not None or _is_assistant(text, cfg) or _is_dictate(text, cfg):
+            return None, ("redirect", text)
+        # anything else (chatter / fuzzy / background) → ignore and keep waiting for work()
+    if "error" in box:
+        raise box["error"]
+    return box.get("result"), None
+
+
 def _control_mode(frames, cfg, transcriber, out, mic) -> None:
     out.emit(f'● CONTROL MODE — e.g. "open Safari" or "go to GitHub". Say "{cfg.sleep_spoken}" to stop.')
     pending = []  # short clarification memory: when the brain asks a question, the next answer gets context
+    redirect = None  # a clear command captured mid-LLM-call, to run instead of the cancelled one
     while True:
-        audio = capture_utterance(frames, cfg)
-        if audio is None:
-            continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
-        text = _transcribe(transcriber, audio, cfg, out, hotwords=cfg.command_hotwords)
-        if not text:
-            continue
+        if redirect is not None:
+            text, redirect = redirect, None
+        else:
+            audio = capture_utterance(frames, cfg)
+            if audio is None:
+                continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
+            text = _transcribe(transcriber, audio, cfg, out, hotwords=cfg.command_hotwords)
+            if not text:
+                continue
         if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
             sounds.play(cfg.sound_abort)
             out.emit("🛑 Stopped.")
@@ -108,9 +174,29 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
         if result is not None and not actions.failed(result):
             out.emit(f"  → {result}")
             pending = []  # a clean command ran → drop any pending clarification
+        elif not pending and _looks_like_noise(text):  # 1-word/filler → background; don't bug the LLM
+            out.emit("  (ignored — too short / background)")
+            pending = []
+        elif not pending and not _wants_escalation(text, cfg):  # keyword mode: no trigger → don't escalate
+            out.emit("  (ignored — no escalation keyword)")
+            pending = []
         else:  # unparsed, or the deterministic attempt found no target → let the brain try
             sounds.play(cfg.sound_thinking)  # "thinking…" cue — the LLM can take a moment
-            acted, msg = executor.execute(text, pending)
+            result, interrupt = _run_interruptible(
+                lambda: executor.execute(text, pending), frames, cfg, transcriber)
+            if interrupt == "quit":
+                raise _Quit
+            if interrupt == "restart":
+                raise _Restart
+            if interrupt == "sleep":  # "stop"/"sleep" said mid-call → cancel and go idle
+                sounds.play(cfg.sound_sleep)
+                out.emit("○ Stopped (cancelled the request).")
+                return None
+            if isinstance(interrupt, tuple) and interrupt[0] == "redirect":  # new command mid-call
+                out.emit(f"  ⤳ cancelled — doing {interrupt[1]!r} instead")
+                redirect, pending = interrupt[1], []
+                continue
+            acted, msg = result
             if acted:
                 sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
                 out.emit(f"  ⚡ {msg}")
@@ -132,17 +218,21 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
     out.emit('● ASSISTANT MODE — chat with me. Say "stand down" when done.')
     history = []
     expecting_answer = False  # set when the model tags its reply [OPEN] → wait patiently for you
+    redirect = None  # an utterance captured mid-reply, to handle instead of the cancelled one
     while True:
-        timeout = cfg.assistant_open_timeout_seconds if expecting_answer else cfg.assistant_idle_timeout_seconds
-        audio = capture_utterance(frames, cfg,
-                                  silence_seconds=cfg.assistant_silence_seconds,
-                                  listen_timeout=timeout)
-        if audio is None:
-            out.emit("  (no reply — back to idle)")
-            return return_to
-        text = _transcribe(transcriber, audio, cfg, out)
-        if not text:
-            continue
+        if redirect is not None:
+            text, redirect = redirect, None
+        else:
+            timeout = cfg.assistant_open_timeout_seconds if expecting_answer else cfg.assistant_idle_timeout_seconds
+            audio = capture_utterance(frames, cfg,
+                                      silence_seconds=cfg.assistant_silence_seconds,
+                                      listen_timeout=timeout)
+            if audio is None:
+                out.emit("  (no reply — back to idle)")
+                return return_to
+            text = _transcribe(transcriber, audio, cfg, out)
+            if not text:
+                continue
         if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
             sounds.play(cfg.sound_abort)
             out.emit("🛑 Stopped.")
@@ -160,7 +250,21 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
             return "control"
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
-        reply, expecting_answer = assistant.respond_turn(text, history)  # model tags [OPEN]/[DONE]
+        result, interrupt = _run_interruptible(
+            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber)
+        if interrupt == "quit":
+            raise _Quit
+        if interrupt == "restart":
+            raise _Restart
+        if interrupt == "sleep":  # "sleep"/"stop" said while the AI was responding → drop it, go idle
+            sounds.play(cfg.sound_sleep)
+            out.emit("○ Sleeping.")
+            return None
+        if isinstance(interrupt, tuple) and interrupt[0] == "redirect":  # new utterance mid-reply
+            out.emit(f"  ⤳ switching to {interrupt[1]!r}")
+            redirect = interrupt[1]
+            continue
+        reply, expecting_answer = result  # model tags [OPEN]/[DONE]
         shown, spoken = assistant.split_say(reply)  # brain may pick a shorter spoken version
         history += [("user", text), ("assistant", shown)]
         out.emit(f"  🔊 {shown}" + ("  (…your turn)" if expecting_answer else ""))
@@ -214,43 +318,55 @@ def main() -> None:
     try:
         with MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device) as mic:
             frames = mic.frames()
-            while True:
-                label = wake.listen(frames)
-                if label == "quit":
-                    raise _Quit
-                if label == "restart":
-                    raise _Restart
-                if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
-                    cmd = label[3:]
-                    sounds.play(cfg.sound_oneshot)  # quick "got it" cue
-                    out.emit(f"⚡ {cmd!r} → {actions.handle(cmd)}")
+            # _Quit/_Restart are handled INSIDE the `with` (not propagated out) so we never run
+            # MicStream.__exit__: PortAudio's Pa_StopStream → CoreAudio DeviceStop can deadlock and
+            # wedge the process (the "restart got stuck" hang). os._exit skips that teardown; the OS
+            # frees the mic when we exit, so a clean re-open works.
+            try:
+                while True:
+                    label = wake.listen(frames)
+                    if label == "quit":
+                        raise _Quit
+                    if label == "restart":
+                        raise _Restart
+                    if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
+                        cmd = label[3:]
+                        sounds.play(cfg.sound_oneshot)  # quick "got it" cue
+                        out.emit(f"⚡ {cmd!r} → {actions.handle(cmd)}")
+                        out.emit(idle_msg)
+                        continue
+                    # A mode may return a follow-on label to chain into the other mode
+                    # without dropping to idle. If the assistant was reached *from* control,
+                    # it returns to control when done (instead of idling).
+                    from_control = False
+                    while label in ("control", "assistant", "dictation"):
+                        if label == "control":
+                            sounds.play(cfg.sound_control)
+                            label = _control_mode(frames, cfg, transcriber, out, mic)
+                            from_control = label in ("assistant", "dictation")
+                        elif label == "assistant":
+                            sounds.play(cfg.sound_assistant)
+                            label = _assistant_mode(frames, cfg, transcriber, out, mic,
+                                                    return_to="control" if from_control else None)
+                            from_control = False
+                        else:  # dictation
+                            label = _dictation_mode(frames, cfg, transcriber, out,
+                                                    return_to="control" if from_control else None)
+                            from_control = False
                     out.emit(idle_msg)
-                    continue
-                # A mode may return a follow-on label to chain into the other mode
-                # without dropping to idle. If the assistant was reached *from* control,
-                # it returns to control when done (instead of idling).
-                from_control = False
-                while label in ("control", "assistant", "dictation"):
-                    if label == "control":
-                        sounds.play(cfg.sound_control)
-                        label = _control_mode(frames, cfg, transcriber, out, mic)
-                        from_control = label in ("assistant", "dictation")
-                    elif label == "assistant":
-                        sounds.play(cfg.sound_assistant)
-                        label = _assistant_mode(frames, cfg, transcriber, out, mic,
-                                                return_to="control" if from_control else None)
-                        from_control = False
-                    else:  # dictation
-                        label = _dictation_mode(frames, cfg, transcriber, out,
-                                                return_to="control" if from_control else None)
-                        from_control = False
-                out.emit(idle_msg)
-    except (KeyboardInterrupt, _Quit):
-        sounds.play(cfg.sound_sleep)
+            except _Restart:
+                out.emit("\n↻ Restarting Vox…")
+                # Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,
+                # so the deadlock there meant restart never fired). start_new_session detaches it so
+                # it survives this process exiting; stdout still goes to the terminal.
+                subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True)
+                os._exit(0)
+            except (KeyboardInterrupt, _Quit):
+                sounds.play(cfg.sound_sleep)
+                out.emit("\n👋 Quitting Vox.")
+                os._exit(0)  # same reason — don't risk hanging on the mic-stream close on the way out
+    except (KeyboardInterrupt, _Quit):  # Ctrl+C during startup (model load / mic open), before the loop
         out.emit("\n👋 Quitting Vox.")
-    except _Restart:
-        out.emit("\n↻ Restarting Vox…")
-        os.execv(sys.executable, [sys.executable, "-m", "vox"])
 
 
 if __name__ == "__main__":

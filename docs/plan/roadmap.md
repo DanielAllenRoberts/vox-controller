@@ -10,7 +10,7 @@ A **named voice assistant** that:
 - lets you **mix input/output modality** (speak or type in; hear or read out),
 - performs a few **basic host tasks** (e.g. opening apps you name).
 
-> **Where we are (2026-06-17):** M0 + M1 done, and the **Control layer is extensively built** well beyond v1's "basic host tasks" (see `features.md`). The remaining v1 pieces are the *intelligence* and *voice-output* halves: **M4 (LLM brain)**, **M2 (TTS)**, **M3 (modality)**. Wake is Whisper-based (custom "Hey Vox" not trained yet).
+> **Where we are (2026-06-17, day one):** M0, M1, **M2 (voice out)** and most of **M4 (LLM brain)** are done — see `features.md`. The assistant went well past the original v1 scope: provider-agnostic small/big brains, an **executor** (the LLM runs commands), screen vision, write/rewrite-at-cursor, barge-in, `small.en` accent model. **The main remaining v1 piece is M3 (modality switching — text input + the four in/out combos).** Open friction: ambient audio bleeding into the mic (no AEC yet — see `issues.md` O7). Wake is still stock Whisper phrases (custom "Hey Vox" not trained).
 
 ## Milestones (incremental)
 
@@ -27,6 +27,7 @@ Map simple intents to host actions. First action: **open an app** ("open Safari"
 ### M2 — Voice output (TTS)
 Give the assistant a voice; speak confirmations/responses.
 - **Verify:** after a command, you hear a spoken confirmation.
+- **Status:** ✅ DONE (2026-06-17). macOS `say` (local, instant) via swappable `tts.py`; accented voices (default British "Daniel"); speaks conversational replies/questions/screen-reads but stays quiet on actions; the model can pick a shorter spoken version (`SAY:`). Piper is the future neural upgrade.
 
 ### M3 — Modality switching (the configurable I/O feature)
 Independently choose **input** (mic or typed) and **output** (voice or text). All four combos:
@@ -36,7 +37,7 @@ Independently choose **input** (mic or typed) and **output** (voice or text). Al
 ### M4 — Pluggable AI + intent parsing
 Replace hardcoded command matching with **model-based intent classification** behind the provider-agnostic interface (default: Claude Haiku). Any provider swappable via config.
 - **Verify:** novel phrasing ("could you launch the browser") still opens the right app.
-- **Status:** 🚧 STARTED (2026-06-17). Assistant mode is now real **multi-turn chat** backed by Claude (Haiku 4.5) via a provider-agnostic `assistant.respond`; key in `.env`. Next: LLM-powered text commands (write / make-pretty), escalation from control mode, then voice output (M2).
+- **Status:** 🟡 LARGELY DONE (2026-06-17). Multi-turn chat + a provider-agnostic **small/big brain** layer (Haiku→Opus on the Claude subscription, or any API / local LLM). An **executor** lets the brain *run* Vox's own commands on a miss (not just chat), with environment context (running apps/tabs), clarification memory, and chatter-ignore. LLM text commands (write / make-pretty) and screen vision shipped. Design note: we kept **deterministic-first** parsing with LLM escalation (cheaper/faster) rather than routing every utterance through a model — the better fit. Remaining: optional tiered cascade + the teachable-rules/learning layer (backlog).
 
 ## Backlog (post-v1, ordered loosely)
 

@@ -98,8 +98,9 @@ def parse(text: str) -> tuple[str, str] | None:
     if re.search(r"\bclose\s+(?:this\s+|the\s+|current\s+)?tabs?\b", t):
         return ("close_tab", "")
 
-    # Show / hide the tab sidebar (Arc).
-    m = re.search(r"\b(show|hide|toggle)\s+(?:the\s+)?(?:tabs|sidebar)\b", t)
+    # Show / hide / toggle the tab sidebar (Arc). Tolerant of Whisper splitting "sidebar" into
+    # "side bar" and of singular "tab".
+    m = re.search(r"\b(show|hide|toggle)\s+(?:the\s+|my\s+)?(?:tabs?|side\s?bar|panel)\b", t)
     if m:
         return ("sidebar", m.group(1))
 
@@ -529,18 +530,36 @@ def _window_result(ok: bool, out: str, found: str, missing: str) -> str:
 
 
 def _sidebar(direction: str) -> str:
-    # Arc shows tabs in a sidebar toggled by ⌘S. State isn't readable, so show/hide/
-    # toggle all flip it. Needs Accessibility permission.
+    # Arc toggles its tab sidebar from the View menu — "Show Sidebar" when hidden, "Hide Sidebar"
+    # when shown. We click the menu item rather than press ⌘S because a menu click can't be swallowed
+    # by a focused web app (Docs/Notion grab ⌘S as "Save"), and the item name reveals the current
+    # state so show/hide are honoured exactly. direction is "show" | "hide" | "toggle". Needs
+    # Accessibility permission.
     if CONFIG.browser != "Arc":
-        return f"Sidebar toggle is Arc-specific (browser is {CONFIG.browser})."
-    ok, out = _osa('tell application "Arc" to activate\n'
-                   'tell application "System Events" to keystroke "s" using command down')
+        return f"Sidebar control is Arc-specific (browser is {CONFIG.browser})."
+    script = (
+        'tell application "Arc" to activate\n'
+        'tell application "System Events" to tell process "Arc"\n'
+        '    set m to menu "View" of menu bar 1\n'
+        '    set isHidden to (exists menu item "Show Sidebar" of m)\n'
+        f'    if "{direction}" is "show" then\n'
+        '        if isHidden then click menu item "Show Sidebar" of m\n'
+        f'    else if "{direction}" is "hide" then\n'
+        '        if not isHidden then click menu item "Hide Sidebar" of m\n'
+        '    else if isHidden then\n'
+        '        click menu item "Show Sidebar" of m\n'
+        '    else\n'
+        '        click menu item "Hide Sidebar" of m\n'
+        '    end if\n'
+        'end tell')
+    ok, out = _osa(script)
     if ok:
-        return "Toggled the tab sidebar."
+        return {"show": "Showed the tab sidebar.",
+                "hide": "Hid the tab sidebar."}.get(direction, "Toggled the tab sidebar.")
     if "assistive access" in out.lower() or "not allowed" in out.lower():
         return ("That needs Accessibility permission: System Settings → Privacy & "
                 "Security → Accessibility → enable your terminal.")
-    return f"Couldn't toggle sidebar ({out})."
+    return f"Couldn't reach the sidebar menu ({out})."
 
 
 def _as_str(s: str) -> str:

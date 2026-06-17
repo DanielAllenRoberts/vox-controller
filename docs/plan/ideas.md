@@ -189,7 +189,7 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Connects to:** the emergency-stop phrases (built — `abort_phrases`), the executor (#12), and `research/voice-turn-taking.md` (barge-in / interruption).
 
-**Status:** the panic phrases land you in idle *between* turns; this is the upgrade to *mid-task* cancel.
+**Status:** ✅ BUILT for LLM calls — say "go to sleep" / "stop" / "quit" / "restart" *while the brain is thinking* and it cancels immediately (the call runs on a thread; a stop phrase abandons it). Toggle `barge_in_enabled`. Caveat: the abandoned call finishes in the background, so a quick *action* it was about to run may still complete (slow calls are usually chat/compose/vision, where abandoning is clean). Still pending: interrupting Vox's own *spoken* reply (TTS), which needs AEC (#21) so it doesn't hear itself.
 
 ## 20. Cross-platform (Windows / Linux)
 
@@ -214,6 +214,20 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 - **Accent pairing:** each personality can carry a `tts_voice` (e.g. a British voice for the dry-butler persona) — macOS `say` already has per-accent voices (Daniel en_GB, Karen en_AU, Moira en_IE, Rishi en_IN, Tessa en_ZA…).
 
 **Connects to:** the chat system prompt (`_SYSTEM`), TTS voices (`tts_voice`), the learning/rules store (#14).
+
+## 23. Escalation policy — when an unparsed command reaches the brain
+
+**Vision:** control mode is **deterministic-first** — a known command runs locally; anything else *escalates* to the LLM. That escalation is great for "do what I mean", but it also means **any speech the parser can't handle reaches the brain** — including a video on the speakers or a side conversation (issues.md O7). Give the user a dial for how eager that escalation is.
+
+**Two modes (config `escalation_mode`):**
+- **`"auto"` (default, as it's always been):** escalate whatever the parser misses. Most natural for headphones / a quiet room — you can phrase anything and Vox tries. The 1-word/filler **noise gate** still drops obvious background fragments.
+- **`"keywords"`:** escalate **only** when the utterance contains an `escalation_keywords` trigger — "write", "compose", "make this", "rewrite", "vox", "I need help", "learn", "what does this"… (grouped by the executor capability they reach: compose / rewrite / screen-vision / direct-ask). Everything else is ignored. You **opt the brain in by phrasing** ("*Vox,* write me an email", "make this pretty"), so a podcast or a colleague talking no longer trips the LLM. The keyword list is tunable to your habits.
+
+**Important nuance:** a **pending clarification** (the brain just asked *you* a question) always escalates regardless of mode — otherwise a keyword-free answer like "the blue one" would be dropped.
+
+**Why it matters / connects to:** this is the **steerable** sibling of the noise gate and a strong, today-available mitigation for **O7** (ambient audio → false LLM triggers) until AEC (#21) lands. It also sets up the future **tiered cascade** (rules → keywords → fast model → deep model) and pairs with the learning layer (#14): learned triggers could extend `escalation_keywords` automatically.
+
+**Status:** ✅ BUILT (2026-06-17). `escalation_mode` + `escalation_keywords` in config; gated in `_control_mode` so non-keyword utterances are ignored in keyword mode (auto mode unchanged). Default stays `"auto"` so nothing changes unless you opt in.
 
 ## Sequencing note
 
