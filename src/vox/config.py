@@ -32,7 +32,7 @@ class Config:
 
     # Sleep / deactivate — matched in transcribed text (no model needed; we're
     # already transcribing once a mode is active).
-    sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep")
+    sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep", "go ahead and sleep", "going to sleep")
     sleep_spoken: str = "stand down"
 
     # Emergency stop — drop straight to idle from any mode (more forceful than "stand down").
@@ -67,10 +67,11 @@ class Config:
     silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
     assistant_silence_seconds: float = 1.2  # pause allowed in ASSISTANT mode before it sends
     max_utterance_seconds: float = 8.0
-    listen_timeout_seconds: float = 6.0  # assistant mode: give up waiting (control mode keeps listening)
-    # Patient wait while the model tagged its reply [OPEN] (it expects you to respond). This is a
-    # safety cap so Vox can't hang forever — the LLM decides when to wait, not a hand-tuned heuristic.
-    assistant_open_timeout_seconds: float = 20.0
+    listen_timeout_seconds: float = 6.0  # wake/dictation re-arm interval (control mode keeps listening)
+    assistant_idle_timeout_seconds: float = 4.0   # assistant chat: drop to control/idle after this silence
+    # Patient wait while the model tagged its reply [OPEN] (it expects you to respond) — a safety
+    # cap so it waits a bit longer when it asked YOU something, without hanging forever.
+    assistant_open_timeout_seconds: float = 8.0
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
 
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
@@ -102,6 +103,10 @@ class Config:
     big_brain_provider: str = "claude_sdk"
     big_brain_model: str = "claude-opus-4-8"
     escalate_to_big_brain: bool = True   # let the small brain defer complex turns to the big brain
+
+    # Personality (idea #22): injected into the chat prompt to set Vox's tone. "" = default.
+    # e.g. "witty and concise", "warm and encouraging", "a dry, deadpan British butler".
+    personality: str = ""
 
     llm_base_url: str = ""               # for openai-compatible providers (DeepSeek, Ollama, LM Studio)
     llm_api_key_env: str = "ANTHROPIC_API_KEY"  # env var holding the API key (openai/anthropic providers)
