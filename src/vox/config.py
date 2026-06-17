@@ -35,11 +35,15 @@ class Config:
     sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep")
     sleep_spoken: str = "stand down"
 
+    # Emergency stop — drop straight to idle from any mode (more forceful than "stand down").
+    # Distinctive multi-word phrases so ambient speech can't trigger them.
+    abort_phrases: tuple[str, ...] = ("terminate task", "emergency stop", "abort abort", "stop stop stop")
+
     # Quit the whole program by voice — keyed to "vox" so idle speech can't trigger it.
     quit_phrases: tuple[str, ...] = (
         "quit vox", "quit fox", "quit box", "quick vox", "quick fox", "quick box",
         "close vox", "close fox", "close box", "exit vox", "exit fox", "exit box",
-        "shut down vox",
+        "shut down vox", "terminate vox", "terminate fox", "terminate box",
     )
 
     # Restart the running process (re-exec — picks up code changes) by voice.
@@ -75,9 +79,10 @@ class Config:
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
-        # Only uncommon proper nouns — biasing common command verbs ("open/tab/next")
-        # makes Whisper hallucinate the whole list on noise. "switch" stays (mis-heard as "search").
-        "vox switch cursor arc safari chrome github youtube gmail spotify notion "
+        # Only uncommon proper nouns. Biasing command verbs — or "vox" — makes Whisper regurgitate
+        # this list on noise; a "vox …" hallucination then falsely fires the idle one-shot, so "vox"
+        # is OUT. "switch" stays (else mis-heard as "search"); it can't fire the one-shot (no "vox").
+        "switch cursor arc safari chrome github youtube gmail spotify notion "
         "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
     )
 
@@ -100,7 +105,7 @@ class Config:
 
     llm_base_url: str = ""               # for openai-compatible providers (DeepSeek, Ollama, LM Studio)
     llm_api_key_env: str = "ANTHROPIC_API_KEY"  # env var holding the API key (openai/anthropic providers)
-    llm_max_tokens: int = 400
+    llm_max_tokens: int = 800   # headroom for composing text ("write me…"); chat stays short via the prompt
 
     # LLM-as-executor (idea #12): on an uncertain command, the small brain runs Vox's own
     # actions instead of just explaining. Provider-agnostic — works on the subscription/SDK and
@@ -116,6 +121,7 @@ class Config:
     sound_dictate_start: str = "/System/Library/Sounds/Tink.aiff"    # started dictation (typing)
     sound_dictate_stop: str = "/System/Library/Sounds/Sosumi.aiff"   # stopped dictation
     sound_oneshot: str = "/System/Library/Sounds/Morse.aiff"         # one-shot command ("Vox, open Safari")
+    sound_abort: str = "/System/Library/Sounds/Basso.aiff"           # emergency stop / abort
 
 
 CONFIG = Config()
