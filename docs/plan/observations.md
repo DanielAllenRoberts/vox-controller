@@ -23,6 +23,10 @@
 
 Control mode is a hot mic, so Whisper transcribes *everything* it hears: keyboard clicks → "click click click", clock sounds → "tick tock tick tock", and even a **playing YouTube video's narration** ("if you like this video please subscribe and like…"). All of it correctly **hands off** (no action) thanks to no-guess matching — harmless, just genuinely funny to watch Vox earnestly hand off a YouTuber's outro. The one real risk: a command buried in ambient speech (e.g. reading the hotword list aloud fired "next desktop"). Future mitigation: a confidence / voice-activity gate, or just "stand down" when not actively commanding.
 
+## 2026-06-17 — Hallucinated commands on silence (hotword bias amplified it)
+
+The mic captured background noise (no speech) and Whisper **hallucinated** text — specifically *our hotword list* ("vox quit close exit shut down tab window"), because biasing toward those words makes Whisper reach for them on noise. "shut **down tab**" then parsed → fired "Tab down" with no one speaking. **Fix: `vad_filter=True`** in faster-whisper runs a real speech detector and drops non-speech before transcribing → noise yields empty → no command (verified: silence + hotwords → `''`). Lesson: hotword biasing helps real recognition but worsens noise-hallucination; VAD is the counterweight. A grammar gate (only act on short, clean command utterances) would harden it further — see `ideas.md` #9.
+
 ## The principle this points to
 
 **Whenever a deterministic action is low-confidence or unmatched → escalate to the assistant.** This is the bridge between CONTROL mode (fast, deterministic) and ASSISTANT mode (LLM reasoning), and it's what makes the system feel smart rather than brittle. (See the tiered cascade in `overview.md`.)

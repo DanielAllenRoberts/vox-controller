@@ -9,6 +9,8 @@ See docs/plan/modes.md.
 import os
 import sys
 
+from dotenv import load_dotenv
+
 from vox import actions, assistant, sounds
 from vox.audio import MicStream, capture_utterance
 from vox.config import CONFIG
@@ -94,30 +96,32 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
 
 
 def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
-    out.emit("● ASSISTANT MODE — ask something…")
-    audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
-    if audio is None:
-        out.emit("  (heard nothing)")
-        return return_to
-    text = _transcribe(transcriber, audio, cfg, out)
-    if not text:
-        out.emit("  (heard nothing)")
-        return return_to
-    if _is_quit(text, cfg):
-        raise _Quit
-    if _is_restart(text, cfg):
-        raise _Restart
-    if _is_sleep(text, cfg):
-        sounds.play(cfg.sound_sleep)
-        out.emit("○ Sleeping.")
-        return None
-    if _is_control(text, cfg):
-        out.emit("→ switching to control…")
-        return "control"
-    sounds.play(cfg.sound_send)  # prompt captured → "sending to the AI"
-    out.emit(f"  you: {text!r}")
-    out.emit(f"  → {assistant.respond(text)}")
-    return return_to
+    out.emit('● ASSISTANT MODE — chat with me. Say "stand down" when done.')
+    history = []
+    while True:
+        audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
+        if audio is None:
+            out.emit("  (no reply — back to idle)")
+            return return_to
+        text = _transcribe(transcriber, audio, cfg, out)
+        if not text:
+            continue
+        if _is_quit(text, cfg):
+            raise _Quit
+        if _is_restart(text, cfg):
+            raise _Restart
+        if _is_sleep(text, cfg):
+            sounds.play(cfg.sound_sleep)
+            out.emit("○ Sleeping.")
+            return None
+        if _is_control(text, cfg):
+            out.emit("→ switching to control…")
+            return "control"
+        sounds.play(cfg.sound_send)  # captured → "sending to the AI"
+        out.emit(f"  you: {text!r}")
+        reply = assistant.respond(text, history)
+        history += [("user", text), ("assistant", reply)]
+        out.emit(f"  🔊 {reply}")
 
 
 def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
@@ -144,6 +148,7 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
 
 def main() -> None:
     cfg = CONFIG
+    load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
     out = ConsoleOutput(cfg.log_file)
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
@@ -163,6 +168,11 @@ def main() -> None:
                     raise _Quit
                 if label == "restart":
                     raise _Restart
+                if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
+                    cmd = label[3:]
+                    out.emit(f"⚡ {cmd!r} → {actions.handle(cmd)}")
+                    out.emit(idle_msg)
+                    continue
                 # A mode may return a follow-on label to chain into the other mode
                 # without dropping to idle. If the assistant was reached *from* control,
                 # it returns to control when done (instead of idling).

@@ -492,10 +492,18 @@ def dictate(text: str) -> None:
     — `keystroke` injects too fast and the app drops characters (notably spaces). A few
     spoken words are treated as edit keys."""
     low = text.strip().lower().rstrip(".!?")
-    keys = {"new line": 36, "newline": 36, "new paragraph": 36, "enter": 36, "return": 36,
-            "backspace": 51, "delete": 51, "delete that": 51, "tab key": 48}
-    if low in keys:
-        _osa(f'tell application "System Events" to key code {keys[low]}')
+    # spoken edit words -> (key code, modifier). "new/next line" is a SOFT newline
+    # (Shift+Return) so it doesn't *send* in chat apps; "enter"/"send" is a plain Return.
+    specials = {
+        "new line": (36, "shift down"), "newline": (36, "shift down"),
+        "next line": (36, "shift down"), "new paragraph": (36, "shift down"),
+        "enter": (36, ""), "return": (36, ""), "send": (36, ""), "submit": (36, ""),
+        "backspace": (51, ""), "delete": (51, ""), "delete that": (51, ""), "tab key": (48, ""),
+    }
+    if low in specials:
+        code, mod = specials[low]
+        _osa(f'tell application "System Events" to key code {code}'
+             + (f' using {{{mod}}}' if mod else ''))
         return
     safe = (text + " ").replace("\\", "\\\\").replace('"', '\\"')
     _osa('set savedClip to ""\n'

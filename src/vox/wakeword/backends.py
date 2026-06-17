@@ -41,6 +41,18 @@ class WhisperWakeBackend:
             label = self.match(text)
             if label is not None:
                 return label
+            cmd = self._oneshot(text)
+            if cmd:
+                return "do:" + cmd
+
+    def _oneshot(self, text: str) -> str | None:
+        # "Vox, <command>" from idle → run it once (no "hey" = command, not chat).
+        from vox import actions
+        t = normalize(text)
+        if not t.startswith("vox "):
+            return None
+        rest = t[4:].strip()
+        return rest if actions.parse(rest) else None
 
 
 class OpenWakeWordBackend:

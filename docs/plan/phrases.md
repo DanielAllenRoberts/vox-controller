@@ -7,7 +7,8 @@
 | Intent | Say | Notes |
 |---|---|---|
 | Enter **control** mode | "take control", "control mode", "start control" | |
-| Enter **assistant** mode | "Hey Vox" | + variants Whisper may hear: hey vaux, hey vocks, a vox, hey fox, hey box |
+| Enter **assistant** mode (LLM chat) | "Hey Vox" | multi-turn chat with Claude; + variants: hey vaux, hey vocks, a vox, hey fox, hey box |
+| One-shot command | "Vox, <command>" — e.g. "Vox, open Safari" | runs one command from idle ("vox" + a command, no "hey") |
 | **Quit** Vox | "quit Vox", "close Vox", "exit Vox", "shut down Vox" | + quit/quick/close/exit × vox/fox/box variants (keyed to "vox" so idle chatter can't trigger it) |
 | **Restart** Vox | "restart Vox", "reboot Vox" | re-runs the process (picks up code changes) |
 
@@ -34,7 +35,7 @@
 | Switch Arc profile | "profile <n>", "next/previous profile" | Ctrl+<n> (absolute) or ⌘⌥←→ (relative) |
 | Chain commands | "<cmd> and <cmd>" — e.g. "open Arc and search this" | runs both (only when both parse) |
 | Show/hide tabs | "show tabs", "hide tabs", "toggle sidebar" | toggles Arc's sidebar |
-| Dictation | "start typing" → speak → "stop typing" | types what you say at the cursor; edit words: "backspace", "new line", "delete that", "tab key" |
+| Dictation | "start typing" → speak → "stop typing" | types at the cursor; edit words: "new line"/"next line" (soft newline), "enter"/"send", "backspace", "delete that", "tab key" |
 | (anything else) | — | "handing off to the assistant" (no guessing) |
 
 ## Known site aliases (for "go to X")

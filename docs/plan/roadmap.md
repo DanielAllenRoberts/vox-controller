@@ -10,6 +10,8 @@ A **named voice assistant** that:
 - lets you **mix input/output modality** (speak or type in; hear or read out),
 - performs a few **basic host tasks** (e.g. opening apps you name).
 
+> **Where we are (2026-06-17):** M0 + M1 done, and the **Control layer is extensively built** well beyond v1's "basic host tasks" (see `features.md`). The remaining v1 pieces are the *intelligence* and *voice-output* halves: **M4 (LLM brain)**, **M2 (TTS)**, **M3 (modality)**. Wake is Whisper-based (custom "Hey Vox" not trained yet).
+
 ## Milestones (incremental)
 
 ### M0 — Listening loop skeleton
@@ -20,7 +22,7 @@ Wake word (the assistant's name) → start listening → Whisper transcribes →
 ### M1 — Basic action execution
 Map simple intents to host actions. First action: **open an app** ("open Safari").
 - **Verify:** "open Safari" actually launches Safari; an unknown app fails gracefully.
-- **Status:** ✅ built (2026-06-17). Done as part of the mode state machine — `open <app>` runs in Control mode. Multi-phrase detection, parser, sleep, capture all verified offline; pending a live mic spin.
+- **Status:** ✅ DONE — and vastly expanded. The Control layer now does far more than "open app": fuzzy/profile-safe browser tabs, app windows, macOS desktops, Arc profiles, web search, sidebar toggle, back, app-window cycling, smart current-space tab reuse, command chaining ("X and Y"), **dictation** (speak-to-type), quit/restart, and session logging. Full list in `features.md` / `phrases.md`.
 
 ### M2 — Voice output (TTS)
 Give the assistant a voice; speak confirmations/responses.
@@ -34,6 +36,7 @@ Independently choose **input** (mic or typed) and **output** (voice or text). Al
 ### M4 — Pluggable AI + intent parsing
 Replace hardcoded command matching with **model-based intent classification** behind the provider-agnostic interface (default: Claude Haiku). Any provider swappable via config.
 - **Verify:** novel phrasing ("could you launch the browser") still opens the right app.
+- **Status:** 🚧 STARTED (2026-06-17). Assistant mode is now real **multi-turn chat** backed by Claude (Haiku 4.5) via a provider-agnostic `assistant.respond`; key in `.env`. Next: LLM-powered text commands (write / make-pretty), escalation from control mode, then voice output (M2).
 
 ## Backlog (post-v1, ordered loosely)
 
