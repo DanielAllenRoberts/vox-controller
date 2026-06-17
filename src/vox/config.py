@@ -47,6 +47,8 @@ class Config:
 
     # Enter DICTATION (speak-to-type at the cursor) from control mode.
     dictate_phrases: tuple[str, ...] = ("start typing", "start dictation", "begin typing", "dictate")
+    # True: a long pause auto-exits dictation (can't get stuck). False: stay until "stop typing".
+    dictation_exit_on_silence: bool = True
 
     # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
     log_file: str = "vox.log"
@@ -79,17 +81,31 @@ class Config:
         "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
     )
 
-    # --- Assistant (LLM) brain — provider-agnostic ---  key(s) go in .env. Presets:
-    #   Anthropic : provider="anthropic", model="claude-haiku-4-5-20251001", key_env="ANTHROPIC_API_KEY"
-    #   DeepSeek  : provider="openai", model="deepseek-chat", base_url="https://api.deepseek.com", key_env="DEEPSEEK_API_KEY"
-    #   OpenAI    : provider="openai", model="gpt-4o-mini", key_env="OPENAI_API_KEY"
-    #   Claude SDK: provider="claude_sdk"  (Claude Code via the Agent SDK; uses your subscription, no key)
-    #   Claude CLI: provider="claude_cli"  (Claude Code via `claude -p`; uses your subscription, no key)
-    llm_provider: str = "claude_sdk"     # "anthropic" | "openai" | "claude_sdk" | "claude_cli"
-    llm_model: str = "claude-haiku-4-5-20251001"  # used by anthropic/openai; claude_sdk/cli use your subscription
-    llm_base_url: str = ""               # for openai-compatible providers (e.g. DeepSeek)
-    llm_api_key_env: str = "ANTHROPIC_API_KEY"
+    # --- Brains (idea #17) --- Vox routes thinking to one of two configurable "brains":
+    #   • small = fast/cheap; default for chat + command execution
+    #   • big   = powerful; the small brain hands complex turns here (e.g. Opus on Claude Max)
+    # Each is a provider + model. For claude_sdk/claude_cli the model runs on your Claude
+    # subscription (no API key); for anthropic/openai it uses the key named by llm_api_key_env.
+    # Providers: "claude_sdk" | "claude_cli" | "anthropic" | "openai".  Presets:
+    #   Claude (sub)  : provider="claude_sdk", model="claude-haiku-4-5-20251001" / "claude-opus-4-8"
+    #   Anthropic API : provider="anthropic",  model="claude-haiku-4-5-20251001", llm_api_key_env="ANTHROPIC_API_KEY"
+    #   DeepSeek      : provider="openai", model="deepseek-chat", llm_base_url="https://api.deepseek.com", llm_api_key_env="DEEPSEEK_API_KEY"
+    #   Local Ollama  : provider="openai", model="llama3.1",       llm_base_url="http://localhost:11434/v1", llm_api_key_env=<any dummy>
+    #   Local LM Studio: provider="openai", model="<loaded model>", llm_base_url="http://localhost:1234/v1",  llm_api_key_env=<any dummy>
+    small_brain_provider: str = "claude_sdk"
+    small_brain_model: str = "claude-haiku-4-5-20251001"
+    big_brain_provider: str = "claude_sdk"
+    big_brain_model: str = "claude-opus-4-8"
+    escalate_to_big_brain: bool = True   # let the small brain defer complex turns to the big brain
+
+    llm_base_url: str = ""               # for openai-compatible providers (DeepSeek, Ollama, LM Studio)
+    llm_api_key_env: str = "ANTHROPIC_API_KEY"  # env var holding the API key (openai/anthropic providers)
     llm_max_tokens: int = 400
+
+    # LLM-as-executor (idea #12): on an uncertain command, the small brain runs Vox's own
+    # actions instead of just explaining. Provider-agnostic — works on the subscription/SDK and
+    # local LLMs, no API key beyond whatever the small brain already uses. False = just chat.
+    llm_executor_enabled: bool = True
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
