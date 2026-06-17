@@ -30,7 +30,11 @@ _SYSTEM = (
     "never mention it. When unsure, prefer [OPEN].\n\n"
     "If a request needs deep reasoning, careful analysis, long writing, or coding beyond a quick "
     "spoken answer, reply with exactly [BIG] and nothing else — a more capable model then takes "
-    "over. Use this sparingly, only when a short answer genuinely won't do."
+    "over. Use this sparingly, only when a short answer genuinely won't do.\n\n"
+    "Voice: your reply is shown in full and also read aloud. When the spoken version should be "
+    "shorter than the written one, add a final line 'SAY: <concise spoken version>' — then only "
+    "that line is read aloud (it's removed from the shown text). Skip it when the whole reply is "
+    "fine to speak."
 )
 
 _anthropic_client = None
@@ -73,6 +77,17 @@ def complete(text: str, history=None, *, brain: str = "small", system: str = _SY
     if provider == "openai":
         return _openai(text, history, model, system)
     return _anthropic(text, history, model, system)
+
+
+def split_say(text: str) -> tuple[str, str]:
+    """Split a reply into (shown, spoken). A 'SAY: …' line means only that is spoken (and is
+    removed from the shown text); without it, shown == spoken."""
+    m = re.search(r"(?im)^[ \t]*say:[ \t]*(.+?)[ \t]*$", text or "")
+    if not m:
+        return text, text
+    spoken = m.group(1).strip()
+    shown = (text[:m.start()] + text[m.end():]).strip()
+    return shown, spoken or shown
 
 
 def _split_signal(raw: str) -> tuple[str, bool]:
@@ -158,3 +173,60 @@ def _claude_cli(text, history, model, system):
         return "Claude CLI not found — install Claude Code, or set a different brain provider."
     except Exception as exc:
         return f"(claude CLI error: {exc})"
+
+
+def look(question: str, image_path: str, brain: str = "small") -> str:
+    """Answer a question about an on-screen image using a vision-capable brain."""
+    provider, model = _brain(brain)
+    if provider in ("claude_sdk", "claude_cli"):
+        return _sdk_look(question, image_path, model)
+    if provider == "anthropic":
+        return _anthropic_look(question, image_path, model)
+    return "Looking at the screen needs a Claude or Anthropic brain — this one can't see images."
+
+
+def _sdk_look(question, image_path, model):
+    # Claude Code via the SDK reads the image file with its Read tool — runs on your subscription.
+    import asyncio
+
+    from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
+    prompt = (f"Read the image file {image_path} — it's a screenshot of the user's Mac. "
+              f"Then answer concisely for text-to-speech (1-2 sentences): {question}")
+    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=4,
+                              permission_mode="bypassPermissions", model=model)
+
+    async def _run():
+        parts = []
+        async for msg in query(prompt=prompt, options=opts):
+            if isinstance(msg, AssistantMessage):
+                parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
+        return "".join(parts).strip()
+
+    try:
+        return asyncio.run(_run()) or "(no response)"
+    except Exception as exc:
+        return f"(vision error: {exc})"
+
+
+def _anthropic_look(question, image_path, model):
+    import base64
+    key = os.environ.get(CONFIG.llm_api_key_env or "ANTHROPIC_API_KEY")
+    if not key:
+        return f"I need {CONFIG.llm_api_key_env} in your .env for API vision."
+    global _anthropic_client
+    if _anthropic_client is None:
+        from anthropic import Anthropic
+        _anthropic_client = Anthropic(api_key=key)
+    with open(image_path, "rb") as f:
+        data = base64.standard_b64encode(f.read()).decode()
+    try:
+        resp = _anthropic_client.messages.create(
+            model=model, max_tokens=CONFIG.llm_max_tokens,
+            messages=[{"role": "user", "content": [
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/png", "data": data}},
+                {"type": "text", "text": f"{question} Answer concisely (1-2 sentences)."}]}])
+        return "".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as exc:
+        return f"(vision error: {exc})"

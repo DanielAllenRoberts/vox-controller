@@ -175,6 +175,34 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Connects to:** the executor/brains (#12, #17), `environment_context` (built), and the coding-agents research note on per-turn `environment_details`.
 
+## 19. Barge-in — interrupt mid-task ("stop it NOW")
+
+**Vision:** say the emergency word (or any speech) and have Vox **stop immediately**, even mid-LLM-call — the "cancel before it acts" the abort phrases can't yet do.
+
+**Why it's not free today:** Vox is **synchronous** — while waiting on the brain it isn't processing the mic, so `abort` is only seen *between* utterances, after the current action finishes.
+
+**How it might work:**
+- Keep the mic stream draining on a **background listener thread** during any blocking brain call.
+- Run the brain/executor call so its result can be **discarded** if an abort/stop phrase is detected before it lands (Python can't kill a thread cleanly, so let the call finish but skip the action).
+- Where possible, cancel the underlying subprocess (claude CLI/SDK).
+- Generalises to true **interruption/barge-in** (the voice-agent research pattern): a quick word also stops TTS playback once that exists.
+
+**Connects to:** the emergency-stop phrases (built — `abort_phrases`), the executor (#12), and `research/voice-turn-taking.md` (barge-in / interruption).
+
+**Status:** the panic phrases land you in idle *between* turns; this is the upgrade to *mid-task* cancel.
+
+## 20. Cross-platform (Windows / Linux)
+
+**Vision:** it's open source — others will want it on Windows (and Linux).
+
+**The split:**
+- **Easy parts (already near-portable):** STT (faster-whisper) is cross-platform. **TTS**: Windows has built-in **SAPI** (`System.Speech.Synthesis` via PowerShell), and the cross-platform lib **`pyttsx3`** wraps SAPI (Win) / NSSpeechSynthesizer (Mac) / espeak (Linux). `tts.py` is already the swap point, so a `speak()` per-OS is small.
+- **The hard part:** `actions.py` is **entirely macOS** — AppleScript + System Events for every command (apps, tabs, windows, Spaces, keystrokes, clipboard, screenshot). A Windows port needs a parallel automation layer: **UI Automation / pywinauto**, `pyautogui`/`keyboard` for keystrokes, `pygetwindow` for windows, PowerShell to launch apps, browser-specific automation, and `PIL.ImageGrab` for the screenshot.
+
+**Approach:** define a platform-agnostic `actions` interface with `actions_macos.py` (current) + `actions_windows.py`, selected at runtime; TTS/STT abstract cleanly already. The architecture (swappable I/O, deterministic-first) is friendly to it — but it's a real effort, mostly re-implementing `actions.py`.
+
+**Connects to:** `tts.py` (the swap point), the modular-components goal in `overview.md`.
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

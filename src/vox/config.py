@@ -112,6 +112,18 @@ class Config:
     # local LLMs, no API key beyond whatever the small brain already uses. False = just chat.
     llm_executor_enabled: bool = True
 
+    # Screen vision (idea #18): the brain can screenshot and "see" the screen when asked
+    # ("what does this say?"). Sends ONE downscaled frame to the cloud brain — set False to disable.
+    # Needs Screen Recording permission (System Settings → Privacy & Security → Screen Recording).
+    screen_vision_enabled: bool = True
+
+    # --- Voice output (TTS) --- macOS `say`: local, instant, no model download. Swap for a
+    # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →
+    # Accessibility → Spoken Content → System Voice → Manage Voices.
+    tts_enabled: bool = True
+    tts_voice: str = ""    # macOS voice name (e.g. "Samantha", "Ava (Premium)"); "" = system default
+    tts_rate: int = 0      # words per minute; 0 = the voice's default
+
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
     sound_control: str = "/System/Library/Sounds/Hero.aiff"

@@ -6,6 +6,7 @@ Unknown input hands off to the assistant (no guessing).
 """
 
 import difflib
+import os
 import re
 import subprocess
 import urllib.parse
@@ -233,6 +234,20 @@ def environment_context() -> str:
     if ok and titles:
         parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(t[:60] for t in titles[:25]))
     return "\n".join(parts)
+
+
+def capture_screen() -> str | None:
+    """Capture the screen to a downscaled PNG for the vision brain; returns the path, or None.
+    Needs Screen Recording permission (System Settings → Privacy & Security → Screen Recording)."""
+    raw, small = "/tmp/vox_screen_raw.png", "/tmp/vox_screen.png"
+    if subprocess.run(["screencapture", "-x", raw], capture_output=True).returncode != 0 \
+            or not os.path.exists(raw):
+        return None
+    if subprocess.run(["sips", "-Z", "1568", raw, "--out", small],
+                      capture_output=True).returncode == 0 and os.path.exists(small):
+        os.remove(raw)
+        return small
+    return raw  # downscale failed — fall back to the full-res capture
 
 
 def _browser_tab_script(browser: str, url: str) -> str | None:

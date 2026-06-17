@@ -46,6 +46,9 @@
 | Feature | Status | Milestone / notes |
 |---|---|---|
 | LLM text commands (write / rewrite) | ✅ | in control mode: "write me an email about X" → composes & types it at the cursor; "make this pretty" → rewrites your **selected** text in place | small brain → clipboard paste. Rewrite copies the selection (⌘C), rewrites, pastes back (⌘V), restores clipboard — works anywhere standard copy/paste does (Docs, editors, fields); needs Accessibility. Very long text may truncate (token cap). ideas #10 |
+| Screen vision ("look at my screen") | ✅ | "what does this say?" / "what's on my screen" / "read this error" | brain screenshots (`screencapture`), downscales, and reads it — runs on your Claude subscription via the SDK Read tool (no API key). Needs **Screen Recording** permission; sends one frame to the cloud; toggle `screen_vision_enabled`. ideas #18 |
+| Voice output (TTS) | ✅ | Vox speaks its 🔊 replies aloud | macOS `say` — local, instant, no model download; speaks conversational replies/questions/screen-reads, stays quiet on actions. Toggle `tts_enabled`, set `tts_voice`/`tts_rate`. Swap for Piper later (`tts.py`). **M2** |
+| Chatter ignore | ✅ | background talk it can't action → no response | the brain returns `IGNORE` for non-requests so stray speech doesn't get answered |
 | LLM-as-executor (runs commands, not just explains) | 🚧 | control-mode escalation hands the utterance to the **small brain**, which runs the matching Vox action (action-first, quiet cue) instead of saying "I can't". Provider-agnostic — works on your Claude subscription, an API, or a local LLM (no native tool-calling needed). ideas #12 |
 | Action-first / silent success | 💡 | execute with just a sound cue; speak only when ambiguous or asked — seamless; ideas #13 |
 | Self-wiring command learning | 💡 | capture LLM-resolved fallbacks → **learned rules** (instant next time), wired up in the background; ideas #14–15 |
