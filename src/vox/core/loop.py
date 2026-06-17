@@ -43,6 +43,11 @@ def _is_sleep(text: str, cfg) -> bool:
     return any(p in t for p in cfg.sleep_phrases)
 
 
+def _is_abort(text: str, cfg) -> bool:
+    t = normalize(text)
+    return any(p in t for p in cfg.abort_phrases)
+
+
 def _is_assistant(text: str, cfg) -> bool:
     t = normalize(text)
     return any(p in t for p in cfg.assistant_phrases)
@@ -70,6 +75,7 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
 
 def _control_mode(frames, cfg, transcriber, out) -> None:
     out.emit(f'● CONTROL MODE — e.g. "open Safari" or "go to GitHub". Say "{cfg.sleep_spoken}" to stop.')
+    pending = []  # short clarification memory: when the brain asks a question, the next answer gets context
     while True:
         audio = capture_utterance(frames, cfg)
         if audio is None:
@@ -77,6 +83,10 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
         text = _transcribe(transcriber, audio, cfg, out, hotwords=cfg.command_hotwords)
         if not text:
             continue
+        if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
+            sounds.play(cfg.sound_abort)
+            out.emit("🛑 Stopped.")
+            return None
         if _is_quit(text, cfg):
             raise _Quit
         if _is_restart(text, cfg):
@@ -92,15 +102,21 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
             out.emit("→ entering dictation…")
             return "dictation"
         out.emit(f"  you: {text!r}")
-        if actions.parse(text) is not None:
-            out.emit(f"  → {actions.handle(text)}")
-        else:  # uncertain → hand to the executor (fast model w/ Vox's tools): it acts, or replies
-            acted, msg = executor.execute(text)
+        result = actions.handle(text) if actions.parse(text) is not None else None
+        if result is not None and not actions.failed(result):
+            out.emit(f"  → {result}")
+            pending = []  # a clean command ran → drop any pending clarification
+        else:  # unparsed, or the deterministic attempt found no target → let the brain try
+            acted, msg = executor.execute(text, pending)
             if acted:
                 sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
                 out.emit(f"  ⚡ {msg}")
+                pending = []
             else:
                 out.emit(f"  🔊 {msg}")
+                # brain asked something → remember this exchange so the next answer has context
+                pending = (pending + [("user", text), ("assistant", msg)])[-4:] \
+                    if msg.rstrip().endswith("?") else []
 
 
 def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
@@ -118,6 +134,10 @@ def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
         text = _transcribe(transcriber, audio, cfg, out)
         if not text:
             continue
+        if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
+            sounds.play(cfg.sound_abort)
+            out.emit("🛑 Stopped.")
+            return None
         if _is_quit(text, cfg):
             raise _Quit
         if _is_restart(text, cfg):
@@ -150,6 +170,10 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
         text = _transcribe(transcriber, audio, cfg, out)
         if not text:
             continue
+        if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
+            sounds.play(cfg.sound_abort)
+            out.emit("🛑 Stopped.")
+            return None
         if _is_quit(text, cfg):
             raise _Quit
         if _is_restart(text, cfg):

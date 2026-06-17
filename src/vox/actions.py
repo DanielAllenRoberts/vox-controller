@@ -172,9 +172,15 @@ def parse(text: str) -> tuple[str, str] | None:
     m = re.search(r"\b(?:next\s+)?([a-z][a-z ]*?)\s+(?:window|space|screen)\b", t)
     if m and m.group(1).strip() not in ("the", "my", "a", "this", "next"):
         return ("app_cycle", m.group(1).strip())
-    m = re.search(r"\b(?:switch|cycle|toggle)\s+(?:to\s+)?([a-z][a-z ]+)", t)
+    m = re.search(r"\b(?:switch|cycle|toggle)\s+(?:to\s+)?([a-z]+(?:\s+[a-z]+)?)\b", t)
     if m:
-        return ("app_cycle", m.group(1).strip())
+        cand = m.group(1).strip()
+        # Only treat a short, app-like name as a switch. Let natural sentences ("switch me over
+        # to the next cursor tab") fall through to None → the LLM executor, which has context.
+        _filler = {"me", "to", "us", "it", "back", "over", "the", "my", "a", "an",
+                   "this", "that", "now", "please", "here", "tab", "tabs", "window", "windows"}
+        if not set(cand.split()) & _filler:
+            return ("app_cycle", cand)
     # Open / go to (app or known site).
     m = re.search(r"\b(?:open|go\s*to)\s+(?:the\s+)?(?:app\s+)?(.+)", t)
     if m:
@@ -207,6 +213,26 @@ def _osa(script: str) -> tuple[bool, str]:
 
 def _app_exists(name: str) -> bool:
     return _osa(f'id of app "{name}"')[0]
+
+
+def running_apps() -> list[str]:
+    """Names of currently-running, non-background apps — helps the brain pick the right one."""
+    ok, out = _osa('tell application "System Events" to get name of '
+                   'every process whose background only is false')
+    return [a.strip() for a in out.split(",") if a.strip()] if ok else []
+
+
+def environment_context() -> str:
+    """A short snapshot of the current Mac state for the executor's brain (running apps + open
+    browser tabs) so fuzzy references resolve to the right target. Best-effort; "" if unavailable."""
+    parts = []
+    apps = running_apps()
+    if apps:
+        parts.append("Running apps: " + ", ".join(apps[:40]))
+    ok, titles = _tab_titles(CONFIG.browser)
+    if ok and titles:
+        parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(t[:60] for t in titles[:25]))
+    return "\n".join(parts)
 
 
 def _browser_tab_script(browser: str, url: str) -> str | None:
@@ -255,7 +281,8 @@ def _reuse_tab(url: str) -> bool:
         return False
     if CONFIG.browser == "Arc":
         # Reuse only tabs in the CURRENT space (reliable, never jumps profiles). Arc's
-        # async space-switch makes a cross-space "try & roll back" flaky, so we don't.
+        # `tabs of front window` span ALL profiles, so matching there jumps you to another
+        # profile — don't. Favorites/pinned outside the current space won't be reused.
         script = (
             'tell application "Arc"\n    activate\n'
             '    repeat with t in tabs of (active space of front window)\n'
@@ -498,10 +525,26 @@ def _sidebar(direction: str) -> str:
     return f"Couldn't toggle sidebar ({out})."
 
 
+def _as_str(s: str) -> str:
+    """Encode a Python string as an AppleScript string expression (handles quotes + newlines)."""
+    s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\r\n", "\n").replace("\r", "\n")
+    return '"' + s.replace("\n", '" & linefeed & "') + '"'
+
+
+def _paste(text: str) -> None:
+    """Insert text at the cursor via the clipboard (reliable — `keystroke` drops fast chars),
+    restoring the previous clipboard afterwards."""
+    _osa('set savedClip to ""\n'
+         '    try\n        set savedClip to (the clipboard as text)\n    end try\n'
+         f'set the clipboard to {_as_str(text)}\n'
+         'tell application "System Events" to keystroke "v" using command down\n'
+         'delay 0.1\n'
+         'if savedClip is not "" then set the clipboard to savedClip')
+
+
 def dictate(text: str) -> None:
-    """Insert text at the cursor (frontmost app). Pastes via the clipboard for reliability
-    — `keystroke` injects too fast and the app drops characters (notably spaces). A few
-    spoken words are treated as edit keys."""
+    """Insert spoken text at the cursor (frontmost app). A few spoken words are treated as edit
+    keys; everything else is pasted (trailing space for word separation)."""
     low = text.strip().lower().rstrip(".!?")
     # spoken edit words -> (key code, modifier). "new/next line" is a SOFT newline
     # (Shift+Return) so it doesn't *send* in chat apps; "enter"/"send" is a plain Return.
@@ -516,13 +559,57 @@ def dictate(text: str) -> None:
         _osa(f'tell application "System Events" to key code {code}'
              + (f' using {{{mod}}}' if mod else ''))
         return
-    safe = (text + " ").replace("\\", "\\\\").replace('"', '\\"')
-    _osa('set savedClip to ""\n'
-         '    try\n        set savedClip to (the clipboard as text)\n    end try\n'
-         f'set the clipboard to "{safe}"\n'
+    _paste(text + " ")
+
+
+def type_text(text: str) -> str:
+    """Insert composed (LLM) text at the cursor verbatim — no edit-key interpretation."""
+    _paste(text)
+    return "Typed it in."
+
+
+def _get_clipboard() -> str:
+    ok, out = _osa("return (the clipboard as text)")
+    return out if ok else ""
+
+
+def edit_selection(transform) -> str:
+    """Rewrite the user's SELECTED text: copy it (⌘C), run transform(text)->text, paste it back
+    (⌘V), then restore the clipboard. `transform` is a callable (e.g. an LLM call). Needs
+    Accessibility permission; works anywhere standard copy/paste does (Docs, editors, fields)."""
+    import time
+    original = _get_clipboard()
+    sentinel = "__vox_no_selection__"
+    _osa(f'set the clipboard to "{sentinel}"\n'
+         'tell application "System Events" to keystroke "c" using command down')
+    time.sleep(0.15)
+    selected = _get_clipboard()
+    if selected == sentinel or not selected.strip():
+        _osa(f'set the clipboard to {_as_str(original)}')
+        return "Highlight some text first, then say it again."
+    new_text = (transform(selected) or "").strip()
+    if not new_text:
+        _osa(f'set the clipboard to {_as_str(original)}')
+        return "The brain returned nothing — left your text as is."
+    _osa(f'set the clipboard to {_as_str(new_text)}\n'
          'tell application "System Events" to keystroke "v" using command down\n'
          'delay 0.1\n'
-         'if savedClip is not "" then set the clipboard to savedClip')
+         f'set the clipboard to {_as_str(original)}')
+    return "Done — rewrote the selection."
+
+
+# Result-string markers meaning the deterministic attempt found no valid target. The LLM
+# executor (which sees running apps + open tabs) may resolve it, so CONTROL mode escalates here.
+_FAIL_MARKERS = (
+    "no app called", "no tab matching", "no window matching",
+    "not sure how to do that", "isn't wired up", "there aren't",
+)
+
+
+def failed(result: str) -> bool:
+    """True if a handle() result looks like a 'no such target' failure worth escalating to the brain."""
+    r = result.lower()
+    return any(m in r for m in _FAIL_MARKERS)
 
 
 def _handoff(what: str) -> str:

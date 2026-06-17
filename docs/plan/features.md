@@ -45,7 +45,7 @@
 
 | Feature | Status | Milestone / notes |
 |---|---|---|
-| LLM text commands | 🚧 | "write this" / "make this pretty" — compose/clean text via the LLM (builds on chat + dictation) |
+| LLM text commands (write / rewrite) | ✅ | in control mode: "write me an email about X" → composes & types it at the cursor; "make this pretty" → rewrites your **selected** text in place | small brain → clipboard paste. Rewrite copies the selection (⌘C), rewrites, pastes back (⌘V), restores clipboard — works anywhere standard copy/paste does (Docs, editors, fields); needs Accessibility. Very long text may truncate (token cap). ideas #10 |
 | LLM-as-executor (runs commands, not just explains) | 🚧 | control-mode escalation hands the utterance to the **small brain**, which runs the matching Vox action (action-first, quiet cue) instead of saying "I can't". Provider-agnostic — works on your Claude subscription, an API, or a local LLM (no native tool-calling needed). ideas #12 |
 | Action-first / silent success | 💡 | execute with just a sound cue; speak only when ambiguous or asked — seamless; ideas #13 |
 | Self-wiring command learning | 💡 | capture LLM-resolved fallbacks → **learned rules** (instant next time), wired up in the background; ideas #14–15 |

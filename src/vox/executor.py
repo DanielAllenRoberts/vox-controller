@@ -17,28 +17,59 @@ _SYSTEM = (
     "  open <app or website>          ·  go to <website>             ·  search <query>\n"
     "  go to my <name> tab            ·  next tab / previous tab     ·  go back  ·  close tab\n"
     "  next window / previous window  ·  swipe left / swipe right    ·  profile <number>\n"
+    "  <app> window  (switch to / cycle an app's windows, e.g. 'Cursor window')\n"
     "  show tabs / hide tabs\n"
+    "Two more things you can do with text at the cursor:\n"
+    "  • Compose text and insert it (e.g. 'write me an email about X', 'write a function that "
+    "sums a list'): output  TYPE: <the full finished text to insert>\n"
+    "  • Rewrite the text the user has SELECTED (e.g. 'make this pretty', 'fix the spelling', "
+    "'make it formal', 'shorten this'): output  EDIT: <the rewrite instruction>\n"
     "Rules:\n"
     "• If it maps to a command, output just that command line (e.g. close tab).\n"
+    "• For TYPE, write the actual finished text (no preamble, no quotes). For EDIT, give only the "
+    "instruction — the selected text is fetched and rewritten in a separate step.\n"
+    "• If a command is missing one needed detail (e.g. a search with no query), ask for it: "
+    "CHAT: <short question>\n"
     "• If it's a question or can't be done as a command, output: CHAT: <one short spoken sentence>\n"
-    "• Transcripts may be garbled — infer intent. Output nothing except the command or the CHAT line."
+    "• Earlier turns may be shown for context (e.g. your own question + the user's answer) — use them.\n"
+    "• Transcripts may be garbled — infer intent. Output only the command / TYPE / EDIT / CHAT line."
+)
+
+_EDIT_SYSTEM = (
+    "You rewrite text. Output ONLY the rewritten text — no preamble, no explanation, no quotes, "
+    "no markdown fences. Preserve the user's meaning; change only what the instruction asks for."
 )
 
 
-def execute(text: str) -> tuple[bool, str]:
+def _rewrite(selected: str, instruction: str) -> str:
+    """Apply a rewrite instruction to selected text (used by the EDIT / 'make this pretty' flow)."""
+    return assistant.complete(f"Instruction: {instruction}\n\nText to rewrite:\n{selected}",
+                              system=_EDIT_SYSTEM, brain="small")
+
+
+def execute(text: str, history=None) -> tuple[bool, str]:
     """Try to fulfil an uncertain command with the small brain.
 
-    Returns (acted, message): acted=True means a Vox action ran (message is its result);
-    acted=False means it replied conversationally (message is the spoken reply).
+    `history` carries a short clarification exchange (the brain's question + prior turns) so a
+    follow-up answer has context. Returns (acted, message): acted=True means a Vox action ran
+    (message is its result); acted=False means it replied conversationally (the spoken reply).
     """
     if not CONFIG.llm_executor_enabled:
-        return False, assistant.respond(text)
+        return False, assistant.respond(text, history)
 
-    raw = assistant.complete(text, system=_SYSTEM, brain="small").strip()
+    ctx = actions.environment_context()
+    prompt = f"{text}\n\n[Current Mac state — use this to pick the right app/tab]\n{ctx}" if ctx else text
+    raw = assistant.complete(prompt, history, system=_SYSTEM, brain="small").strip()
     if not raw:
-        return False, assistant.respond(text)
-    if raw.upper().startswith("CHAT:"):
-        return False, raw.split(":", 1)[1].strip() or assistant.respond(text)
+        return False, assistant.respond(text, history)
+    upper = raw.upper()
+    if upper.startswith("CHAT:"):
+        return False, raw.split(":", 1)[1].strip() or assistant.respond(text, history)
+    if upper.startswith("TYPE:"):
+        return True, actions.type_text(raw.split(":", 1)[1].strip())
+    if upper.startswith("EDIT:"):
+        instruction = raw.split(":", 1)[1].strip()
+        return True, actions.edit_selection(lambda sel: _rewrite(sel, instruction))
 
     command = raw.splitlines()[0].strip().strip('"').rstrip(".")
     if actions.parse(command) is None:

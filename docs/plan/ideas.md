@@ -161,6 +161,20 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Notes:** Reminders is the quick win (scriptable today). Timers via Shortcuts is the cleanest native path; the in-Vox timer is the simplest fallback.
 
+## 18. Screen visibility — screenshot vs. accessibility tree
+
+**Vision:** when the brain needs to know what's actually on screen (not just running apps/tabs), give it a way to "see" — so it can answer "what does this say?" or act on what's in front of you.
+
+**Two approaches (the second is the better long-term one):**
+- **Screenshot → vision model.** Capture is trivial (`screencapture -x /tmp/vox.png`), then send the image to a vision-capable model. *But*: it's **provider-specific** (Anthropic API takes image blocks cleanly; the Claude SDK/subscription path and local LLMs vary), and images are **token-heavy**. Best as an opt-in *fallback* skill via the API vision path, not the default.
+- **Accessibility (AX) tree → text.** The macOS analog of the Windows UI-Automation tree (what worked well on OpenFlow): walk `AXUIElement` from the focused app and dump a structured text tree of windows/controls/values. **Token-cheap, structured, and more useful** than a screenshot for *acting* on UI. More work to build (AX traversal, per-app quirks, Accessibility permission), and some apps expose poor trees.
+
+**Where we already are:** `actions.environment_context()` (running apps + open tab titles) is a lightweight slice of this — the brain already gets *some* sight. The AX tree is the rich extension; the screenshot is the visual fallback.
+
+**Recommendation:** AX-tree is the direction that matches the "see through text/structure" idea and stays cheap. Add the screenshot as a small opt-in skill (Anthropic API + a vision model) for the rare "just look at it" case. Both gated behind a config flag; watch token cost on the screenshot path.
+
+**Connects to:** the executor/brains (#12, #17), `environment_context` (built), and the coding-agents research note on per-turn `environment_details`.
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.
