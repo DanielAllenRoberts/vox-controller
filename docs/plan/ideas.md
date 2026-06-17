@@ -203,6 +203,18 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Connects to:** `tts.py` (the swap point), the modular-components goal in `overview.md`.
 
+## 22. Personalities (swappable + self-tweaking)
+
+**Vision:** give Vox a **personality** you can choose — concise-professional, warm-friendly, witty, deadpan butler — with a setting to swap presets, and (the fun part) let Vox **tweak or invent its own** on request ("be more sarcastic", "talk like a pirate"), persisting it.
+
+**How it might work:**
+- **Now (minimal, built):** a `personality` string in config, injected into the chat system prompt — instant tone control.
+- **Presets:** a small named dict; a voice command or setting picks one ("switch to professional mode").
+- **Self-tweaking:** "Vox, be more X" → the brain rewrites its own personality string → saved to the local store (ties to the learning layer / #14).
+- **Accent pairing:** each personality can carry a `tts_voice` (e.g. a British voice for the dry-butler persona) — macOS `say` already has per-accent voices (Daniel en_GB, Karen en_AU, Moira en_IE, Rishi en_IN, Tessa en_ZA…).
+
+**Connects to:** the chat system prompt (`_SYSTEM`), TTS voices (`tts_voice`), the learning/rules store (#14).
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

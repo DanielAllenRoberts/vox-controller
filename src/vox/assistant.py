@@ -53,10 +53,12 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     whether Vox keeps listening. The small brain may emit [BIG] to defer the turn to the big
     brain. Falls back to a '?' heuristic if the model omits the tag.
     """
-    raw = complete(text, history, brain=brain, system=_SYSTEM)
+    system = _SYSTEM if not CONFIG.personality else \
+        f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {CONFIG.personality}"
+    raw = complete(text, history, brain=brain, system=system)
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):
-        raw = complete(text, history, brain="big", system=_SYSTEM)  # small brain deferred
+        raw = complete(text, history, brain="big", system=system)  # small brain deferred
     return _split_signal(raw)
 
 

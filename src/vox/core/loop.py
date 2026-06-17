@@ -130,7 +130,7 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
     history = []
     expecting_answer = False  # set when the model tags its reply [OPEN] → wait patiently for you
     while True:
-        timeout = cfg.assistant_open_timeout_seconds if expecting_answer else cfg.listen_timeout_seconds
+        timeout = cfg.assistant_open_timeout_seconds if expecting_answer else cfg.assistant_idle_timeout_seconds
         audio = capture_utterance(frames, cfg,
                                   silence_seconds=cfg.assistant_silence_seconds,
                                   listen_timeout=timeout)
