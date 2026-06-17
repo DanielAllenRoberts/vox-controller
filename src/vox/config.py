@@ -42,7 +42,8 @@ class Config:
 
     # --- Utterance capture (energy-based) ---
     speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
-    silence_seconds: float = 0.8         # trailing silence that ends an utterance
+    silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
+    assistant_silence_seconds: float = 2.0  # longer pause allowed in ASSISTANT mode (gather your thoughts)
     max_utterance_seconds: float = 8.0
     listen_timeout_seconds: float = 6.0  # assistant mode: give up waiting (control mode keeps listening)
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
@@ -57,6 +58,13 @@ class Config:
         "cursor arc safari chrome github youtube gmail spotify notion "
         "calculator terminal finder notes slack figma"
     )
+
+    # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
+    # custom files later, e.g. made in Logic). Set "" to disable a cue.
+    sound_control: str = "/System/Library/Sounds/Hero.aiff"
+    sound_assistant: str = "/System/Library/Sounds/Glass.aiff"   # entered assistant mode (listening)
+    sound_send: str = "/System/Library/Sounds/Pop.aiff"          # assistant prompt captured / sent to the AI
+    sound_sleep: str = "/System/Library/Sounds/Bottle.aiff"      # back to idle (stand down)
 
 
 CONFIG = Config()
