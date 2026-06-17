@@ -15,7 +15,7 @@ A **named voice assistant** that:
 ### M0 — Listening loop skeleton
 Wake word (the assistant's name) → start listening → Whisper transcribes → print the text.
 - **Verify:** say the wake word + a phrase, see the correct transcript on screen.
-- **Status:** scaffolded; deps install + module imports verified. Pending on-device mic test (`uv run vox`). Wake word currently a stock model ("hey_jarvis"); custom "Hey Vox" model to be trained next.
+- **Status:** ✅ DONE (2026-06-17). Live wake → transcribe confirmed on-device. Root-cause fix found along the way: pinned `onnxruntime<1.21` — v1.27 silently zeroed openWakeWord's ONNX feature models (Whisper was unaffected as it uses CTranslate2). Wake word is the stock "hey_jarvis"; custom "Hey Vox" to be trained later.
 
 ### M1 — Basic action execution
 Map simple intents to host actions. First action: **open an app** ("open Safari").
