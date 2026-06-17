@@ -8,6 +8,10 @@ class Config:
     # Identity
     assistant_name: str = "Vox"
 
+    # Preferred browser for opening URLs as a new tab in the existing window
+    # (Arc / Google Chrome / Safari / Brave Browser / Microsoft Edge).
+    browser: str = "Arc"
+
     # --- Activation phrases ---
     # Placeholder built-in openWakeWord models until custom "Vox" phrases are
     # trained (then point these at the trained .onnx paths). The daemon listens
