@@ -64,7 +64,9 @@ def make_backend(cfg, transcriber):
             f'Say "{cfg.control_spoken}" for control, "{cfg.assistant_spoken}" for the assistant.',
         )
     return WhisperWakeBackend(
-        [("control", cfg.control_phrases), ("assistant", cfg.assistant_phrases)],
+        [("control", cfg.control_phrases),
+         ("assistant", cfg.assistant_phrases),
+         ("quit", cfg.quit_phrases)],
         transcriber, cfg,
-        'Say "take control" for control, "Hey Vox" for the assistant.',
+        'Say "take control", "Hey Vox", or "quit Vox".',
     )

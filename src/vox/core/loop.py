@@ -15,6 +15,15 @@ from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.backends import make_backend, normalize
 
 
+class _Quit(Exception):
+    """Raised to exit the whole program by voice."""
+
+
+def _is_quit(text: str, cfg) -> bool:
+    t = normalize(text)
+    return any(p in t for p in cfg.quit_phrases)
+
+
 def _is_sleep(text: str, cfg) -> bool:
     t = normalize(text)
     return any(p in t for p in cfg.sleep_phrases)
@@ -39,6 +48,8 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
         text = _transcribe(transcriber, audio, cfg, out, hotwords=cfg.command_hotwords)
         if not text:
             continue
+        if _is_quit(text, cfg):
+            raise _Quit
         if _is_sleep(text, cfg):
             sounds.play(cfg.sound_sleep)
             out.emit("○ Sleeping.")
@@ -59,6 +70,8 @@ def _assistant_mode(frames, cfg, transcriber, out) -> None:
         sounds.play(cfg.sound_sleep)
         out.emit("  (heard nothing — back to idle)")
         return
+    if _is_quit(text, cfg):
+        raise _Quit
     if _is_sleep(text, cfg):
         sounds.play(cfg.sound_sleep)
         out.emit("○ Sleeping.")
@@ -85,6 +98,8 @@ def main() -> None:
             frames = mic.frames()
             while True:
                 label = wake.listen(frames)
+                if label == "quit":
+                    raise _Quit
                 if label == "control":
                     sounds.play(cfg.sound_control)
                     _control_mode(frames, cfg, transcriber, out)
@@ -92,8 +107,9 @@ def main() -> None:
                     sounds.play(cfg.sound_assistant)
                     _assistant_mode(frames, cfg, transcriber, out)
                 out.emit(idle_msg)
-    except KeyboardInterrupt:
-        out.emit("\nStopped.")
+    except (KeyboardInterrupt, _Quit):
+        sounds.play(cfg.sound_sleep)
+        out.emit("\n👋 Quitting Vox.")
 
 
 if __name__ == "__main__":
