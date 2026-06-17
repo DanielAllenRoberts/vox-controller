@@ -76,11 +76,18 @@ def make_backend(cfg, transcriber):
             cfg.wake_threshold,
             f'Say "{cfg.control_spoken}" for control, "{cfg.assistant_spoken}" for the assistant.',
         )
+    # From idle, dictation must be prefixed with the wake word ("Vox start typing") so a
+    # bare "start typing" in conversation can't trigger it. Inside control mode the bare
+    # dictate_phrases still apply (see loop._is_dictate). vox/fox/box covers Whisper mishears.
+    dictate_from_idle = tuple(
+        f"{w} {p}" for w in ("vox", "fox", "box") for p in cfg.dictate_phrases
+    )
     return WhisperWakeBackend(
         [("control", cfg.control_phrases),
          ("assistant", cfg.assistant_phrases),
+         ("dictation", dictate_from_idle),
          ("quit", cfg.quit_phrases),
          ("restart", cfg.restart_phrases)],
         transcriber, cfg,
-        'Say "take control", "Hey Vox", "restart Vox", or "quit Vox".',
+        'Say "take control", "Hey Vox", "Vox start typing", "restart Vox", or "quit Vox".',
     )

@@ -70,10 +70,10 @@ class Config:
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
-        "open go to search switch stand down take control hey vox quit close exit shut down "
-        "tab window next previous first last desktop space screen swipe new profile dictate "
-        "cursor arc safari chrome github youtube gmail spotify notion chatgpt linkedin trello amazon netflix "
-        "calculator terminal finder notes slack figma"
+        # Only uncommon proper nouns — biasing common command verbs ("open/tab/next")
+        # makes Whisper hallucinate the whole list on noise. "switch" stays (mis-heard as "search").
+        "vox switch cursor arc safari chrome github youtube gmail spotify notion "
+        "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
     )
 
     # --- Assistant (LLM) brain — provider-agnostic ---  key(s) go in .env. Presets:
@@ -82,8 +82,8 @@ class Config:
     #   OpenAI    : provider="openai", model="gpt-4o-mini", key_env="OPENAI_API_KEY"
     #   Claude SDK: provider="claude_sdk"  (Claude Code via the Agent SDK; uses your subscription, no key)
     #   Claude CLI: provider="claude_cli"  (Claude Code via `claude -p`; uses your subscription, no key)
-    llm_provider: str = "anthropic"      # "anthropic" | "openai" | "claude_sdk" | "claude_cli"
-    llm_model: str = "claude-haiku-4-5-20251001"
+    llm_provider: str = "claude_sdk"     # "anthropic" | "openai" | "claude_sdk" | "claude_cli"
+    llm_model: str = "claude-haiku-4-5-20251001"  # used by anthropic/openai; claude_sdk/cli use your subscription
     llm_base_url: str = ""               # for openai-compatible providers (e.g. DeepSeek)
     llm_api_key_env: str = "ANTHROPIC_API_KEY"
     llm_max_tokens: int = 400
@@ -96,6 +96,7 @@ class Config:
     sound_sleep: str = "/System/Library/Sounds/Bottle.aiff"      # back to idle (stand down)
     sound_dictate_start: str = "/System/Library/Sounds/Tink.aiff"    # started dictation (typing)
     sound_dictate_stop: str = "/System/Library/Sounds/Sosumi.aiff"   # stopped dictation
+    sound_oneshot: str = "/System/Library/Sounds/Morse.aiff"         # one-shot command ("Vox, open Safari")
 
 
 CONFIG = Config()
