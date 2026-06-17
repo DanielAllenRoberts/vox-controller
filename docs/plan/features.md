@@ -17,7 +17,8 @@
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
 | Dictation (speak-to-type) | ✅ | "start typing" → click a field → speak → "stop typing" | types at your cursor (frontmost app); "backspace"/"new line"/"delete" keywords; Tink/Sosumi start/stop sounds |
-| Assistant chat (LLM) | ✅ | "Hey Vox" → multi-turn chat | **provider-agnostic**: Claude API · DeepSeek/OpenAI-compatible · **Claude Code (Agent SDK/CLI) on your subscription — no API key** — set in `config.py` |
+| Assistant chat (LLM) | ✅ | "Hey Vox" → multi-turn chat | **provider-agnostic**: Claude API · DeepSeek/OpenAI-compatible · **Claude Code (Agent SDK/CLI) on your subscription — no API key** — set in `config.py`; keeps conversation context until "stand down" |
+| Conversation continuation (LLM-judged turn-taking) | ✅ | "Hey Vox", then ask it something open-ended | The model tags each reply **[OPEN]** (expects you to reply) or **[DONE]** (natural close); on [OPEN] Vox waits patiently instead of dropping to idle. No hand-tuned heuristic — a timer remains only as a safety cap. Tag is stripped before display |
 | One-shot command | ✅ | "Vox, open Safari" (from idle) | runs a single command without entering control mode |
 | Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses a tab in your current space** or makes one ("open new" forces fresh); unknown → hands off |
 | Chain two commands | ✅ | "open Arc and search this" | runs both halves of "X and Y" (only when both parse) |
@@ -30,7 +31,7 @@
 | Switch Arc profile/space | ✅ | "profile two", "next profile" | Ctrl+<n> (absolute) or ⌘⌥←→ (relative) |
 | Show/hide tab sidebar | ✅ | "show tabs" / "hide tabs" / "toggle sidebar" | toggles Arc's sidebar (⌘S) |
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
-| Unknown command → handoff | ✅ | any unrecognized input | says "handing off to the assistant" — the M4 escalation hook |
+| Unknown command → LLM escalation | ✅ | any unrecognized control command | a command that doesn't parse is sent to the assistant (LLM) and its answer is spoken — ask questions mid-commands without leaving control mode |
 | Mode sound cues | ✅ | sounds on control / assistant / send / sleep | audio feedback without watching the terminal (macOS sounds; swap for custom) |
 | Quit by voice | ✅ | say "quit Vox" (idle or in a mode) | exits the program; "vox" required + phonetic variants so idle speech can't trigger it |
 | Restart by voice | ✅ | say "restart Vox" | re-execs the process — picks up code changes without manual kill + rerun |
@@ -43,6 +44,9 @@
 | Feature | Status | Milestone / notes |
 |---|---|---|
 | LLM text commands | 🚧 | "write this" / "make this pretty" — compose/clean text via the LLM (builds on chat + dictation) |
+| LLM-as-executor (runs commands, not just explains) | 📋 | give the escalation LLM **gated tools to execute** Vox actions — bridges mis-wording instead of saying "I can't"; ideas #12 |
+| Action-first / silent success | 💡 | execute with just a sound cue; speak only when ambiguous or asked — seamless; ideas #13 |
+| Self-wiring command learning | 💡 | capture LLM-resolved fallbacks → **learned rules** (instant next time), wired up in the background; ideas #14–15 |
 | Custom **"Vox" phrases** | 🚧 | train models → replace `hey_jarvis`/`hey_mycroft` placeholders (Colab; `wake-word-training.md`) |
 | User-chosen assistant name | 💡 | let users name it & reference that name — later feature |
 | Package power in watts | 💡 | opt-in `powermetrics` reader (needs sudo) — later |

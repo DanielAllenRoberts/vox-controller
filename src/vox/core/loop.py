@@ -101,8 +101,12 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
 def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
     out.emit('● ASSISTANT MODE — chat with me. Say "stand down" when done.')
     history = []
+    expecting_answer = False  # set when the model tags its reply [OPEN] → wait patiently for you
     while True:
-        audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
+        timeout = cfg.assistant_open_timeout_seconds if expecting_answer else cfg.listen_timeout_seconds
+        audio = capture_utterance(frames, cfg,
+                                  silence_seconds=cfg.assistant_silence_seconds,
+                                  listen_timeout=timeout)
         if audio is None:
             out.emit("  (no reply — back to idle)")
             return return_to
@@ -122,9 +126,9 @@ def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
             return "control"
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
-        reply = assistant.respond(text, history)
+        reply, expecting_answer = assistant.respond_turn(text, history)  # model tags [OPEN]/[DONE]
         history += [("user", text), ("assistant", reply)]
-        out.emit(f"  🔊 {reply}")
+        out.emit(f"  🔊 {reply}" + ("  (…your turn)" if expecting_answer else ""))
 
 
 def _dictation_mode(frames, cfg, transcriber, out, return_to=None):

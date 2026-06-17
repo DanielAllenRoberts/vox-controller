@@ -4,6 +4,7 @@ Pick a provider in config (anthropic / openai-compatible / claude_cli). Keys com
 """
 
 import os
+import re
 import subprocess
 
 from vox.config import CONFIG
@@ -22,7 +23,11 @@ _SYSTEM = (
     "Unrecognised control commands 'hand off' to you. The user can also say \"Vox, <command>\" "
     "for a one-shot command from idle.\n\n"
     "Be helpful, warm, and direct. If asked to do something you can't do from here, briefly say "
-    "how they'd do it by voice."
+    "how they'd do it by voice.\n\n"
+    "Turn-taking: at the very end of every reply, append exactly one control tag — [OPEN] if you "
+    "expect the user to respond (you asked a question or invited them to keep going), or [DONE] if "
+    "the exchange reached a natural stopping point. The tag is stripped before it's shown or spoken; "
+    "never mention it. When unsure, prefer [OPEN]."
 )
 
 _anthropic_client = None
@@ -30,15 +35,36 @@ _openai_client = None
 
 
 def respond(text: str, history=None) -> str:
-    """One chat turn: new user text + prior [(role, content), …] → reply text."""
+    """One chat turn → reply text (control tag stripped). Used where we don't care about turn-taking."""
+    return respond_turn(text, history)[0]
+
+
+def respond_turn(text: str, history=None) -> tuple[str, bool]:
+    """One chat turn → (reply text, expects_reply).
+
+    The model tags its reply [OPEN]/[DONE] (see _SYSTEM); we strip the tag and let it decide
+    whether Vox keeps listening. Falls back to a '?' heuristic if the model omits the tag.
+    """
     provider = CONFIG.llm_provider
     if provider == "claude_sdk":
-        return _claude_sdk(text, history)
-    if provider == "claude_cli":
-        return _claude_cli(text, history)
-    if provider == "openai":
-        return _openai(text, history)
-    return _anthropic(text, history)
+        raw = _claude_sdk(text, history)
+    elif provider == "claude_cli":
+        raw = _claude_cli(text, history)
+    elif provider == "openai":
+        raw = _openai(text, history)
+    else:
+        raw = _anthropic(text, history)
+    return _split_signal(raw)
+
+
+def _split_signal(raw: str) -> tuple[str, bool]:
+    """Pull the trailing [OPEN]/[DONE] turn-taking tag off a reply → (clean text, expects_reply)."""
+    s = (raw or "").strip()
+    m = re.search(r"\[(open|done)\]", s, re.IGNORECASE)  # normally trailing; match anywhere to be safe
+    if m:
+        clean = (s[: m.start()] + s[m.end():]).strip()
+        return clean, m.group(1).lower() == "open"
+    return s, s.endswith("?")  # model didn't tag → fall back to the question heuristic
 
 
 def _anthropic(text, history):
