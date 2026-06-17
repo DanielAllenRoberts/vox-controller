@@ -117,10 +117,12 @@ def main() -> None:
         print("→ Almost no audio captured — permission/device issue.")
     elif not heard or len(heard) < 3:
         print("→ Audio captured but Whisper heard ~nothing: format/sample-rate problem.")
+    elif scores.get(1, 0.0) >= 0.5:
+        print("→ Working at normal gain — the wake word fires. You're good: `uv run vox`.")
     elif max(scores.values()) >= 0.5:
         good = min(g for g, s in scores.items() if s >= 0.5)
-        print(f"→ SOLVED: the signal was just too quiet. At gain x{good} the wake word fires.")
-        print(f"  Fix = apply ~{good}x software gain in capture (I'll wire it into config).")
+        print(f"→ Fires only when boosted (gain x{good}). Your input is quiet — turn up the")
+        print(f"  interface gain, or I can apply ~{good}x software gain in capture.")
     else:
         print("→ Even boosted, 'hey_jarvis' won't match your voice. Better to swap the")
         print("  built-in word or train the real 'Hey Vox' than keep fighting it.")
