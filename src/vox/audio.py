@@ -44,12 +44,15 @@ def rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
 
 
-def capture_utterance(frames, cfg):
+def capture_utterance(frames, cfg, silence_seconds=None):
     """Wait for speech onset (keeping a short pre-roll), then record until trailing
     silence. Returns int16 audio, or None if no speech arrives within listen_timeout.
+
+    `silence_seconds` overrides how long a pause ends the utterance (default: cfg value).
     """
     sr, fs = cfg.sample_rate, cfg.frame_samples
-    silence_limit = int(cfg.silence_seconds * sr / fs)
+    sil = cfg.silence_seconds if silence_seconds is None else silence_seconds
+    silence_limit = int(sil * sr / fs)
     max_frames = int(cfg.max_utterance_seconds * sr / fs)
     wait_frames = int(cfg.listen_timeout_seconds * sr / fs)
 

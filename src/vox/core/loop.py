@@ -6,7 +6,7 @@ sleep phrase). The assistant label enters ASSISTANT mode (one-shot LLM request).
 See docs/plan/modes.md.
 """
 
-from vox import actions, assistant
+from vox import actions, assistant, sounds
 from vox.audio import MicStream, capture_utterance
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
@@ -40,6 +40,7 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
         if not text:
             continue
         if _is_sleep(text, cfg):
+            sounds.play(cfg.sound_sleep)
             out.emit("○ Sleeping.")
             return
         out.emit(f"  you: {text!r}")
@@ -48,17 +49,21 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
 
 def _assistant_mode(frames, cfg, transcriber, out) -> None:
     out.emit("● ASSISTANT MODE — ask something…")
-    audio = capture_utterance(frames, cfg)
+    audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
     if audio is None:
+        sounds.play(cfg.sound_sleep)
         out.emit("  (heard nothing — back to idle)")
         return
     text = _transcribe(transcriber, audio, cfg, out)
     if not text:
+        sounds.play(cfg.sound_sleep)
         out.emit("  (heard nothing — back to idle)")
         return
     if _is_sleep(text, cfg):
+        sounds.play(cfg.sound_sleep)
         out.emit("○ Sleeping.")
         return
+    sounds.play(cfg.sound_send)  # prompt captured → "sending to the AI"
     out.emit(f"  you: {text!r}")
     out.emit(f"  → {assistant.respond(text)}")
 
@@ -81,8 +86,10 @@ def main() -> None:
             while True:
                 label = wake.listen(frames)
                 if label == "control":
+                    sounds.play(cfg.sound_control)
                     _control_mode(frames, cfg, transcriber, out)
                 elif label == "assistant":
+                    sounds.play(cfg.sound_assistant)
                     _assistant_mode(frames, cfg, transcriber, out)
                 out.emit(idle_msg)
     except KeyboardInterrupt:

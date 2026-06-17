@@ -19,7 +19,8 @@
 | Open / go to (app or known site) | ✅ | "open Cursor" / "go to GitHub" | app if installed, else a known site/domain as a **new tab** (Arc/Chrome/Safari…); **unknown → hands off, never guesses** |
 | Search the web | ✅ | "search <query>" in control mode | explicit web search in your browser |
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words ("Cursor" > "Casa") |
-| Unknown command → handoff | ✅ | any unrecognized target | says "handing off to the assistant" — the M4 escalation hook |
+| Unknown command → handoff | ✅ | any unrecognized input | says "handing off to the assistant" — the M4 escalation hook |
+| Mode sound cues | ✅ | sounds on control / assistant / send / sleep | audio feedback without watching the terminal (macOS sounds; swap for custom) |
 | Sleep / deactivate | ✅ | say "stand down" in a mode | matched in transcript text |
 
 ## In progress / next

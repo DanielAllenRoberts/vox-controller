@@ -56,13 +56,13 @@ def handle(text: str) -> str:
     """Interpret a control-mode utterance and act. Returns a human-readable result."""
     intent = parse(text)
     if intent is None:
-        return f"no command matched: {text!r}"
+        return _handoff(text)
     name, arg = intent
     if name == "navigate":
         return _navigate(arg)
     if name == "search":
         return _search(arg)
-    return f"unknown intent: {name}"
+    return _handoff(text)
 
 
 def parse(text: str) -> tuple[str, str] | None:
@@ -139,7 +139,8 @@ def _search(query: str) -> str:
     return f"Searching for {query!r}."
 
 
-def _handoff(target: str) -> str:
-    # Unknown target — we do NOT guess. Once the assistant (M4) is wired this hands off
-    # ("did you mean …?"); for now we just say so. See docs/plan/observations.md.
-    return f"Don't recognize {target!r} — handing off to the assistant (not wired yet)."
+def _handoff(what: str) -> str:
+    # Anything the deterministic layer can't handle (unknown target, or no command verb
+    # at all). Once the assistant (M4) is wired this hands off ("did you mean …?"); for
+    # now we just say so. See docs/plan/observations.md.
+    return f"Handing off to the assistant (not wired yet): {what!r}"
