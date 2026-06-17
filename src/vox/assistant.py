@@ -158,7 +158,9 @@ def _claude_sdk(text, history, model, system):
         return "".join(parts).strip()
 
     try:
-        return asyncio.run(_run()) or "(no response)"
+        return asyncio.run(asyncio.wait_for(_run(), timeout=45)) or "(no response)"
+    except asyncio.TimeoutError:
+        return "(the brain timed out — try again)"  # never hang the loop on a wedged call
     except Exception as exc:
         return f"(claude SDK error: {exc})"
 
@@ -206,7 +208,9 @@ def _sdk_look(question, image_path, model):
         return "".join(parts).strip()
 
     try:
-        return asyncio.run(_run()) or "(no response)"
+        return asyncio.run(asyncio.wait_for(_run(), timeout=90)) or "(no response)"
+    except asyncio.TimeoutError:
+        return "(vision timed out — try again)"
     except Exception as exc:
         return f"(vision error: {exc})"
 

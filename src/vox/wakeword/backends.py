@@ -19,11 +19,12 @@ def normalize(text: str) -> str:
 
 
 class WhisperWakeBackend:
-    def __init__(self, label_phrases, transcriber, cfg, prompt):
+    def __init__(self, label_phrases, transcriber, cfg, prompt, out=None):
         self._label_phrases = label_phrases  # list of (label, (phrase, ...))
         self._transcriber = transcriber
         self._cfg = cfg
         self.prompt = prompt
+        self._out = out  # for debug logging of idle transcriptions
 
     def match(self, text: str) -> str | None:
         t = normalize(text)
@@ -39,9 +40,12 @@ class WhisperWakeBackend:
                 continue
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
             label = self.match(text)
+            cmd = None if label is not None else self._oneshot(text)
+            if self._cfg.debug and self._out is not None:
+                tag = label or (f"do:{cmd}" if cmd else "(no match — stayed idle)")
+                self._out.emit(f"  [debug] idle heard: {text!r} → {tag}")
             if label is not None:
                 return label
-            cmd = self._oneshot(text)
             if cmd:
                 return "do:" + cmd
 
@@ -69,7 +73,7 @@ class OpenWakeWordBackend:
                 return self._labels[fired]
 
 
-def make_backend(cfg, transcriber):
+def make_backend(cfg, transcriber, out=None):
     if cfg.wake_backend == "openwakeword":
         return OpenWakeWordBackend(
             {cfg.control_wake: "control", cfg.assistant_wake: "assistant"},
@@ -90,4 +94,5 @@ def make_backend(cfg, transcriber):
          ("restart", cfg.restart_phrases)],
         transcriber, cfg,
         'Say "take control", "Hey Vox", "Vox start typing", "restart Vox", or "quit Vox".',
+        out,
     )

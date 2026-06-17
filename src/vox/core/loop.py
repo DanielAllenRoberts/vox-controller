@@ -70,6 +70,8 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     cpu, mem = process_stats()
     out.emit(f"  ⏱  audio {dur:.1f}s · stt {stt.seconds:.2f}s "
              f"(rtf {stt.seconds / max(dur, 0.01):.2f}) · cpu {cpu:.0f}% · mem {mem:.0f}MB")
+    if cfg.debug:
+        out.emit(f"  [debug] heard: {text!r}")
     return text
 
 
@@ -107,6 +109,7 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             out.emit(f"  → {result}")
             pending = []  # a clean command ran → drop any pending clarification
         else:  # unparsed, or the deterministic attempt found no target → let the brain try
+            sounds.play(cfg.sound_thinking)  # "thinking…" cue — the LLM can take a moment
             acted, msg = executor.execute(text, pending)
             if acted:
                 sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
@@ -203,7 +206,7 @@ def main() -> None:
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
         transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type)
-        wake = make_backend(cfg, transcriber)
+        wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
 
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"

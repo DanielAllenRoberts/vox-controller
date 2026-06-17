@@ -208,7 +208,10 @@ def known_url(target: str) -> str | None:
 
 
 def _osa(script: str) -> tuple[bool, str]:
-    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return False, "timed out"  # never let a wedged AppleScript freeze the loop
     return r.returncode == 0, (r.stdout or r.stderr).strip()
 
 
