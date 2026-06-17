@@ -47,7 +47,10 @@ class Config:
     )
 
     # Restart the running process (re-exec — picks up code changes) by voice.
-    restart_phrases: tuple[str, ...] = ("restart vox", "reboot vox", "restart yourself")
+    restart_phrases: tuple[str, ...] = (
+        "restart vox", "restart fox", "restart box", "vox restart", "fox restart",
+        "reboot vox", "reboot fox", "reboot box", "restart yourself",
+    )
 
     # Enter DICTATION (speak-to-type at the cursor) from control mode.
     dictate_phrases: tuple[str, ...] = ("start typing", "start dictation", "begin typing", "dictate")
@@ -56,6 +59,10 @@ class Config:
 
     # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
     log_file: str = "vox.log"
+
+    # Debug: log every transcription (what Vox hears) in EVERY mode, including idle (which is
+    # otherwise silent). Verbose — set False once a hearing/matching issue is diagnosed.
+    debug: bool = True
 
     # --- Audio capture --- openWakeWord expects 16 kHz mono int16, 80 ms frames.
     sample_rate: int = 16_000
@@ -75,7 +82,7 @@ class Config:
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
 
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
-    whisper_model: str = "base.en"
+    whisper_model: str = "small.en"   # more accurate for accents than base.en (~250MB 1-time download, ~2-3x slower STT but still <1s). Revert to "base.en" for max speed.
     whisper_compute_type: str = "int8"
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
@@ -126,7 +133,7 @@ class Config:
     # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →
     # Accessibility → Spoken Content → System Voice → Manage Voices.
     tts_enabled: bool = True
-    tts_voice: str = ""    # macOS voice name (e.g. "Samantha", "Ava (Premium)"); "" = system default
+    tts_voice: str = "Daniel"  # British (en_GB). "" = system default. Premium voices sound best (System Settings)
     tts_rate: int = 0      # words per minute; 0 = the voice's default
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
@@ -139,6 +146,7 @@ class Config:
     sound_dictate_stop: str = "/System/Library/Sounds/Sosumi.aiff"   # stopped dictation
     sound_oneshot: str = "/System/Library/Sounds/Morse.aiff"         # one-shot command ("Vox, open Safari")
     sound_abort: str = "/System/Library/Sounds/Basso.aiff"           # emergency stop / abort
+    sound_thinking: str = "/System/Library/Sounds/Submarine.aiff"    # escalating to the LLM (it may take a moment)
 
 
 CONFIG = Config()

@@ -21,6 +21,6 @@ def speak(text: str) -> None:
         cmd += ["-r", str(CONFIG.tts_rate)]
     cmd.append(text)
     try:
-        subprocess.run(cmd, capture_output=True)
+        subprocess.run(cmd, capture_output=True, timeout=30)
     except Exception:
-        pass  # never let a TTS hiccup break the loop
+        pass  # never let a TTS hiccup (or hang) break the loop

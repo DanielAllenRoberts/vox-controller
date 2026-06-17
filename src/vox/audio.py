@@ -11,14 +11,19 @@ class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
     def __init__(self, sample_rate: int, frame_samples: int, device: int | None = None):
+        self._sample_rate = sample_rate
         self._frame_samples = frame_samples
+        self._device = device
         self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
-        self._stream = sd.InputStream(
-            samplerate=sample_rate,
+        self._stream = self._make_stream()
+
+    def _make_stream(self):
+        return sd.InputStream(
+            samplerate=self._sample_rate,
             channels=1,
             dtype="int16",
-            blocksize=frame_samples,
-            device=device,
+            blocksize=self._frame_samples,
+            device=self._device,
             callback=self._callback,
         )
 
@@ -27,9 +32,27 @@ class MicStream:
         self._queue.put(indata[:, 0].copy())
 
     def frames(self):
-        """Generator yielding one int16 frame at a time."""
+        """Generator yielding one int16 frame at a time. Healthy streams deliver a frame every
+        ~80 ms (even silence), so if nothing arrives for a few seconds the input stalled (e.g. the
+        audio device changed) — restart it so Vox keeps listening instead of hanging silently."""
         while True:
-            yield self._queue.get()
+            try:
+                yield self._queue.get(timeout=3.0)
+            except queue.Empty:
+                print("⚠️  mic input stalled — restarting the audio stream…")
+                self._restart()
+
+    def _restart(self) -> None:
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        try:
+            self._stream = self._make_stream()
+            self._stream.start()
+        except Exception as exc:
+            print(f"⚠️  couldn't restart mic stream ({exc}); will retry…")
 
     def flush(self) -> None:
         """Drop buffered frames (e.g. audio captured while Vox was speaking) so the next read
