@@ -36,7 +36,11 @@ class Config:
     sleep_spoken: str = "stand down"
 
     # Quit the whole program by voice — keyed to "vox" so idle speech can't trigger it.
-    quit_phrases: tuple[str, ...] = ("quit vox", "close vox", "shut down vox", "exit vox")
+    quit_phrases: tuple[str, ...] = (
+        "quit vox", "quit fox", "quit box", "quick vox", "quick fox", "quick box",
+        "close vox", "close fox", "close box", "exit vox", "exit fox", "exit box",
+        "shut down vox",
+    )
 
     # --- Audio capture --- openWakeWord expects 16 kHz mono int16, 80 ms frames.
     sample_rate: int = 16_000
@@ -57,7 +61,7 @@ class Config:
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
-        "open go to search stand down take control "
+        "open go to search stand down take control hey vox quit close exit shut down "
         "cursor arc safari chrome github youtube gmail spotify notion "
         "calculator terminal finder notes slack figma"
     )
