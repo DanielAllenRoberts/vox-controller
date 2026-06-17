@@ -71,18 +71,16 @@ def _control_mode(frames, cfg, transcriber, out) -> None:
         out.emit(f"  → {actions.handle(text)}")
 
 
-def _assistant_mode(frames, cfg, transcriber, out):
+def _assistant_mode(frames, cfg, transcriber, out, return_to=None):
     out.emit("● ASSISTANT MODE — ask something…")
     audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
     if audio is None:
-        sounds.play(cfg.sound_sleep)
-        out.emit("  (heard nothing — back to idle)")
-        return None
+        out.emit("  (heard nothing)")
+        return return_to
     text = _transcribe(transcriber, audio, cfg, out)
     if not text:
-        sounds.play(cfg.sound_sleep)
-        out.emit("  (heard nothing — back to idle)")
-        return None
+        out.emit("  (heard nothing)")
+        return return_to
     if _is_quit(text, cfg):
         raise _Quit
     if _is_sleep(text, cfg):
@@ -95,7 +93,7 @@ def _assistant_mode(frames, cfg, transcriber, out):
     sounds.play(cfg.sound_send)  # prompt captured → "sending to the AI"
     out.emit(f"  you: {text!r}")
     out.emit(f"  → {assistant.respond(text)}")
-    return None
+    return return_to
 
 
 def main() -> None:
@@ -117,15 +115,20 @@ def main() -> None:
                 label = wake.listen(frames)
                 if label == "quit":
                     raise _Quit
-                # A mode may return a follow-on label to chain directly into the other
-                # mode (e.g. "Hey Vox" while in control) without dropping to idle.
+                # A mode may return a follow-on label to chain into the other mode
+                # without dropping to idle. If the assistant was reached *from* control,
+                # it returns to control when done (instead of idling).
+                from_control = False
                 while label in ("control", "assistant"):
                     if label == "control":
                         sounds.play(cfg.sound_control)
                         label = _control_mode(frames, cfg, transcriber, out)
+                        from_control = label == "assistant"
                     else:
                         sounds.play(cfg.sound_assistant)
-                        label = _assistant_mode(frames, cfg, transcriber, out)
+                        label = _assistant_mode(frames, cfg, transcriber, out,
+                                                return_to="control" if from_control else None)
+                        from_control = False
                 out.emit(idle_msg)
     except (KeyboardInterrupt, _Quit):
         sounds.play(cfg.sound_sleep)

@@ -12,6 +12,13 @@
 - **Solution B — recover from uncertainty (escalate):** when the deterministic layer can't *confidently* resolve a target, **hand off to the assistant** instead of guessing. The assistant — knowing installed apps, common targets, and habits — reasons "‘Casa' isn't a known site… did you mean *Cursor*?" and confirms/corrects. The OpenClaw-style intelligent fallback.
 - **Status:** ✅ improved (2026-06-17). Navigation now acts **only on known targets** (app / known site / real domain) — unknowns **hand off** instead of guessing (no more accidental `casa.com`, no googling your narration). Added explicit **"search X"**. And **hotword biasing** nudges STT toward "Cursor"/"Arc" over "Casa". Full LLM escalation still lands with **M4**.
 
+## 2026-06-17 — Arc / macOS scripting limits found while building navigation
+
+- **Arc tab index is unreliable.** `tabs of front window` returns *all* tabs across spaces/folders (52, mostly `location: pinned`) in an order that doesn't match the visual sidebar. → Tab-by-**name** (now fuzzy) is the reliable path; index isn't.
+- **Arc folders/spaces aren't scriptable.** No `spaces` access (`Can't get every space`); tabs only report `location` = pinned/unpinned/topApp, no folder grouping. → Folder/space/profile-scoped nav isn't possible via AppleScript.
+- **Window switching can't cross macOS Spaces.** A Cursor process with two windows on different desktops reports `count of windows = 1` to the Accessibility API — the other Space's window is invisible. ⌘`-cycling only works within the current Space.
+- **Win:** fuzzy tab matching (difflib) resolves "Moonshark"→Moonshot, "chat upt"→ChatGPT, and partial names — a cheap, reliable improvement (and a first taste of the personalised-matching idea in `ideas.md` #8).
+
 ## The principle this points to
 
 **Whenever a deterministic action is low-confidence or unmatched → escalate to the assistant.** This is the bridge between CONTROL mode (fast, deterministic) and ASSISTANT mode (LLM reasoning), and it's what makes the system feel smart rather than brittle. (See the tiered cascade in `overview.md`.)

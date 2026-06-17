@@ -62,7 +62,8 @@ class Config:
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
         "open go to search stand down take control hey vox quit close exit shut down "
-        "cursor arc safari chrome github youtube gmail spotify notion "
+        "tab window next previous first last "
+        "cursor arc safari chrome github youtube gmail spotify notion chatgpt linkedin trello "
         "calculator terminal finder notes slack figma"
     )
 
