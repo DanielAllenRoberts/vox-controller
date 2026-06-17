@@ -35,6 +35,9 @@ class Config:
     sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep")
     sleep_spoken: str = "stand down"
 
+    # Quit the whole program by voice — keyed to "vox" so idle speech can't trigger it.
+    quit_phrases: tuple[str, ...] = ("quit vox", "close vox", "shut down vox", "exit vox")
+
     # --- Audio capture --- openWakeWord expects 16 kHz mono int16, 80 ms frames.
     sample_rate: int = 16_000
     frame_samples: int = 1280
@@ -43,7 +46,7 @@ class Config:
     # --- Utterance capture (energy-based) ---
     speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
     silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
-    assistant_silence_seconds: float = 2.0  # longer pause allowed in ASSISTANT mode (gather your thoughts)
+    assistant_silence_seconds: float = 2.5  # longer pause allowed in ASSISTANT mode (stumble / gather your thoughts)
     max_utterance_seconds: float = 8.0
     listen_timeout_seconds: float = 6.0  # assistant mode: give up waiting (control mode keeps listening)
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
