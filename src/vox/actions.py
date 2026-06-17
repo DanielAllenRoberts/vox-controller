@@ -487,6 +487,25 @@ def _sidebar(direction: str) -> str:
     return f"Couldn't toggle sidebar ({out})."
 
 
+def dictate(text: str) -> None:
+    """Insert text at the cursor (frontmost app). Pastes via the clipboard for reliability
+    — `keystroke` injects too fast and the app drops characters (notably spaces). A few
+    spoken words are treated as edit keys."""
+    low = text.strip().lower().rstrip(".!?")
+    keys = {"new line": 36, "newline": 36, "new paragraph": 36, "enter": 36, "return": 36,
+            "backspace": 51, "delete": 51, "delete that": 51, "tab key": 48}
+    if low in keys:
+        _osa(f'tell application "System Events" to key code {keys[low]}')
+        return
+    safe = (text + " ").replace("\\", "\\\\").replace('"', '\\"')
+    _osa('set savedClip to ""\n'
+         '    try\n        set savedClip to (the clipboard as text)\n    end try\n'
+         f'set the clipboard to "{safe}"\n'
+         'tell application "System Events" to keystroke "v" using command down\n'
+         'delay 0.1\n'
+         'if savedClip is not "" then set the clipboard to savedClip')
+
+
 def _handoff(what: str) -> str:
     # Anything the deterministic layer can't handle. Once the assistant (M4) is wired this
     # hands off ("did you mean …?"); for now we just say so. See docs/plan/observations.md.

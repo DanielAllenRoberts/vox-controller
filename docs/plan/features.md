@@ -16,6 +16,7 @@
 | Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
+| Dictation (speak-to-type) | ✅ | "start typing" → click a field → speak → "stop typing" | types at your cursor (frontmost app); "backspace"/"new line"/"delete" keywords; Tink/Sosumi start/stop sounds |
 | Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses a tab in your current space** or makes one ("open new" forces fresh); unknown → hands off |
 | Chain two commands | ✅ | "open Arc and search this" | runs both halves of "X and Y" (only when both parse) |
 | Search the web | ✅ | "search <query>" in control mode | explicit web search in your browser |
