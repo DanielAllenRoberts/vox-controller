@@ -13,14 +13,15 @@
 | Mic + wake diagnostic | ✅ | `uv run vox-diagnose` | live per-channel level, wake score, Whisper readback, gain sweep |
 | Selectable input device | ✅ | `config.py: input_device` / `vox-diagnose <n>` | handles multi-device / interface setups |
 | Modular components | ✅ | architecture | wakeword / stt / io behind swappable interfaces |
+| Compute / latency monitoring | ✅ | stats line after each utterance in `uv run vox` | per-stage timing, real-time-factor, CPU%, memory (psutil) |
 
 ## In progress / next
 
 | Feature | Status | Milestone / notes |
 |---|---|---|
-| Custom **"Hey Vox"** wake word | 🚧 | train model → replace `hey_jarvis` (Colab; see `wake-word-training.md`) |
-| Compute / latency monitoring | 📋 | per-stage timing + CPU/mem (psutil); optional watts via `powermetrics` |
+| Custom **"Hey Vox"** wake word | 🚧 | train model → replace `hey_jarvis` (Colab; runbook in `wake-word-training.md`) |
 | Open apps by voice | 📋 | **M1** — first real action ("open Safari") |
+| Package power in watts | 💡 | opt-in `powermetrics` reader (needs sudo) — later |
 
 ## Planned (from roadmap)
 

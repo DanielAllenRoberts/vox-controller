@@ -9,6 +9,7 @@ import numpy as np
 from vox.audio import MicStream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
+from vox.stats import Timer, process_stats
 from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.openwakeword_detector import OpenWakeWordDetector
 
@@ -39,8 +40,10 @@ def main() -> None:
     out = ConsoleOutput()
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
-    detector = OpenWakeWordDetector(cfg.wake_word_model, cfg.wake_threshold)
-    transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type)
+    with Timer() as load:
+        detector = OpenWakeWordDetector(cfg.wake_word_model, cfg.wake_threshold)
+        transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type)
+    out.emit(f"Models loaded in {load.seconds:.1f}s.")
 
     out.emit(f'{cfg.assistant_name} is listening — say "{cfg.wake_word_spoken}", then speak. (Ctrl+C to quit)')
     try:
@@ -52,8 +55,14 @@ def main() -> None:
                 detector.reset()
                 out.emit("→ wake word detected, listening…")
                 audio = _record_utterance(frames, cfg)
-                text = transcriber.transcribe(audio)
+                audio_dur = len(audio) / cfg.sample_rate
+                with Timer() as stt:
+                    text = transcriber.transcribe(audio)
+                cpu, mem = process_stats()
                 out.emit(f"You said: {text!r}" if text else "(heard nothing)")
+                rtf = stt.seconds / max(audio_dur, 0.01)
+                out.emit(f"  ⏱  audio {audio_dur:.1f}s · stt {stt.seconds:.2f}s "
+                         f"(rtf {rtf:.2f}) · cpu {cpu:.0f}% · mem {mem:.0f}MB")
     except KeyboardInterrupt:
         out.emit("\nStopped.")
 
