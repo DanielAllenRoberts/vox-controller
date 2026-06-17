@@ -44,7 +44,7 @@ def main() -> None:
 
     out.emit(f'{cfg.assistant_name} is listening — say "{cfg.wake_word_spoken}", then speak. (Ctrl+C to quit)')
     try:
-        with MicStream(cfg.sample_rate, cfg.frame_samples) as mic:
+        with MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device) as mic:
             frames = mic.frames()
             for frame in frames:
                 if not detector.detect(frame):

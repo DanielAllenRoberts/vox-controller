@@ -9,7 +9,7 @@ import sounddevice as sd
 class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
-    def __init__(self, sample_rate: int, frame_samples: int):
+    def __init__(self, sample_rate: int, frame_samples: int, device: int | None = None):
         self._frame_samples = frame_samples
         self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
         self._stream = sd.InputStream(
@@ -17,6 +17,7 @@ class MicStream:
             channels=1,
             dtype="int16",
             blocksize=frame_samples,
+            device=device,
             callback=self._callback,
         )
 
