@@ -15,6 +15,7 @@ A **named voice assistant** that:
 ### M0 — Listening loop skeleton
 Wake word (the assistant's name) → start listening → Whisper transcribes → print the text.
 - **Verify:** say the wake word + a phrase, see the correct transcript on screen.
+- **Status:** scaffolded; deps install + module imports verified. Pending on-device mic test (`uv run vox`). Wake word currently a stock model ("hey_jarvis"); custom "Hey Vox" model to be trained next.
 
 ### M1 — Basic action execution
 Map simple intents to host actions. First action: **open an app** ("open Safari").
@@ -40,5 +41,6 @@ Replace hardcoded command matching with **model-based intent classification** be
 - **Learning/logging layer** — capture every interaction for later training.
 - **Containerized agentic execution** — OpenCode-backed code tasks in a sandbox.
 - **Remote / phone interface** — local-first WebSocket; Tailscale suggested for anywhere-access.
+- **Terminal-first + web UI** — keep the whole thing runnable from the terminal (`uv run vox`), and add a local **web UI that attaches to the running daemon** to observe/control it (live transcripts, rules, logs, settings) — paperclip / OpenClaw style. The web UI is a *view onto the same process*, not a separate app.
 - **Intent caching** — compile hot intents into local rules to cut API use.
 - **Personalized fine-tuning** — voice + command models tuned to the user.
