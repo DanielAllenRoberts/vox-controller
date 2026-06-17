@@ -23,18 +23,34 @@ Local-first · provider-agnostic · modular · privacy-conscious.
 
 ```
 vox-controller/
+├── src/vox/
+│   ├── wakeword/     # wake-word detection (openWakeWord)
+│   ├── stt/          # speech-to-text (faster-whisper)
+│   ├── io/           # output channels (console for now; voice later)
+│   ├── core/         # the listen → transcribe loop
+│   ├── audio.py      # microphone capture
+│   └── config.py     # settings (name, models, thresholds)
 ├── docs/plan/        # planning docs (overview, roadmap)
+├── pyproject.toml
 ├── .env.example      # env var template (copy to .env)
 └── README.md
 ```
-*(Source layout will be added as M0 lands.)*
 
 ## Getting started
 
-> Coming together as **M0** (wake word → local Whisper → transcript) is built. Planned stack: **Python**, local **Whisper** STT, **openWakeWord** wake-word detection.
+**Requirements:** macOS (Apple Silicon) and [uv](https://docs.astral.sh/uv/). The project pins **Python 3.12** (uv fetches it for you).
 
-1. Copy the env template: `cp .env.example .env` (no keys needed until the AI layer, M4).
-2. _Setup + run instructions land with M0._
+```bash
+uv sync          # create the venv + install deps
+uv run vox       # start Vox: say "Hey Vox", then speak — your words print to the console
+```
+
+- First run downloads the wake-word and Whisper models (one-time).
+- Press **Ctrl+C** to quit.
+- If mic init fails, install PortAudio: `brew install portaudio`.
+
+> **M0 scope:** wake word → local Whisper → transcript printed. No actions yet — opening apps arrives in M1.
+> Copy the env template when you reach the AI layer (M4): `cp .env.example .env`.
 
 ## Safety (public repo)
 

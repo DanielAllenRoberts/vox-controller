@@ -76,6 +76,11 @@ Transcribed text escalates through tiers — stop as soon as one resolves:
 - **Tailscale is not part of this project.** It's an optional, *suggested* user-side add-on so the local interface becomes reachable from anywhere. We don't build or depend on it.
 - Persistent **WebSocket** connection for low-latency dispatch.
 
+### 9. Interfaces — terminal-first, web UI as a view
+- **Runs entirely in the terminal**: clone the repo and `uv run vox` — no GUI required.
+- A **local web UI** can attach to the *same running daemon* to observe and control it (live transcripts, active rules, logs, settings) — inspired by tools like **paperclip** and **OpenClaw**, where you run a terminal process and can also view/drive it in the browser.
+- Key point: the web UI is a **view/controller onto the running process**, not a separate app — the terminal stays the source of truth.
+
 ## Learning Layer (long-term differentiator)
 
 Every interaction is logged: what was said, how it was transcribed, whether execution succeeded, and any user corrections. This feeds two loops:
@@ -91,6 +96,7 @@ Every interaction is logged: what was said, how it was transcribed, whether exec
 
 ## Decisions Log
 
+- **Name & wake word:** the assistant is **Vox**; the wake phrase is **"Hey Vox"** (two syllables → more reliable detection than bare "Vox"). M0 uses a stock openWakeWord model to prove the loop; a custom "Hey Vox" model is trained as the follow-up.
 - **AI providers:** provider-agnostic by design; defaults to the latest Claude models (Haiku fast / Sonnet deep). Any API usable.
 - **Stack:** **Python** for the v1 orchestration layer — best Whisper/openWakeWord ecosystem and fastest path to a modular system. Performance-critical inference runs in **native backends** (whisper.cpp / CTranslate2 / ONNX, with Apple-Silicon acceleration), so glue-language overhead is negligible. Modular boundaries let any hot component be rewritten in a faster language (Rust/C++/Swift) later without touching the rest.
 - **Wake word:** start with **openWakeWord** (open source — inspect, adapt, potentially contribute back), behind a modular interface so other detectors can be swapped and benchmarked.
