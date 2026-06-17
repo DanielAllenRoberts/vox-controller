@@ -70,11 +70,23 @@ class Config:
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
-        "open go to search stand down take control hey vox quit close exit shut down "
-        "tab window next previous first last desktop space screen swipe new "
+        "open go to search switch stand down take control hey vox quit close exit shut down "
+        "tab window next previous first last desktop space screen swipe new profile dictate "
         "cursor arc safari chrome github youtube gmail spotify notion chatgpt linkedin trello amazon netflix "
         "calculator terminal finder notes slack figma"
     )
+
+    # --- Assistant (LLM) brain — provider-agnostic ---  key(s) go in .env. Presets:
+    #   Anthropic : provider="anthropic", model="claude-haiku-4-5-20251001", key_env="ANTHROPIC_API_KEY"
+    #   DeepSeek  : provider="openai", model="deepseek-chat", base_url="https://api.deepseek.com", key_env="DEEPSEEK_API_KEY"
+    #   OpenAI    : provider="openai", model="gpt-4o-mini", key_env="OPENAI_API_KEY"
+    #   Claude SDK: provider="claude_sdk"  (Claude Code via the Agent SDK; uses your subscription, no key)
+    #   Claude CLI: provider="claude_cli"  (Claude Code via `claude -p`; uses your subscription, no key)
+    llm_provider: str = "anthropic"      # "anthropic" | "openai" | "claude_sdk" | "claude_cli"
+    llm_model: str = "claude-haiku-4-5-20251001"
+    llm_base_url: str = ""               # for openai-compatible providers (e.g. DeepSeek)
+    llm_api_key_env: str = "ANTHROPIC_API_KEY"
+    llm_max_tokens: int = 400
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.

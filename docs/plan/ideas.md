@@ -90,6 +90,14 @@
 
 **Note:** the no-guess handoff already makes stray chatter harmless; this is about *also* not firing real commands buried in conversation.
 
+## 10. LLM text commands ("write this" / "make this pretty")
+
+In dictation or on selected text: **"write an email excusing me from X"** → the LLM composes it and types it; **"make this pretty"** → the LLM fixes spelling/punctuation of what you just typed *without changing the words*. Builds directly on M4 (LLM now wired) + dictation (typing) — the natural next step once chat is solid.
+
+## 11. Cycle same-site tabs ("next YouTube tab")
+
+Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs). "tab up/down" already works since they're adjacent in the sidebar; a dedicated cycler that jumps between matches would be a touch nicer. Low priority — not a current pain point.
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

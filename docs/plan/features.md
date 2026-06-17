@@ -17,6 +17,8 @@
 | Mode state machine (idle / control / assistant) | ✅ | `uv run vox` | wake phrase → mode → back to idle; multi-phrase detection |
 | Control mode (Dragon-style) | ✅ | say "take control", then commands | continuous — only exits on the sleep phrase (or Ctrl+C) |
 | Dictation (speak-to-type) | ✅ | "start typing" → click a field → speak → "stop typing" | types at your cursor (frontmost app); "backspace"/"new line"/"delete" keywords; Tink/Sosumi start/stop sounds |
+| Assistant chat (LLM) | ✅ | "Hey Vox" → multi-turn chat | **provider-agnostic**: Claude API · DeepSeek/OpenAI-compatible · **Claude Code (Agent SDK/CLI) on your subscription — no API key** — set in `config.py` |
+| One-shot command | ✅ | "Vox, open Safari" (from idle) | runs a single command without entering control mode |
 | Open / go to (app or known site) | ✅ | "open Cursor", "go to GitHub", "open a new YouTube" | app if installed; known site **reuses a tab in your current space** or makes one ("open new" forces fresh); unknown → hands off |
 | Chain two commands | ✅ | "open Arc and search this" | runs both halves of "X and Y" (only when both parse) |
 | Search the web | ✅ | "search <query>" in control mode | explicit web search in your browser |
@@ -40,7 +42,7 @@
 
 | Feature | Status | Milestone / notes |
 |---|---|---|
-| Assistant mode (LLM) | 🚧 | state + speech capture done; LLM wiring is **M4** (stubbed for now) |
+| LLM text commands | 🚧 | "write this" / "make this pretty" — compose/clean text via the LLM (builds on chat + dictation) |
 | Custom **"Vox" phrases** | 🚧 | train models → replace `hey_jarvis`/`hey_mycroft` placeholders (Colab; `wake-word-training.md`) |
 | User-chosen assistant name | 💡 | let users name it & reference that name — later feature |
 | Package power in watts | 💡 | opt-in `powermetrics` reader (needs sudo) — later |
