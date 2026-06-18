@@ -88,6 +88,14 @@ def _is_restart(text: str, cfg) -> bool:
     return phrase_match(normalize(text), cfg.restart_phrases)
 
 
+def _is_open_dashboard(text: str, cfg) -> bool:
+    return phrase_match(normalize(text), cfg.open_dashboard_phrases)
+
+
+def _is_close_dashboard(text: str, cfg) -> bool:
+    return phrase_match(normalize(text), getattr(cfg, "close_dashboard_phrases", ()))
+
+
 def _is_sleep(text: str, cfg) -> bool:
     t = normalize(text)
     return any(p in t for p in cfg.sleep_phrases)
@@ -219,6 +227,18 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
         if _is_dictate(text, cfg):
             out.emit("→ entering dictation…")
             return "dictation"
+        # Dashboard open/close also work from CONTROL mode (not just idle) — caught before the
+        # generic "open <app>" parser, which would otherwise try to open an app called "dashboard".
+        if _is_open_dashboard(text, cfg):
+            sounds.play(cfg.sound_dashboard_open)
+            _open_dashboard(cfg, out)
+            pending = []
+            continue
+        if _is_close_dashboard(text, cfg):
+            sounds.play(cfg.sound_dashboard_close)
+            out.emit(f"🖥  {actions.close_dashboard()}")
+            pending = []
+            continue
         out.emit(f"  you: {text!r}")
         result = actions.handle(text) if actions.parse(text) is not None else None
         if result is not None and not actions.failed(result):
