@@ -797,3 +797,65 @@ voice daemon is unaffected — this is a static SPA asset only.
   "Open file location" (reveals `data/memory/` in Finder on macOS).
 - With the bridge down: each section shows its error card; the daemon is
   unaffected.
+
+---
+
+## App shell — Handbook nav item + route + typed client
+
+> Frontend **app-shell** slice: add the **Handbook** destination to the shell
+> (nav, route, keyboard chord) and a **typed `lib/api.ts` client + types** for
+> `GET /api/handbook`. The Handbook *page* itself is owned by a separate page
+> agent (`src/pages/Handbook.tsx`); this slice only wires it into the shell and
+> publishes the typed catalog shape. Additive only — the daemon and every other
+> route/page are untouched.
+
+### Files touched (all owned by the app-shell agent)
+
+- `src/App.tsx` — import `Handbook` and add the `path="handbook"` route
+  (wrapped in `<PageTransition>` like every other page), placed just before the
+  `*` catch-all. All existing routes are intact and unchanged.
+- `src/components/layout/nav.ts` — add `BookOpen` to the lucide imports and a
+  `{ to: "/handbook", label: "Handbook", icon: BookOpen }` entry at the end of
+  `NAV_ITEMS`. Because `SideNav` and `CommandPalette` both render from
+  `NAV_ITEMS`, Handbook appears in the sidebar and the ⌘K palette for free.
+- `src/components/layout/shortcuts.ts` — add `{ key: "h", to: "/handbook",
+  label: "Handbook" }` to `GO_SHORTCUTS`, giving the **`g` then `h`** chord.
+  `useKeyboardShortcuts` (the global handler) and `HelpOverlay` (the `?` cheat
+  sheet) both read `GO_SHORTCUTS`, so the chord works and is documented with no
+  further edits. `h` was free across the existing chords (o/u/s/p/a/r/m/i).
+- `src/lib/api.ts` — add `HandbookItem`, `HandbookGroup`, `Handbook` types and
+  the `api.handbook()` client helper.
+
+### Decisions
+
+- **Icon: `BookOpen`** — a handbook/reference reads as a book; distinct from the
+  existing nav icons (no clash with `Brain` = Memory, `ScrollText` = Rules,
+  `Plug` = Integrations).
+- **Chord `g h`** — mnemonic for **H**andbook and unused by the existing set.
+  Added last so the SideNav order and the chord order stay aligned (the file
+  comments in both `nav.ts` and `shortcuts.ts` note that order mirrors the nav).
+- **Typed client mirrors the REAL wire shape.** The backend
+  (`src/vox/web/server.py` `_handbook`) returns a **bare array** of groups —
+  `HandbookGroup[]`, where `HandbookGroup = { title, blurb?, items:
+  HandbookItem[] }` and `HandbookItem = { phrase, description }` — *not* an
+  `{ groups }` envelope and *not* an `{ error }` body (the route falls back to
+  the static groups even if CONFIG can't be read). So `Handbook = HandbookGroup[]`
+  and `api.handbook()` returns `request<Handbook>("/handbook")` (no
+  `isApiError` narrowing needed — callers always get an array). Aligning to the
+  shipped backend keeps `lib/api.ts` honest as the single source of TS types.
+- **Page ownership respected.** `src/pages/Handbook.tsx` is built by the page
+  agent and is intentionally self-contained (it fetches `/api/handbook` directly,
+  mirroring how `Integrations.tsx` avoids importing `lib/api.ts`). This slice
+  does **not** edit that file; the `api.handbook()` helper is provided per the
+  shell brief for any future consumer that prefers the shared client.
+
+### How to verify
+
+- `cd dashboard && npx tsc --noEmit` → clean; `npx vite build` → succeeds.
+- In the running app: the sidebar shows **Handbook** (book icon) below
+  Integrations; ⌘K lists "Handbook"; pressing **`g`** then **`h`** navigates to
+  `/handbook`; the `?` help overlay lists the `g h` chord. All previous routes,
+  shortcuts and pages still work.
+- Bridge guarding is unchanged: the route/nav/shortcut are static client wiring;
+  the page degrades on its own when the bridge is down, and the voice daemon is
+  never affected.

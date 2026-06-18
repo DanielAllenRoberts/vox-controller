@@ -61,14 +61,23 @@ def _start_dashboard(cfg, out) -> None:
 
 
 def _open_dashboard(cfg, out) -> None:
-    """Open the dashboard URL in the default browser (hands-free 'open dashboard'). Guarded so a
-    failure can't break the wake loop."""
+    """Open the dashboard in its own window (Arc opens external localhost links as a standalone
+    'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
+    stacks. Closing is non-disruptive — actions.close_dashboard presses the window's close button
+    via accessibility (no Space-switch). Guarded so a failure can't break the wake loop."""
     url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
     try:
-        webbrowser.open(url)
+        if actions._focus_dashboard(url):  # reuse the existing dashboard window/tab
+            out.emit("🖥  Dashboard already open — focused it.")
+            return
+        subprocess.run(["open", url], capture_output=True, text=True)  # own window (Arc → Little Arc)
         out.emit(f"🖥  Opening dashboard → {url}")
-    except Exception as exc:
-        out.emit(f"  [dashboard] couldn't open browser: {exc}")
+    except Exception:
+        try:  # last-resort fallback to the system default browser
+            webbrowser.open(url)
+            out.emit(f"🖥  Opening dashboard → {url}")
+        except Exception as exc:
+            out.emit(f"  [dashboard] couldn't open browser: {exc}")
 
 
 def _is_quit(text: str, cfg) -> bool:
@@ -289,6 +298,19 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         if _is_control(text, cfg):
             out.emit("→ switching to control…")
             return "control"
+        # Command watcher: a genuine deterministic command mid-chat runs as an ACTION
+        # (you're done talking and you want it done) instead of going to the brain. Mirrors
+        # control mode's deterministic layer — conversational text doesn't parse, so it
+        # still reaches the LLM exactly as before. Only a cleanly-parsed, successful command
+        # short-circuits; a parsed-but-no-target attempt falls through to chat as it did.
+        if actions.parse(text) is not None:
+            cmd_result = actions.handle(text)
+            if cmd_result is not None and not actions.failed(cmd_result):
+                sounds.play(cfg.sound_oneshot)
+                out.emit(f"  ⚡ {cmd_result}")
+                mic.flush()
+                expecting_answer = False
+                continue
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
         result, interrupt = _run_interruptible(
@@ -316,6 +338,7 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
 def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
     sounds.play(cfg.sound_dictate_start)
     out.emit('✎ DICTATION — click where you want text, then speak. Say "stop typing" to stop.')
+    actions.reset_dictation()  # fresh spacing/capitalization state for this session
     while True:
         audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
         if audio is None:  # long pause
@@ -373,13 +396,33 @@ def main() -> None:
                     if label == "restart":
                         raise _Restart
                     if label == "dashboard":  # "open dashboard" → open the web UI, stay idle
+                        sounds.play(cfg.sound_dashboard_open)
                         _open_dashboard(cfg, out)
                         out.emit(idle_msg)
                         continue
-                    if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
+                    if label == "close_dashboard":  # "close dashboard" → close its tab in place
+                        sounds.play(cfg.sound_dashboard_close)
+                        out.emit(f"🖥  {actions.close_dashboard()}")
+                        out.emit(idle_msg)
+                        continue
+                    if label.startswith("do:"):  # one-shot from idle ("Vox, open Safari" / "Vox, write me…")
                         cmd = label[3:]
                         sounds.play(cfg.sound_oneshot)  # quick "got it" cue
-                        out.emit(f"⚡ {cmd!r} → {actions.handle(cmd)}")
+                        # Deterministic first; if it isn't a clean parser command, escalate to the
+                        # brain so one-shots also cover LLM actions (write / make this pretty / vision).
+                        res = actions.handle(cmd) if actions.parse(cmd) is not None else None
+                        if res is not None and not actions.failed(res):
+                            out.emit(f"⚡ {cmd!r} → {res}")
+                        else:
+                            sounds.play(cfg.sound_thinking)
+                            acted, msg = executor.execute(cmd)
+                            if acted:
+                                out.emit(f"⚡ {msg}")
+                            elif msg:
+                                shown, spoken = assistant.split_say(msg)
+                                out.emit(f"  🔊 {shown}")
+                                tts.speak(spoken)
+                                mic.flush()
                         out.emit(idle_msg)
                         continue
                     # A mode may return a follow-on label to chain into the other mode

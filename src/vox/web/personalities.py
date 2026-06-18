@@ -166,6 +166,24 @@ PRESETS: list[dict] = [
 _PRESETS_BY_ID = {p["id"]: p for p in PRESETS}
 
 
+# --- Default (synthetic "no persona") --------------------------------------
+# A first-class UI entry that lets the user *deselect* a persona: picking it
+# clears the active persona so the assistant runs as its plain self. It is NOT
+# in ``PRESETS`` (so the 8 presets and id-validation are untouched); it is
+# synthesised at the front of ``all()`` and maps to the empty active state.
+# Its ``persona`` is "" so ``get_active()`` layers nothing — exact base behaviour.
+_DEFAULT_ID = "default"
+_DEFAULT: dict = {
+    "id": _DEFAULT_ID,
+    "name": "Default",
+    "emoji": "🎙️",
+    "tagline": "Vox as itself — no special character.",
+    "persona": "",
+    "suggestedVoice": "",
+    "preset": True,
+}
+
+
 # --- Persistence -----------------------------------------------------------
 # Stored shape: {"active": "<id or ''>", "custom": [Personality, ...]}.
 
@@ -220,12 +238,18 @@ def _unique_id(slug: str, custom: list[dict]) -> str:
 # --- Public API ------------------------------------------------------------
 
 def all() -> dict:  # noqa: A001 - matches the contract's API name
-    """Return ``{active, presets, custom}`` (CONTRACT GET /api/personalities)."""
+    """Return ``{active, presets, custom}`` (CONTRACT GET /api/personalities).
+
+    The synthetic "Default" entry (id ``default``) is prepended to ``presets`` so
+    the UI can *deselect* a persona. When no persona is active (``active==""``),
+    Default is reported as the active one.
+    """
     with _LOCK:
         state = _load_state()
+    active = state["active"] or _DEFAULT_ID
     return {
-        "active": state["active"],
-        "presets": [dict(p) for p in PRESETS],
+        "active": active,
+        "presets": [dict(_DEFAULT)] + [dict(p) for p in PRESETS],
         "custom": state["custom"],
     }
 
@@ -277,6 +301,9 @@ def set_active(pid) -> str:
     known preset/custom id; otherwise raises ``ValueError`` so the server returns a 400.
     """
     pid = "" if pid is None else str(pid)
+    # "default" is the synthetic deselect entry → clears the active persona.
+    if pid == _DEFAULT_ID:
+        pid = ""
     with _LOCK:
         state = _load_state()
         if pid:

@@ -297,6 +297,18 @@ Call different agents by **name** — "Hey Atlas" for a coding work-session agen
 
 Give Vox your name — via a first-run **setup/onboarding** flow, or on the fly ("my name is Dan") — so it addresses you naturally and stores it as a core memory. Small but high-warmth; connects to memory auto-capture (#29), the second brain (#28), and personalising recognition (#8).
 
+## 41. Expand & edit personalities (in the dashboard)
+
+View a persona's full text and edit it in place — expand each card to read the whole prompt, then tweak name/emoji/voice/persona and save. Needs an `update_custom` in `personalities.py` + a `PATCH /api/personalities/{id}` route + an expand/edit UI on the Personalities page. Pairs with the new Default (no-persona) option and #42. **Queued to build right after the in-flight Handbook/Default-persona workflow** (shares those files).
+
+## 42. Let the LLM edit its own persona on request
+
+When you tell Vox "I don't like that you do X in this character — do Y instead," it updates the **active** persona going forward (not just this turn). Mirrors the memory auto-capture pattern: a gated `PERSONA[update]: <change>` directive the model appends, which is parsed, applied to the active personality (append/merge the instruction), and stripped from the reply. Gated by a toggle; only edits **custom** personas (presets stay pristine — fork-on-edit). Builds on #22/#41 + the `MEMORY[...]` directive (#29). **Queued next.**
+
+## 43. Live conversation viewer (dashboard tab)
+
+A dashboard tab that shows the running conversation like a chat — what you said, what each brain replied, and which commands ran — so you can watch what's happening. **Ephemeral by design:** the daemon publishes each turn to the bridge (the same way it already streams usage events over the WS), the page renders them live, and **nothing is written to disk** — it's just the in-RAM session buffer mirrored to the UI. Pairs with the prompt/response debug logging (#just-built); the persistent layer stays the tiered memory (#28/#29).
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

@@ -22,6 +22,7 @@ export const GO_SHORTCUTS: GoShortcut[] = [
   { key: "r", to: "/rules", label: "Rules" },
   { key: "m", to: "/memory", label: "Memory" },
   { key: "i", to: "/integrations", label: "Integrations" },
+  { key: "h", to: "/handbook", label: "Handbook" },
 ];
 
 export interface ShortcutDoc {

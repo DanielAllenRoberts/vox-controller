@@ -7,6 +7,7 @@ import {
   ScrollText,
   Brain,
   Plug,
+  BookOpen,
   type LucideIcon,
 } from "lucide-react";
 
@@ -16,8 +17,9 @@ export interface NavItem {
   icon: LucideIcon;
 }
 
-// The 7 original pages + Integrations (mirrors src/pages/* and CONTRACT.md
-// routes; Integrations surfaces the vox-speak MCP setup per MEMORY_DESIGN.md).
+// The 7 original pages + Integrations + Handbook (mirrors src/pages/* and
+// CONTRACT.md routes; Integrations surfaces the vox-speak MCP setup per
+// MEMORY_DESIGN.md; Handbook is the catalog of what Vox can do).
 export const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
   { to: "/usage", label: "Token Usage", icon: Coins },
@@ -27,4 +29,5 @@ export const NAV_ITEMS: NavItem[] = [
   { to: "/rules", label: "Rules", icon: ScrollText },
   { to: "/memory", label: "Memory", icon: Brain },
   { to: "/integrations", label: "Integrations", icon: Plug },
+  { to: "/handbook", label: "Handbook", icon: BookOpen },
 ];

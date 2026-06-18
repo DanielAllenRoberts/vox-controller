@@ -10,6 +10,7 @@ import { AxTree } from "@/pages/AxTree";
 import { Rules } from "@/pages/Rules";
 import { Memory } from "@/pages/Memory";
 import { Integrations } from "@/pages/Integrations";
+import { Handbook } from "@/pages/Handbook";
 
 export default function App() {
   const location = useLocation();
@@ -78,6 +79,14 @@ export default function App() {
           element={
             <PageTransition>
               <Integrations />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="handbook"
+          element={
+            <PageTransition>
+              <Handbook />
             </PageTransition>
           }
         />

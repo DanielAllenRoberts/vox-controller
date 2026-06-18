@@ -8,6 +8,7 @@ import {
   AudioLines,
   Wand2,
   UserPlus,
+  Mic,
 } from "lucide-react";
 import {
   api,
@@ -56,6 +57,14 @@ const SAY_VOICES = [
 // Sentinel for "no suggested voice" — Radix Select can't hold an empty value.
 const NO_VOICE = "__none__";
 
+// The synthetic "Default" persona the bridge prepends to `presets` (id "default",
+// empty persona) — represents base Vox with no special character. Selecting it
+// DESELECTS any active persona. The bridge's set_active only accepts "" or a real
+// preset/custom id, so we send "" (not "default") to clear it; "default" is
+// reported as active whenever nothing is set.
+const DEFAULT_ID = "default";
+const isDefault = (p: Personality) => p.id === DEFAULT_ID;
+
 function truncate(text: string, max = 150): string {
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max).trimEnd()}…` : clean;
@@ -70,7 +79,10 @@ function useSetActive() {
   const { toast } = useToast();
 
   return useMutation({
-    mutationFn: (id: string) => api.setActivePersonality(id),
+    // The Default card optimistically becomes active under id "default", but the
+    // bridge clears the persona via "" (set_active rejects the synthetic id).
+    mutationFn: (id: string) =>
+      api.setActivePersonality(id === DEFAULT_ID ? "" : id),
     onMutate: async (id) => {
       await qc.cancelQueries({ queryKey: PERSONALITIES_KEY });
       const prev = qc.getQueryData<PersonalitiesData>(PERSONALITIES_KEY);
@@ -88,6 +100,15 @@ function useSetActive() {
       });
     },
     onSuccess: (_res, id) => {
+      // The bridge returns "" when a persona is deselected (back to base Vox).
+      if (id === "" || id === DEFAULT_ID) {
+        toast({
+          variant: "info",
+          title: "Back to base Vox",
+          description: "No special persona — Vox as itself.",
+        });
+        return;
+      }
       const data = qc.getQueryData<PersonalitiesData>(PERSONALITIES_KEY);
       const found = [...(data?.presets ?? []), ...(data?.custom ?? [])].find(
         (p) => p.id === id,
@@ -162,6 +183,93 @@ function useRemoveCustom(onDone: () => void) {
       });
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Default card — base Vox (no persona). Calm, neutral "base" look that reads as
+// the absence of a character rather than a character. Clicking it deselects any
+// active persona and returns to plain Vox.
+// ---------------------------------------------------------------------------
+
+function DefaultCard({
+  active,
+  pending,
+  onActivate,
+}: {
+  active: boolean;
+  pending: boolean;
+  onActivate: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onActivate}
+      aria-pressed={active}
+      aria-label="Default — Vox as itself (no persona)"
+      className={cn(
+        "group relative flex h-full w-full flex-col rounded-2xl text-left transition-all duration-200",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+        pending && "opacity-70",
+      )}
+    >
+      {/* Quieter halo than persona cards — base Vox is calm, not flashy. */}
+      {active && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute -inset-px rounded-2xl bg-accent/40 opacity-50 blur-md"
+        />
+      )}
+      <Card
+        glass
+        className={cn(
+          "relative flex h-full flex-col overflow-hidden p-5 transition-all duration-200",
+          // Hairline dashed edge signals "no character" — a base slot, not a persona.
+          active
+            ? "ring-2 ring-accent shadow-[0_0_0_1px_hsl(var(--accent)/0.5)]"
+            : "border border-dashed border-border-strong/70 ring-1 ring-transparent hover:-translate-y-0.5 hover:border-border-strong",
+        )}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <span
+            className={cn(
+              "flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl transition-colors",
+              active
+                ? "bg-accent/15 text-accent ring-1 ring-accent/30"
+                : "bg-muted text-foreground-secondary ring-1 ring-border/60",
+            )}
+          >
+            <Mic className="h-6 w-6" />
+          </span>
+
+          {active && (
+            <Badge variant="accent" className="font-medium">
+              <Check className="h-3 w-3" />
+              Active
+            </Badge>
+          )}
+        </div>
+
+        <div className="mt-4 min-w-0 flex-1">
+          <h3 className="truncate text-base font-semibold text-foreground">
+            Default
+          </h3>
+          <p className="mt-0.5 truncate text-sm text-foreground-secondary">
+            Vox as itself
+          </p>
+          <p className="mt-3 line-clamp-3 text-xs leading-relaxed text-foreground-muted">
+            No special character — Vox&apos;s plain, unstyled voice. Select this
+            to clear any active persona and return to base.
+          </p>
+        </div>
+
+        <div className="mt-4 flex items-center">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-foreground-secondary">
+            Base
+          </span>
+        </div>
+      </Card>
+    </button>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -590,12 +698,24 @@ export function Personalities() {
   const [toDelete, setToDelete] = React.useState<Personality | null>(null);
 
   const activeId = data?.active ?? "";
+  const onDefault = activeId === DEFAULT_ID || activeId === "";
+
+  // The bridge prepends a synthetic "Default" entry to `presets`; pull it out so
+  // it can be rendered as a distinct base card, separate from the characters.
+  const { defaultEntry, characterPresets } = React.useMemo(() => {
+    const presets = data?.presets ?? [];
+    return {
+      defaultEntry: presets.find(isDefault) ?? null,
+      characterPresets: presets.filter((p) => !isDefault(p)),
+    };
+  }, [data]);
+
   const activePersona = React.useMemo(
     () =>
-      [...(data?.presets ?? []), ...(data?.custom ?? [])].find(
+      [...characterPresets, ...(data?.custom ?? [])].find(
         (p) => p.id === activeId,
       ),
-    [data, activeId],
+    [characterPresets, data, activeId],
   );
 
   return (
@@ -605,11 +725,20 @@ export function Personalities() {
         description="Choose a preset persona or craft your own. Click any card to make it Vox's voice."
         actions={
           <div className="flex items-center gap-3">
-            {activePersona && (
+            {activePersona ? (
               <Badge variant="accent" className="font-normal">
                 <Check className="h-3 w-3" />
                 {activePersona.emoji} {activePersona.name}
               </Badge>
+            ) : (
+              !isLoading &&
+              data &&
+              onDefault && (
+                <Badge variant="outline" className="font-normal">
+                  <Mic className="h-3 w-3" />
+                  Default — Vox as itself
+                </Badge>
+              )
             )}
             <Button variant="gradient" onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />
@@ -643,10 +772,22 @@ export function Personalities() {
             <SectionHeading
               icon={Sparkles}
               title="Presets"
-              count={data?.presets.length}
+              count={characterPresets.length}
             />
             <Stagger className={GALLERY_GRID}>
-              {(data?.presets ?? []).map((p) => (
+              {/* Base Vox always leads the gallery, visually set apart. */}
+              {defaultEntry && (
+                <StaggerItem key={defaultEntry.id} className="h-full">
+                  <DefaultCard
+                    active={onDefault}
+                    pending={pendingId === DEFAULT_ID || pendingId === ""}
+                    onActivate={() => {
+                      if (!onDefault) setActive.mutate(DEFAULT_ID);
+                    }}
+                  />
+                </StaggerItem>
+              )}
+              {characterPresets.map((p) => (
                 <StaggerItem key={p.id} className="h-full">
                   <PersonaCard
                     persona={p}

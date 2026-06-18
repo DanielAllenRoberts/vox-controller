@@ -12,7 +12,7 @@
 | O3 | 2026-06-17 | Wild mis-transcriptions of short phrases ("go to sleep" → "courtesy") | 🟡 | Accent + short utterance. Upgraded `base.en` → `small.en` to reduce; can't catch every garble. |
 | O4 | 2026-06-17 | Abandoned barge-in call still finishes in the background | 🟡 | Python can't kill a thread; a quick *action* it was about to run may still complete. Slow calls (chat/compose/vision) abandon cleanly. |
 | O5 | 2026-06-17 | Arc "favorites"/pinned tabs outside the current space aren't reused | 🟡 | `tabs of front window` spans profiles (jumps you) so we stay current-space-only. Reaching favorites safely needs probing Arc's scripting model. |
-| O6 | (ongoing) | Disk ~98% full (~4.5 GB free) | 🔴 | Be frugal with deps/models. `small.en` took ~590 MB. |
+| O6 | (ongoing) | Disk space is a constraint | 🔴 | Be frugal with deps/models. `small.en` took ~590 MB. |
 | O7 | 2026-06-17 | **External audio (a video on the speakers) is transcribed and triggers commands/LLM** | 🟡 | Root cause: no echo cancellation — the mic hears *all* system + room audio. Mitigated by a single-word/filler gate before escalation, and now by **keyword-gated escalation** (`escalation_mode="keywords"`, ideas #23) — only utterances with a trigger word ("write", "vox", "make this"…) reach the brain, so ambient speech is ignored. The real fix is **AEC** (#21, native macOS Voice Processing cancels all speaker output incl. video). Headphones avoid it today. |
 | O8 | 2026-06-17 | Barge-in (interrupt the LLM) feels unreliable | 🟡 | Logic is correct, but fast Haiku calls finish before you can speak, and ambient audio floods the interrupt-listener. Firms up with AEC (#21) + reserving barge-in for slow calls. |
 
@@ -20,6 +20,7 @@
 
 | Date | Issue | Cause | Fix |
 |------|-------|-------|-----|
+| 2026-06-18 | In assistant (chat) mode, a genuine command ("next tab", "open X") was sent to the brain as chat instead of running — you stayed stuck talking to the LLM | Assistant mode had no deterministic command watcher (only mode-switch checks ran before everything went to `respond_turn`) | Added a command watcher to `_assistant_mode`: a cleanly-parsed, successful `actions.parse`/`handle` command now runs as an **action** (quiet "did it" cue, stays in chat) instead of going to the LLM; conversational text doesn't parse so it still reaches the brain exactly as before. Complements the mid-call barge-in below. |
 | 2026-06-17 | Couldn't cut off a wrong LLM handoff with a new command (had to wait for the response) | Barge-in only listened for *stop* phrases mid-call | Mid-call, a clear command / mode-switch now cancels the LLM and runs instead (control + assistant); chatter/fuzzy speech is still ignored so a video doesn't thrash it |
 | 2026-06-17 | Single words / fillers ("and", "uh") from background audio triggered the LLM | No length/noise gate before escalation | Ignore 1-word and all-filler utterances in control mode (unless answering a clarification) |
 | 2026-06-17 | SDK "Reached maximum number of turns" (chat & vision) | `max_turns` cap too tight (1 / 4) | Raised to 6 (chat) / 8 (vision) — ceilings, bounded by the 45s/90s timeouts |

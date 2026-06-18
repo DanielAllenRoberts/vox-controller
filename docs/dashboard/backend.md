@@ -855,3 +855,221 @@ uv run python -c "import vox.assistant as a; print(a._memory_block('cursor'))"
 
 > Capture writes real entries to `data/memory/` (gitignored). When verifying live,
 > prefix test facts with `__TEST__` and delete them via `vox.memory.remove(id)`.
+
+## Personalities — the "Default" (deselect) entry
+
+`src/vox/web/personalities.py`
+
+Before this change the user could **activate** a persona but never **turn one off** —
+there was no UI affordance mapping back to the empty active state. Added a synthetic
+**Default** entry that represents "Vox as itself, no special character".
+
+### Shape
+
+A first-class `Personality` (matches the CONTRACT shape) that is **not** in `PRESETS`:
+
+```python
+{"id": "default", "name": "Default", "emoji": "🎙️",
+ "tagline": "Vox as itself — no special character.",
+ "persona": "", "suggestedVoice": "", "preset": True}
+```
+
+It is kept out of `PRESETS`/`_PRESETS_BY_ID` on purpose so the 8 real presets, their
+id-validation, and custom add/remove are completely untouched. Default is synthesised
+at runtime and mapped to the existing empty (`active == ""`) state.
+
+### Behaviour
+
+- **`all()`** prepends Default to `presets` (so it renders first), giving `9` presets.
+  When no persona is active (`active == ""`) it reports `active: "default"` so the UI
+  shows Default selected; otherwise it reports the real active id unchanged.
+- **`set_active("default")`** maps `"default"` → `""`, i.e. clears the active persona
+  (stores `active=""`). Any other id keeps the existing validate-then-store path; an
+  unknown id still raises `ValueError` (→ 400).
+- **`get_active()` / `get_active_personality()`** are unchanged: with no persona active
+  they return `""` / `None`, so the assistant layers **no** persona — exact base
+  behaviour. (Default's `persona` is `""`, and its id is never persisted, so even a
+  belt-and-braces lookup would yield the empty string.)
+- Custom add/remove and the 8 presets are unaffected.
+
+### Guarantees
+
+- Default is never written to `data/personalities.json` (it has no stored `active` id;
+  selecting it stores `""`). The persisted shape is unchanged.
+- Selecting Default is a true deselect — `get_active()` returns `""`, so `assistant.py`
+  injects nothing and the daemon behaves exactly as with no persona.
+- The module remains side-effect-free on import; a missing/corrupt store still reverts
+  to no active persona (Default reported as active).
+
+### Verify
+
+```bash
+# Default is first, present as a preset, 9 presets total
+uv run python -c "from vox.web import personalities as p; \
+a=p.all(); d=a['presets'][0]; \
+print(d['id'], d['name'], d['preset'], len(a['presets']))"
+# expect: default Default True 9
+
+# no persona active -> Default reported active; assistant layers nothing
+uv run python -c "from vox.web import personalities as p; \
+st=p._load_state(); st['active']=''; p._save_state(st); \
+print(p.all()['active'], repr(p.get_active()), p.get_active_personality())"
+# expect: default ''  None
+
+# selecting Default clears the active persona (deselect)
+uv run python -c "from vox.web import personalities as p; \
+p.set_active('batman'); print('before:', p.all()['active']); \
+print('set:', repr(p.set_active('default'))); \
+print('after:', p.all()['active'], repr(p.get_active()), repr(p._load_state()['active']))"
+# expect: before: batman  /  set: ''  /  after: default '' ''
+```
+
+
+---
+
+## Handbook catalog — `GET /api/handbook`
+
+A structured, read-only reference catalog that powers the dashboard **Handbook**
+page. Returns a JSON **array of groups**, each:
+
+```
+{ title, blurb?, items: [{ phrase, description }] }
+```
+
+### What it returns (7 groups)
+
+**Live from `vox.config.CONFIG`** (so the docs can never drift from what the daemon
+actually listens for):
+
+1. **Wake & Activation** — `control_phrases`, `assistant_phrases`,
+   `open_dashboard_phrases`.
+2. **Dictation** — `dictate_phrases` twice: bare (from CONTROL mode) and prefixed
+   with the wake word (`assistant_name`, default “Vox”) for starting dictation from
+   idle.
+3. **Sleep, Stop & Quit** — `sleep_phrases`, `abort_phrases`, `quit_phrases`,
+   `restart_phrases`.
+4. **Escalation Keywords** — `escalation_keywords`.
+
+**Curated static** (describe the deterministic parser / modes / features; no CONFIG
+dependency):
+
+5. **Control Commands** — example phrasings: open apps/sites, next/previous tab,
+   “go to my X tab”, next/previous window, swipe left/right for Spaces, profile N,
+   go back, close tab, show/hide tabs, search X, “write me X”, “make this pretty”,
+   “what does this say” (vision).
+6. **Modes** — control / assistant / dictation.
+7. **Features** — small/big brains, personalities, rules, memory, budgets, themes,
+   command palette.
+
+### Guarantees
+
+- **Always returns safe data.** `CONFIG` is imported **lazily inside**
+  `_handbook_live()`, never at module load, so the bridge boots even if config is
+  broken. If the live read fails, the route falls back to the static groups; if even
+  that fails, it returns `[]`. Always HTTP 200.
+- **Read-only.** No writes, no side effects, no subprocess.
+- Empty live groups (e.g. an emptied config tuple) are dropped so the page never
+  shows a hollow header.
+
+### Helpers
+
+- `_phrase_items(phrases, description, prefix="")` → `[{phrase, description}]` from a
+  CONFIG tuple; `prefix` prepends the wake word for the idle-dictation variant.
+- `_handbook_live()` → the 4 live phrase groups · `_handbook_static()` → the 3
+  curated groups · `_handbook()` → `live + static`.
+
+### Verify
+
+```bash
+# shape: array of {title, items:[{phrase, description}]}, all populated
+uv run python -c "from fastapi.testclient import TestClient; \
+from vox.web.server import create_app; \
+d=TestClient(create_app()).get('/api/handbook').json(); \
+print(len(d), 'groups'); \
+print([g['title'] for g in d])"
+# expect: 7 groups · Wake & Activation, Dictation, Sleep/Stop/Quit, Escalation
+#         Keywords, Control Commands, Modes, Features
+
+# live phrases really come from CONFIG (edit a phrase tuple → it shows here)
+uv run python -c "from vox.web import server; \
+flat=[i['phrase'] for g in server._handbook() for i in g['items']]; \
+print('take control' in flat, 'hey vox' in flat, \
+any(p.lower().startswith('vox ') for p in flat))"
+# expect: True True True   (control phrase, assistant phrase, idle-dictation prefix)
+```
+
+---
+
+## Debug logging — full prompt + raw response (`assistant.py`)
+
+When `CONFIG.debug` is `True`, every LLM call dumps the **complete outgoing prompt** and
+the **complete raw response** so you can see exactly what Vox sent and what the model
+returned — _before_ any `[OPEN]`/`[DONE]`/`[BIG]`/`SAY:`/`MEMORY[...]` stripping happens.
+
+### Helper
+
+`_dbg(label, content)` — guarded debug logger. When `CONFIG.debug`:
+- **prints to stdout** (so it shows live in the terminal alongside the voice loop), and
+- **appends to the session log file** `CONFIG.log_file` (the same `vox.log` the console
+  tees to), each block wrapped in clear markers:
+
+  ```
+  [debug]<label>
+  <content>
+  [debug]<label>/end
+  ```
+
+It is a **complete no-op when `CONFIG.debug` is False**, and fully guarded (`try/except`,
+swallows everything) — debug logging must never break a reply. `_fmt_messages(history, text)`
+renders the full conversation (history turns + the current user text) the way the providers
+build their `messages`.
+
+### Where it's called
+
+- **`complete()`** — the single choke point for **both** chat and the **executor** (the
+  executor calls `complete()` with its own system prompt and `kind="command"`/`"rewrite"`).
+  Before dispatching to the provider it logs:
+  - `[debug][prompt->small|big] provider=… model=… kind=… system` → the **exact system prompt**
+  - `[debug][prompt->small|big] messages` → the **full messages** (history + user text)
+
+  and after the provider returns, before any downstream stripping:
+  - `[debug][raw-response]` → the **exact raw text** returned
+
+  This covers all four providers (`_anthropic`, `_openai`, `_claude_sdk`, `_claude_cli`)
+  because they all flow through `complete()`.
+
+- **`look()`** — the vision path. Logs the vision prompt (`question` + image path) before
+  the call and the raw vision response after, mirroring the chat path. Covers both
+  `_sdk_look` and `_anthropic_look`.
+
+### Decisions
+
+- Instrumented at `complete()` / `look()` (the dispatch seams) rather than inside each
+  provider, so a single guarded call site covers every brain/provider with no duplication
+  and no change to provider internals.
+- Reuses the existing `CONFIG.log_file` (no new file, no new config) — debug blocks
+  interleave with the normal console tee, with `[debug]…` markers for easy grepping.
+- Logs the **assembled** system prompt that `respond_turn()` passes in (persona + rules +
+  memory already layered on), i.e. the literal bytes sent to the model.
+
+### Verify
+
+```bash
+# unit-level: prints to stdout AND appends to the log, no-op when debug is off
+python3 -c "
+import sys; sys.path.insert(0,'src')
+from vox import assistant as a; from vox.config import CONFIG
+import tempfile, os
+p = tempfile.mktemp(suffix='.voxdbg.log')
+object.__setattr__(CONFIG,'log_file',p); object.__setattr__(CONFIG,'debug',True)
+a._dbg('[prompt->small] system','SYSTEM PROMPT'); a._dbg('[raw-response]','RAW [OPEN] SAY: hi')
+print(open(p).read())
+object.__setattr__(CONFIG,'debug',False); before=open(p).read()
+a._dbg('[raw-response]','SHOULD NOT APPEAR'); assert open(p).read()==before
+print('noop-ok'); os.remove(p)"
+
+# live: run Vox with CONFIG.debug=True and watch vox.log (or the terminal) — every turn
+# emits [debug][prompt->…] system, [debug][prompt->…] messages, [debug][raw-response].
+grep -n '\[debug\]\[prompt->' vox.log
+grep -n '\[debug\]\[raw-response\]' vox.log
+```

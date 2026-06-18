@@ -115,6 +115,7 @@ _SCHEMA_META: list[dict] = [
         "label": "Auto-capture memories",
         "group": "Behavior",
         "type": "toggle",
+        "default": True,  # not a Config field — schema is the source of truth (daemon defaults on too)
         "help": "Let Vox save memories on its own — durable facts to core, "
                 "session notes to daily — and recall them in later turns. "
                 "Off means memories are only what you add by hand.",
@@ -230,7 +231,8 @@ def get(key: str):
         overrides = _load_overrides()
     if key in overrides:
         return overrides[key]
-    return getattr(CONFIG, key, None)
+    meta = _BY_KEY.get(key)
+    return getattr(CONFIG, key, meta.get("default") if meta else None)
 
 
 def set(key: str, value) -> dict:  # noqa: A001 - matches the contract's API name
@@ -259,7 +261,7 @@ def all() -> list[dict]:  # noqa: A001 - matches the contract's API name
     out: list[dict] = []
     for meta in _SCHEMA_META:
         key = meta["key"]
-        value = overrides[key] if key in overrides else getattr(CONFIG, key, None)
+        value = overrides[key] if key in overrides else getattr(CONFIG, key, meta.get("default"))
         setting = {
             "key": key,
             "label": meta["label"],
