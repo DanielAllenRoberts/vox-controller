@@ -57,6 +57,12 @@ docs/dashboard/*   # one doc per area; CONTRACT.md (this) ; BUILD_LOG.md (roadma
 - `GET /api/rules` → `Rule[]` ; `POST /api/rules` `{text}` ; `PATCH /api/rules/{id}` `{enabled?,text?}` ; `DELETE /api/rules/{id}`
 - `GET /api/memory?query=&limit=` → `Memory[]` ; `POST /api/memory` `{text,tags?}` ; `DELETE /api/memory/{id}`
 - `GET /api/axtree` → `{app, capturedAt, tree:AxNode}` or `{error}`
+- `GET /api/budget` → `BudgetStatus` (month-to-date spend vs the monthly cap) or `{error}`
+- `GET /api/diagnostics` → `Diagnostics` (read-only system/runtime health) or `{error}`
+
+  Both return HTTP 200 even when their bridge module is absent — the body is then `{error}`. Shapes:
+  - `BudgetStatus` = `{budgetUsd, spentUsd, remainingUsd, percent, state:"none"|"ok"|"warn"|"over"}` (state: `warn`≥80%, `over`≥100%; `none` when no budget set)
+  - `Diagnostics` = `{capturedAt, platform, process:{cpuPercent,memMb,uptimeSeconds}, stt:{model,computeType,sampleRate}, smallBrain:{provider,model}, bigBrain:{provider,model}, tts:{enabled,voice}}`
 
 ## Data shapes (TS types in `lib/api.ts` MUST match Python responses)
 

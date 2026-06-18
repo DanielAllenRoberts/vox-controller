@@ -149,15 +149,17 @@ def record_usage(
     ``brain`` is "small"|"big"; ``kind`` is "chat"|"command"|"vision"|"rewrite".
 
     ``input_tokens``/``output_tokens`` may be ``None`` when the provider didn't
-    expose token counts (SDK/CLI subscription calls). When both are ``None`` the
-    event records ``inputTokens``/``outputTokens`` as ``null`` and ``costUsd`` 0
-    so the dashboard can render it as a subscription call rather than a real
-    0-token request.
+    expose token counts (SDK/CLI subscription calls). Each field is kept as
+    ``null`` when its own value is ``None`` (independent of the other), and
+    ``costUsd`` is 0 for subscription/unknown-token calls, so the dashboard can
+    render them as subscription calls rather than misleading 0-token requests.
     """
-    subscription = is_subscription_call(provider, input_tokens, output_tokens)
-    # Subscription/no-token calls keep null token counts; everything else is an int.
-    in_tok = None if subscription and input_tokens is None else int(input_tokens or 0)
-    out_tok = None if subscription and output_tokens is None else int(output_tokens or 0)
+    # A token count is kept as null when the provider didn't expose it (None),
+    # so the dashboard renders "subscription"/unknown rather than a misleading 0.
+    # Both fields are handled symmetrically: each preserves its own None and
+    # coerces to int otherwise, independent of the other.
+    in_tok = None if input_tokens is None else int(input_tokens or 0)
+    out_tok = None if output_tokens is None else int(output_tokens or 0)
     cost = _cost_usd(provider, model, int(in_tok or 0), int(out_tok or 0))
     event = {
         "id": uuid.uuid4().hex[:12],

@@ -24,7 +24,13 @@ import {
   Settings as SettingsIcon,
   AlertTriangle,
 } from "lucide-react";
-import { api, type UsageSummary, type UsageEvent } from "@/lib/api";
+import {
+  api,
+  isApiError,
+  type UsageSummary,
+  type UsageEvent,
+  type BudgetState,
+} from "@/lib/api";
 import { formatCost, formatTokens } from "@/lib/utils";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricCard } from "@/components/MetricCard";
@@ -50,35 +56,9 @@ const BAR_COLORS = [
 // Cost budget widget
 // ---------------------------------------------------------------------------
 //
-// Reads GET /api/budget. The budget route lives in the Python bridge but is
-// NOT in the typed `api` client (lib/api.ts is owned by another agent), so we
-// fetch it directly here, mirroring lib/api.ts's API_BASE resolution.
-
-type BudgetState = "ok" | "warn" | "over" | "none";
-
-interface Budget {
-  budgetUsd: number;
-  spentUsd: number;
-  remainingUsd: number;
-  percent: number;
-  state: BudgetState;
-}
-
-interface BudgetError {
-  error: string;
-}
-
-const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
-
-async function fetchBudget(): Promise<Budget | BudgetError> {
-  const res = await fetch(`${API_BASE}/api/budget`, {
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!res.ok) {
-    return { error: `budget request failed (${res.status})` };
-  }
-  return (await res.json()) as Budget | BudgetError;
-}
+// Reads GET /api/budget via the typed `api.budget()` client. The route may
+// return a { error } envelope at HTTP 200 when its bridge module is absent, so
+// we narrow with isApiError() and fold any failure into the "no budget" state.
 
 // Per-state accent: ok=violet→cyan, warn=amber, over=red. Drives both the ring
 // stroke and the surrounding glow so the card reads at a glance.
@@ -167,14 +147,13 @@ function BudgetEmptyState() {
 function BudgetWidget() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["budget"],
-    queryFn: fetchBudget,
+    queryFn: api.budget,
     refetchInterval: 10_000,
   });
 
   // Treat any error / unavailable backend as "no budget set" — the widget is
   // additive and must never look broken if the budget module isn't wired up.
-  const budget =
-    data && !("error" in data) ? (data as Budget) : null;
+  const budget = data && !isApiError(data) ? data : null;
   const state: BudgetState = budget?.state ?? "none";
   const hasBudget = budget !== null && state !== "none" && budget.budgetUsd > 0;
 

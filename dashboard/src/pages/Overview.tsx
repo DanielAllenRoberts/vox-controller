@@ -25,6 +25,8 @@ import {
   type Status,
   type UsageSummary,
   type UsageEvent,
+  type Diagnostics,
+  type DiagnosticsBrain,
 } from "@/lib/api";
 import { formatCost, todayKey } from "@/lib/utils";
 import { PageHeader } from "@/components/PageHeader";
@@ -49,48 +51,13 @@ function formatUptime(seconds: number): { value: number; unit: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Diagnostics (GET /api/diagnostics) — local reader.
+// Diagnostics (GET /api/diagnostics) via the typed `api.diagnostics()` client.
 //
-// The diagnostics endpoint is owned by the parallel iteration-7 backend agent
-// and isn't in lib/api.ts yet (and we must NOT edit lib/api.ts), so we read it
-// here with a small direct fetch that mirrors the api client's conventions
-// (same VITE_API_BASE resolution + camelCase + {error} envelope).
-//
-// Shape mirrors docs/dashboard/diagnostics.md exactly. Every field is optional
-// and rendered defensively, so the card degrades gracefully if the backend
-// returns its "unknown"/sentinel envelope (off-mac, missing psutil, etc).
+// The route returns the nested health snapshot, or an { error } envelope at
+// HTTP 200 when its bridge module is absent. Every field is read defensively so
+// the card degrades gracefully if the backend hands back its "unknown" sentinel
+// (off-mac, missing psutil, etc).
 // ---------------------------------------------------------------------------
-interface BrainRefLoose {
-  provider?: string;
-  model?: string;
-}
-
-interface Diagnostics {
-  process?: { cpuPercent?: number; memMb?: number; uptimeSeconds?: number };
-  stt?: { model?: string; computeType?: string; sampleRate?: number };
-  smallBrain?: BrainRefLoose;
-  bigBrain?: BrainRefLoose;
-  error?: string;
-}
-
-const DIAG_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
-
-async function fetchDiagnostics(): Promise<Diagnostics> {
-  const res = await fetch(`${DIAG_BASE}/api/diagnostics`, {
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const body = await res.json();
-      detail = body?.detail ?? body?.error ?? detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(detail);
-  }
-  return (await res.json()) as Diagnostics;
-}
 
 // A single labelled stat row inside the System health card. Optional accent
 // colour for the value (used to flag CPU/memory pressure).
@@ -129,7 +96,7 @@ function pressureClass(pct?: number): string {
   return "text-success";
 }
 
-function brainLabel(b?: BrainRefLoose): string {
+function brainLabel(b?: DiagnosticsBrain): string {
   if (!b) return "—";
   // The backend's "unknown" sentinel reads as a real value; treat it as empty.
   const model = b.model && b.model !== "unknown" ? b.model : "";
@@ -143,7 +110,7 @@ function brainLabel(b?: BrainRefLoose): string {
 function SystemHealthCard({ running }: { running: boolean }) {
   const { data, isLoading, isError, error } = useQuery<Diagnostics>({
     queryKey: ["diagnostics"],
-    queryFn: fetchDiagnostics,
+    queryFn: api.diagnostics,
     refetchInterval: 4000,
     retry: 1,
   });
