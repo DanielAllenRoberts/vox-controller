@@ -318,6 +318,113 @@ def _reuse_tab(url: str) -> bool:
     return False
 
 
+_DASHBOARD_TITLE = "Vox Control Center"  # the dashboard's page <title>, used to find its window
+
+
+def _focus_dashboard(url: str) -> bool:
+    """Reuse an already-open dashboard WITHOUT yanking you to Arc's main window: only act if one is
+    actually open. Raises an existing standalone 'Little Arc' window in place, or selects a matching
+    tab — crucially activating Arc ONLY on a real match, so a fresh open (nothing to reuse) never
+    switches you out of the app you're in. Returns True if one was focused."""
+    host = urllib.parse.urlparse(url).netloc.replace('"', "")
+    if not host:
+        return False
+    # (1) An existing standalone Little Arc window — raise it in place (no Arc activate → no Space jump).
+    se = (
+        f'tell application "System Events" to tell process "{CONFIG.browser}"\n'
+        f'    repeat with w in windows\n'
+        f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
+        '            perform action "AXRaise" of w\n'
+        '            return "ok"\n'
+        '        end if\n'
+        '    end repeat\n'
+        '    return "none"\n'
+        'end tell')
+    if _osa(se) == (True, "ok"):
+        return True
+    # (2) A matching tab in the current Space — activate Arc only INSIDE the match (not before it),
+    #     so checking-and-finding-nothing doesn't pull focus to Arc.
+    if CONFIG.browser != "Arc":
+        return _reuse_tab(url)
+    tab = (
+        'tell application "Arc"\n'
+        '    if (count of windows) is 0 then return "none"\n'
+        '    repeat with t in tabs of (active space of front window)\n'
+        f'        if URL of t contains "{host}" then\n'
+        '            tell t to select\n'
+        '            activate\n'
+        '            return "ok"\n'
+        '        end if\n'
+        '    end repeat\n'
+        '    return "none"\n'
+        'end tell')
+    return _osa(tab) == (True, "ok")
+
+
+def close_dashboard() -> str:
+    """Close the dashboard without disrupting your workflow — no Space-switch, no focus-steal.
+    (1) If it's a normal tab, close just that tab via the browser's AppleScript.
+    (2) Otherwise press the standalone window's close button directly via accessibility — AXPress
+    needs no focus, so it never switches Spaces. The tab path runs FIRST, so a dashboard tab in the
+    main window is always closed as a tab and we never AXPress (and thus close) the main window —
+    the standalone path only fires for a genuine 'Little Arc', which Arc's AppleScript can't see.
+    Never raises."""
+    url = f"http://{CONFIG.dashboard_host}:{CONFIG.dashboard_port}"
+    host = urllib.parse.urlparse(url).netloc.replace('"', "")
+    if not host:
+        return "No dashboard URL configured."
+    # (1) Close a matching TAB (incl. the active tab of the main window) — closes only the tab.
+    tab = (
+        f'tell application "{CONFIG.browser}"\n'
+        '    repeat with w in windows\n'
+        '        repeat with t in tabs of w\n'
+        f'            if URL of t contains "{host}" then\n'
+        '                tell t to close\n'
+        '                return "ok"\n'
+        '            end if\n'
+        '        end repeat\n'
+        '    end repeat\n'
+        '    return "none"\n'
+        'end tell')
+    if _osa(tab) == (True, "ok"):
+        return "Closed the dashboard."
+    # (2) Standalone Little Arc window: press its close button (shallow chrome search, not the heavy
+    #     web AX tree). AXPress needs no focus → non-disruptive.
+    se = (
+        f'tell application "System Events" to tell process "{CONFIG.browser}"\n'
+        f'    repeat with w in windows\n'
+        f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
+        '            repeat with g in (UI elements of w)\n'
+        '                try\n'
+        '                    repeat with b in (buttons of g)\n'
+        '                        if subrole of b is "AXCloseButton" then\n'
+        '                            perform action "AXPress" of b\n'
+        '                            return "ok"\n'
+        '                        end if\n'
+        '                    end repeat\n'
+        '                end try\n'
+        '                try\n'
+        '                    repeat with g2 in (UI elements of g)\n'
+        '                        try\n'
+        '                            repeat with b in (buttons of g2)\n'
+        '                                if subrole of b is "AXCloseButton" then\n'
+        '                                    perform action "AXPress" of b\n'
+        '                                    return "ok"\n'
+        '                                end if\n'
+        '                            end repeat\n'
+        '                        end try\n'
+        '                    end repeat\n'
+        '                end try\n'
+        '            end repeat\n'
+        '        end if\n'
+        '    end repeat\n'
+        '    return "none"\n'
+        'end tell')
+    if _osa(se) == (True, "ok"):
+        return "Closed the dashboard."
+    return "No dashboard window was open."
+
+
 def _search(query: str) -> str:
     _open_url("https://www.google.com/search?q=" + urllib.parse.quote_plus(query))
     return f"Searching for {query!r}."
@@ -579,10 +686,28 @@ def _paste(text: str) -> None:
          'if savedClip is not "" then set the clipboard to savedClip')
 
 
+# Dictation arrives as a series of independent dictate() calls — one per utterance,
+# split by your pauses. This tiny state carries spacing + capitalization across those
+# pauses so a mid-sentence pause doesn't fuse words ("there wasa brown cow") and a new
+# sentence after a full stop is capitalized.
+_dictation_active = False        # have we typed anything yet this session?
+_dictation_new_sentence = True   # capitalize the next chunk (start, after . ! ? or a line break)
+
+
+def reset_dictation() -> None:
+    """Reset cross-chunk dictation state — call when entering dictation mode."""
+    global _dictation_active, _dictation_new_sentence
+    _dictation_active = False
+    _dictation_new_sentence = True
+
+
 def dictate(text: str) -> None:
-    """Insert spoken text at the cursor (frontmost app). A few spoken words are treated as edit
-    keys; everything else is pasted (trailing space for word separation)."""
-    low = text.strip().lower().rstrip(".!?")
+    """Insert spoken text at the cursor (frontmost app). A few spoken words act as edit keys;
+    everything else is pasted. Chunks are separated with a LEADING space (survives editors that
+    trim trailing spaces) and the first word of each sentence is capitalized."""
+    global _dictation_active, _dictation_new_sentence
+    raw = text.strip()
+    low = raw.lower().rstrip(".!?")
     # spoken edit words -> (key code, modifier). "new/next line" is a SOFT newline
     # (Shift+Return) so it doesn't *send* in chat apps; "enter"/"send" is a plain Return.
     specials = {
@@ -595,8 +720,19 @@ def dictate(text: str) -> None:
         code, mod = specials[low]
         _osa(f'tell application "System Events" to key code {code}'
              + (f' using {{{mod}}}' if mod else ''))
+        if code == 36:  # any Return → next chunk starts fresh on a new line
+            _dictation_active = False       # no leading space right after a line break
+            _dictation_new_sentence = True  # and capitalize it
         return
-    _paste(text + " ")
+    if not raw:
+        return
+    # Capitalize the first letter when a new sentence starts (first chunk, or after . ! ?).
+    if _dictation_new_sentence and raw[:1].islower():
+        raw = raw[0].upper() + raw[1:]
+    # Leading space separates this chunk from the previous one across the pause.
+    _paste((" " if _dictation_active else "") + raw)
+    _dictation_active = True
+    _dictation_new_sentence = raw.rstrip()[-1:] in ".!?"
 
 
 def type_text(text: str) -> str:

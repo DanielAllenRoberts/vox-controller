@@ -141,6 +141,35 @@ export interface McpConfig {
   error?: string;
 }
 
+// Handbook catalog — the human-readable reference of what Vox can do, mirrors
+// GET /api/handbook (src/vox/web/server.py `_handbook`). The bridge returns a
+// bare ARRAY of groups (no envelope), in display order: live phrase groups
+// (pulled from CONFIG: wake/control, dictation, sleep/stop, escalation) first,
+// then curated static groups (commands / modes / features). Each item is a
+// spoken `phrase` + a `description`. This route is additive (not in the
+// original CONTRACT.md data shapes). The route degrades to the static groups
+// even when CONFIG can't be read, so it does not use the { error } envelope.
+export interface HandbookItem {
+  // The exact phrase to say (or an example phrasing the parser understands).
+  phrase: string;
+  // One-line description of what it does.
+  description: string;
+  // Curated legitimate alternative phrasings (NOT misrecognition spellings),
+  // shown when the phrase is clicked. Absent when there are no other ways to say it.
+  variants?: string[];
+}
+
+export interface HandbookGroup {
+  // Display name for the group (e.g. "Wake & activation", "Dictation").
+  title: string;
+  // Optional one-line summary shown under the group title.
+  blurb?: string;
+  items: HandbookItem[];
+}
+
+// The catalog is the array of groups itself (GET /api/handbook → HandbookGroup[]).
+export type Handbook = HandbookGroup[];
+
 export interface AxNode {
   role: string;
   title?: string;
@@ -329,6 +358,11 @@ export const api = {
     request<{ ok: boolean }>("/memory/reveal", { method: "POST" }),
 
   axtree: () => request<AxTree | AxTreeError>("/axtree"),
+
+  // Handbook catalog (the reference of what Vox can do, grouped by area).
+  // Returns a bare array of groups (HandbookGroup[]); the bridge falls back to
+  // the static groups if CONFIG can't be read, so callers always get an array.
+  handbook: () => request<Handbook>("/handbook"),
 
   // Iteration 7 — cost budget meter + runtime diagnostics. Both routes return
   // HTTP 200 even when their bridge module is absent, with an { error } body;

@@ -32,10 +32,16 @@ _SYSTEM = (
     "If a request needs deep reasoning, careful analysis, long writing, or coding beyond a quick "
     "spoken answer, reply with exactly [BIG] and nothing else — a more capable model then takes "
     "over. Use this sparingly, only when a short answer genuinely won't do.\n\n"
-    "Voice: your reply is shown in full and also read aloud. When the spoken version should be "
-    "shorter than the written one, add a final line 'SAY: <concise spoken version>' — then only "
-    "that line is read aloud (it's removed from the shown text). Skip it when the whole reply is "
-    "fine to speak.\n\n"
+    "Voice-only — the user is hands-free and ONLY HEARS your reply through text-to-speech. They "
+    "do NOT read any text or look at a screen; nothing you write that isn't spoken aloud ever "
+    "reaches them. So everything you want them to know or ask MUST be in what is spoken. Don't "
+    "write content they won't hear, don't reference anything visual ('as shown', 'the list "
+    "below', 'see above'), and never ask a question you haven't said out loud — they can only "
+    "answer what they heard. Keep replies short and natural to speak. By default your whole reply "
+    "is read aloud; only if part is genuinely awkward to speak (code, a URL, a long list) add a "
+    "final line 'SAY: <the spoken version>' — then ONLY that line reaches the user, so make it "
+    "self-contained and complete, never a teaser or a pointer to unspoken text. (The full written "
+    "reply is kept only in the logs / dashboard, which the user is not looking at.)\n\n"
     "Memory: you can remember things across conversations. When the user shares something worth "
     "keeping, append a capture directive on its own line at the very end of your reply — "
     "'MEMORY[core]: <fact>' for durable, always-relevant facts (their name, standing "
@@ -48,6 +54,35 @@ _SYSTEM = (
 
 _anthropic_client = None
 _openai_client = None
+
+
+def _dbg(label: str, content) -> None:
+    """When CONFIG.debug, log a debug block to stdout AND append it to the session log
+    file (CONFIG.log_file) with clear markers. Used to dump the COMPLETE outgoing prompt
+    and the COMPLETE raw LLM response for every call, before any tag/SAY/MEMORY stripping.
+
+    Fully guarded and a complete no-op when CONFIG.debug is False — debug logging must
+    never break a reply."""
+    try:
+        if not getattr(CONFIG, "debug", False):
+            return
+        body = content if isinstance(content, str) else repr(content)
+        block = f"[debug]{label}\n{body}\n[debug]{label}/end"
+        print(block, flush=True)
+        path = getattr(CONFIG, "log_file", "") or ""
+        if path:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(block + "\n")
+    except Exception:
+        pass  # never let debug logging break a reply
+
+
+def _fmt_messages(history, text: str) -> str:
+    """Render the full conversation that's sent to the model — history turns plus the
+    current user text — for debug logging. Mirrors how each provider builds its messages."""
+    lines = [f"[{r}] {c}" for r, c in (history or [])]
+    lines.append(f"[user] {text}")
+    return "\n".join(lines)
 
 
 def _setting(key: str, fallback):
@@ -313,13 +348,24 @@ def complete(text: str, history=None, *, brain: str = "small", system: str = _SY
     """One raw completion from the named brain with the given system prompt. Provider-agnostic.
     `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record."""
     provider, model = _brain(brain)
+    # Debug: dump the COMPLETE outgoing prompt — system + full messages (history + user
+    # text) — for every LLM call (covers chat AND the executor, which calls complete()
+    # with its own system prompt). Guarded no-op unless CONFIG.debug.
+    _dbg(f"[prompt->{brain}] provider={provider} model={model} kind={kind} system",
+         system)
+    _dbg(f"[prompt->{brain}] messages", _fmt_messages(history, text))
     if provider == "claude_sdk":
-        return _claude_sdk(text, history, model, system, brain, kind)
-    if provider == "claude_cli":
-        return _claude_cli(text, history, model, system, brain, kind)
-    if provider == "openai":
-        return _openai(text, history, model, system, brain, kind)
-    return _anthropic(text, history, model, system, brain, kind)
+        raw = _claude_sdk(text, history, model, system, brain, kind)
+    elif provider == "claude_cli":
+        raw = _claude_cli(text, history, model, system, brain, kind)
+    elif provider == "openai":
+        raw = _openai(text, history, model, system, brain, kind)
+    else:
+        raw = _anthropic(text, history, model, system, brain, kind)
+    # Debug: dump the COMPLETE raw response, BEFORE any [OPEN]/[DONE]/[BIG]/SAY:/MEMORY[...]
+    # stripping happens downstream in respond_turn / _split_signal / _capture_from_reply.
+    _dbg("[raw-response]", raw)
+    return raw
 
 
 def split_say(text: str) -> tuple[str, str]:
@@ -452,11 +498,18 @@ def _claude_cli(text, history, model, system, brain="small", kind="chat"):
 def look(question: str, image_path: str, brain: str = "small") -> str:
     """Answer a question about an on-screen image using a vision-capable brain."""
     provider, model = _brain(brain)
+    # Debug: dump the COMPLETE vision prompt (question + image path) before the call.
+    _dbg(f"[prompt->{brain}] provider={provider} model={model} kind=vision",
+         f"question={question}\nimage={image_path}")
     if provider in ("claude_sdk", "claude_cli"):
-        return _sdk_look(question, image_path, model, brain)
-    if provider == "anthropic":
-        return _anthropic_look(question, image_path, model, brain)
-    return "Looking at the screen needs a Claude or Anthropic brain — this one can't see images."
+        raw = _sdk_look(question, image_path, model, brain)
+    elif provider == "anthropic":
+        raw = _anthropic_look(question, image_path, model, brain)
+    else:
+        raw = "Looking at the screen needs a Claude or Anthropic brain — this one can't see images."
+    # Debug: dump the COMPLETE raw vision response before any downstream handling.
+    _dbg("[raw-response]", raw)
+    return raw
 
 
 def _sdk_look(question, image_path, model, brain="small"):

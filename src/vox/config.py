@@ -68,6 +68,12 @@ class Config:
         "open dashboard", "open the dashboard", "show dashboard",
         "launch dashboard", "open vox dashboard",
     )
+    # Idle wake phrases that close the open dashboard window/tab. ("closed …" covers the very
+    # common Whisper mishear of "close".)
+    close_dashboard_phrases: tuple[str, ...] = (
+        "close dashboard", "close the dashboard", "closed dashboard",
+        "closed the dashboard", "hide dashboard", "close vox dashboard",
+    )
 
     # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
     log_file: str = "vox.log"
@@ -181,6 +187,8 @@ class Config:
     sound_oneshot: str = "/System/Library/Sounds/Morse.aiff"         # one-shot command ("Vox, open Safari")
     sound_abort: str = "/System/Library/Sounds/Basso.aiff"           # emergency stop / abort
     sound_thinking: str = "/System/Library/Sounds/Submarine.aiff"    # escalating to the LLM (it may take a moment)
+    sound_dashboard_open: str = "/System/Library/Sounds/Blow.aiff"   # opened the dashboard
+    sound_dashboard_close: str = "/System/Library/Sounds/Purr.aiff"  # closed the dashboard
 
 
 CONFIG = Config()

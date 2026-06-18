@@ -499,6 +499,25 @@ def create_app() -> FastAPI:
         except Exception as exc:
             return {"error": f"could not build MCP config: {exc}"}
 
+    # --- Handbook (catalog of voice commands & features) ---
+    @app.get("/api/handbook")
+    def get_handbook() -> list:
+        """A structured reference catalog for the dashboard Handbook page.
+
+        Wake/spoken phrases are pulled LIVE from ``vox.config.CONFIG`` so the
+        documented vocabulary can never drift from what the daemon listens for.
+        Read-only and fully guarded: any failure degrades to a curated static
+        catalog (the command/mode/feature groups don't depend on CONFIG) so the
+        page always renders something useful."""
+        try:
+            return _handbook()
+        except Exception:
+            # CONFIG read failed → still return the static groups (no live phrases).
+            try:
+                return _handbook_static()
+            except Exception:
+                return []
+
     # --- AX tree (guarded) ---
     @app.get("/api/axtree")
     def get_axtree() -> dict:
@@ -632,6 +651,319 @@ def _mcp_config() -> dict:
         "claudeAdd": claude_add,
         "repoRoot": repo_root,
     }
+
+
+def _phrase_items(phrases, description: str, prefix: str = "") -> list:
+    """Turn a CONFIG phrase tuple into ``[{phrase, description}]`` items.
+
+    ``prefix`` is prepended to each phrase (e.g. the ``"Vox"`` wake word that
+    dictation needs from idle). Guarded: a missing/empty tuple yields ``[]``."""
+    out = []
+    try:
+        for p in phrases or ():
+            if not isinstance(p, str) or not p.strip():
+                continue
+            text = f"{prefix} {p}".strip() if prefix else p
+            out.append({"phrase": text, "description": description})
+    except Exception:
+        return []
+    return out
+
+
+def _handbook_live() -> list:
+    """WAKE & SPOKEN PHRASES groups, pulled LIVE from ``vox.config.CONFIG``.
+
+    Imported lazily inside the call (see ``_handbook``) so a missing/broken
+    config can't stop the server booting. The phrase lists are the daemon's
+    real vocabulary, so the docs can never drift."""
+    from ..config import CONFIG as cfg
+
+    wake = cfg.assistant_name or "Vox"
+
+    def canon(phrases, fallback):
+        """The canonical phrase to show — the first real config entry, else the fallback."""
+        try:
+            for p in (phrases or ()):
+                if isinstance(p, str) and p.strip():
+                    return p
+        except Exception:
+            pass
+        return fallback
+
+    def item(phrase, description, variants=()):
+        """One handbook item. ``variants`` are curated *legitimate* alternative phrasings
+        (NOT the misrecognition spellings like 'hey fox'/'quit box'), surfaced when the
+        phrase is clicked in the UI."""
+        out = {"phrase": phrase, "description": description}
+        vs = [v for v in variants if isinstance(v, str) and v.strip() and v != phrase]
+        if vs:
+            out["variants"] = vs
+        return out
+
+    def dedupe(keywords):
+        """Collapse spelling duplicates (e.g. summarise/summarize) for the handbook display."""
+        seen, deduped = set(), []
+        for k in (keywords or ()):
+            if not isinstance(k, str) or not k.strip():
+                continue
+            norm = k.lower().replace("ise", "ize").replace("our", "or")
+            if norm not in seen:
+                seen.add(norm)
+                deduped.append(k)
+        return deduped
+
+    groups = [
+        {
+            "title": "Wake & Activation",
+            "blurb": "Say one of these from idle to switch modes. Click a phrase to see the "
+            "other ways you can say it.",
+            "items": [
+                item(canon(cfg.control_phrases, "take control"),
+                     "Enter CONTROL mode — drive apps, tabs, windows and spaces by voice.",
+                     ["control mode", "start control"]),
+                item(canon(cfg.assistant_phrases, "hey vox"),
+                     "Enter ASSISTANT mode — a back-and-forth conversation with the brain."),
+                item(canon(cfg.open_dashboard_phrases, "open dashboard"),
+                     "Open this dashboard (Vox Control Center) in your browser.",
+                     ["open the dashboard", "show dashboard", "launch dashboard"]),
+                item(canon(getattr(cfg, "close_dashboard_phrases", ()), "close dashboard"),
+                     "Close the dashboard window again.",
+                     ["close the dashboard", "hide dashboard"]),
+            ],
+        },
+        {
+            "title": "Dictation",
+            "blurb": f"Speak-to-type at the cursor. From CONTROL mode just say the phrase; "
+            f"from idle, prefix it with “{wake}” (e.g. “{wake} start typing”).",
+            "items": [
+                item(canon(cfg.dictate_phrases, "start typing"),
+                     "Start dictation — types what you say at the cursor.",
+                     ["start dictation", "begin typing", "dictate"]),
+                item("stop typing",
+                     "Stop dictation and go back to idle.",
+                     ["stand down", "go to sleep"]),
+            ],
+        },
+        {
+            "title": "Sleep, Stop & Quit",
+            "blurb": "Stand down to idle, force-stop from any mode, or quit/restart "
+            "the whole assistant — all hands-free.",
+            "items": [
+                item(canon(cfg.sleep_phrases, "stand down"),
+                     "Stand down to idle (stop the current mode).",
+                     ["go to sleep", "go ahead and sleep"]),
+                item("emergency stop",
+                     "Emergency stop — drop straight to idle from any mode.",
+                     ["terminate task", "abort abort", "stop stop stop"]),
+                item(canon(cfg.quit_phrases, "quit vox"),
+                     "Quit Vox entirely (ends the program).",
+                     ["close vox", "exit vox", "shut down vox"]),
+                item(canon(cfg.restart_phrases, "restart vox"),
+                     "Restart Vox in place (re-launches to pick up code changes).",
+                     ["reboot vox", "vox restart", "restart yourself"]),
+            ],
+        },
+        {
+            "title": "Escalation Keywords",
+            "blurb": "When escalation mode is “keywords”, an utterance only reaches the brain if "
+            "it contains a trigger word — protection against ambient speech. Click to see them all.",
+            "items": [
+                item("write",
+                     "In keyword-escalation mode, only utterances containing one of these trigger "
+                     "words reach the brain. Click for the full list.",
+                     dedupe(cfg.escalation_keywords)),
+            ],
+        },
+    ]
+    # Drop any group that ended up with no items (e.g. an emptied config tuple)
+    # so the page never shows a hollow header.
+    return [g for g in groups if g["items"]]
+
+
+def _handbook_static() -> list:
+    """Curated CONTROL COMMANDS, MODES and FEATURES groups.
+
+    These don't depend on CONFIG — they describe Vox's deterministic command
+    parser, the three modes, and the headline features — so they render even if
+    the live config read fails."""
+    return [
+        {
+            "title": "Control Commands",
+            "blurb": "Example phrasings the CONTROL-mode parser understands. "
+            "Natural variations work too; these are the canonical forms.",
+            "items": [
+                {
+                    "phrase": "open Safari / open Cursor / open Spotify",
+                    "description": "Launch (or focus) an app by name.",
+                },
+                {
+                    "phrase": "open GitHub / open YouTube / go to gmail.com",
+                    "description": "Open a website as a new tab in your browser.",
+                },
+                {
+                    "phrase": "next tab / previous tab",
+                    "description": "Move one tab right or left in the focused browser window.",
+                },
+                {
+                    "phrase": "go to my GitHub tab",
+                    "description": "Jump to an already-open tab by what it's about.",
+                },
+                {
+                    "phrase": "next window / previous window",
+                    "description": "Cycle between windows of the focused app.",
+                },
+                {
+                    "phrase": "swipe left / swipe right",
+                    "description": "Move between macOS Spaces (desktops).",
+                },
+                {
+                    "phrase": "profile 2 / switch to profile 1",
+                    "description": "Switch browser profile by number.",
+                },
+                {
+                    "phrase": "go back",
+                    "description": "Navigate back in the current app/browser.",
+                },
+                {
+                    "phrase": "close tab",
+                    "description": "Close the focused browser tab.",
+                },
+                {
+                    "phrase": "show tabs / hide tabs",
+                    "description": "Toggle the browser's tab overview.",
+                },
+                {
+                    "phrase": "search for the weather in London",
+                    "description": "Run a web search for whatever follows.",
+                },
+                {
+                    "phrase": "write me an email declining the meeting",
+                    "description": "Compose fresh text and type it at the cursor (brain).",
+                },
+                {
+                    "phrase": "make this pretty / rewrite this / fix this",
+                    "description": "Rewrite the current selection in place (brain).",
+                },
+                {
+                    "phrase": "what does this say? / read this",
+                    "description": "Screen vision — the brain screenshots and reads what's on screen.",
+                },
+            ],
+        },
+        {
+            "title": "Typing & Special Keys",
+            "blurb": "In DICTATION mode everything you say is typed at the cursor "
+            "(pasted as a block, so fast speech never drops characters). A few spoken "
+            "words act as edit keys instead of being typed:",
+            "items": [
+                {
+                    "phrase": "new line  /  next line  /  new paragraph",
+                    "description": "Soft line break (Shift+Return) — moves to a new line WITHOUT "
+                    "sending, so it's safe in chat apps.",
+                },
+                {
+                    "phrase": "enter  /  return  /  send  /  submit",
+                    "description": "A real Return — sends the message or submits the field.",
+                },
+                {
+                    "phrase": "backspace  /  delete  /  delete that",
+                    "description": "Delete the character before the cursor.",
+                },
+                {
+                    "phrase": "tab key",
+                    "description": "Press Tab — indent, or jump to the next field.",
+                },
+            ],
+        },
+        {
+            "title": "Modes",
+            "blurb": "Vox has three working modes plus idle. Wake into the one you want.",
+            "items": [
+                {
+                    "phrase": "Control",
+                    "description": "Deterministic, hands-free app/tab/window/space control. "
+                    "Fast and keyword-driven; uncertain commands can defer to the brain.",
+                },
+                {
+                    "phrase": "Assistant",
+                    "description": "Conversational mode — ask questions, get spoken answers, "
+                    "follow-ups stay in context until you stand down.",
+                },
+                {
+                    "phrase": "Dictation",
+                    "description": "Speak-to-type straight at the cursor. Auto-exits after a "
+                    "long pause (configurable) so you can't get stuck.",
+                },
+            ],
+        },
+        {
+            "title": "Features",
+            "blurb": "What's under the hood — tune most of these on the Settings, "
+            "Personalities, Rules and Memory pages.",
+            "items": [
+                {
+                    "phrase": "Small & big brains",
+                    "description": "A fast/cheap brain handles most turns and defers complex "
+                    "ones to a more powerful big brain. Each is a configurable provider + model.",
+                },
+                {
+                    "phrase": "Personalities",
+                    "description": "Pick a persona (Posh Butler, Batman, J.A.R.V.I.S. and more) "
+                    "or write your own; it shapes Vox's tone and can match a speaking voice.",
+                },
+                {
+                    "phrase": "Rules",
+                    "description": "Standing instructions injected into every prompt — your "
+                    "always-on preferences and guardrails.",
+                },
+                {
+                    "phrase": "Memory",
+                    "description": "Tiered, human-readable memory: durable core facts plus dated "
+                    "daily notes, auto-captured and recalled so Vox remembers you.",
+                },
+                {
+                    "phrase": "Budgets",
+                    "description": "Track month-to-date token spend against a monthly cap with "
+                    "warn/over states.",
+                },
+                {
+                    "phrase": "Themes",
+                    "description": "A dark-first premium control-center look, with an optional "
+                    "light theme.",
+                },
+                {
+                    "phrase": "Command palette",
+                    "description": "Jump anywhere in the dashboard and run actions from a "
+                    "keyboard-driven palette.",
+                },
+            ],
+        },
+    ]
+
+
+def _handbook() -> list:
+    """Full handbook catalog, assembled + ordered for reading: Modes first (the big picture), the
+    Typing & Special Keys items merged into Dictation (same topic), then the rest.
+
+    Each group is ``{title, blurb?, items:[{phrase, description}]}``. The live half is best-effort
+    — if CONFIG can't be read we still return the static groups so the page is never empty."""
+    try:
+        live = _handbook_live()
+    except Exception:
+        live = []
+    by_title = {g["title"]: g for g in (live + _handbook_static())}
+
+    # Merge "Typing & Special Keys" into "Dictation" — they're the same topic.
+    typing = by_title.pop("Typing & Special Keys", None)
+    if typing and "Dictation" in by_title:
+        by_title["Dictation"]["items"] = by_title["Dictation"]["items"] + typing["items"]
+
+    # Reading order — Modes first, then how to drive each; any unlisted group keeps its place after.
+    order = ["Modes", "Wake & Activation", "Dictation", "Sleep, Stop & Quit",
+             "Control Commands", "Escalation Keywords", "Features"]
+    out = [by_title.pop(t) for t in order if t in by_title]
+    out += list(by_title.values())
+    return out
 
 
 def _mount_static(app: FastAPI) -> None:
