@@ -229,6 +229,54 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Status:** ✅ BUILT (2026-06-17). `escalation_mode` + `escalation_keywords` in config; gated in `_control_mode` so non-keyword utterances are ignored in keyword mode (auto mode unchanged). Default stays `"auto"` so nothing changes unless you opt in.
 
+## 24. Self-heal on error → a learned fix (extends #14–15)
+
+When a control command fails the deterministic parser, instead of escalating to *answer* you, a **background** LLM resolves what you meant, **runs it** (so it works that time too), and **saves a learned phrase→action mapping** so the same phrasing fires **instantly and free** afterwards — the "patch". A **"worth patching?"** judgment decides whether the phrase is a durable command (save it) or a one-off (don't pollute the rules). Later — **task 3** — the LLM can edit actual code/config for cases an action-mapping can't fix (guarded + reviewed). The concrete shape of #14–15.
+
+## 25. Scoped task-prompts — a different prompt per command/agent (separation of concerns)
+
+Don't give every task the full system prompt. Each task type gets a **minimal, scoped** prompt with only the rules and powers it needs: "make this pretty" → only the rewrite rules + permission to rewrite; "write me X" → the compose prompt; the self-heal agent → "you are this agent, your job is X, here are your commands, save output here." Cuts context/cost, sharpens behaviour, and **limits each sub-agent's blast radius** to its one job. The top-level agent still does everything; sub-tasks are narrowed. Connects to #10, #12, #17, #24.
+
+## 26. Full control access for the executor + intent recovery (extends #12)
+
+Let the executor also issue the **control verbs** — sleep, restart, quit, stop, switch mode — so the LLM can recover garbled commands and fix its own mistakes (e.g. "gotta go to sleep" mis-heard → it infers *sleep*). Acts when confident; when **uncertain**, asks a spoken yes/no ("Would you like to put Vox to sleep?") and acts on the answer. Pairs with #24 (learning) and #25 (scoped prompts).
+
+## 27. Storage backends — SQLite + human-readable Markdown (transparency)
+
+Stores are JSON/JSONL under `data/` today. For an open-source **download** (users get the program, not the repo), consider **SQLite** (single file, ships with Python's `sqlite3`, robust + queryable) for structured stores, and **Markdown** for memory so the user can *read and navigate everything the AI saves* — transparency is a first-class goal. Add a configurable data location + optional encryption for sensitive memory; the Memory dashboard tab becomes a browser/editor over it. (OpenClaw leans on SQLite + Markdown — worth studying.)
+
+## 28. Tiered memory + a "dream" consolidation job + a navigable second brain
+
+Stop putting all memory into the prompt. Layer it: **quick-recall** (a few always-injected, high-importance facts) · **daily logs** (the agent documents what it did) · a scheduled **"dream"** job (big-brain) that consolidates the logs, dedupes, resolves inconsistencies, and rolls them up into weekly/monthly/total memories · and a **second brain** — index everything into folders the agent *navigates on demand* ("Daniel's working — let me check the work folder for his progress") instead of stuffing it all in context. Agentic RAG over a structured, human-readable tree. Builds on #14/#24/#27; the dream job rides the scheduler (#16) on the big brain.
+
+## 29. Memory auto-capture — remember on its own
+
+Today memories are added only via the dashboard; the assistant *recalls* (keyword-matched, injected) but never *stores*. Let it **decide to save** salient facts itself (or on "remember that…"), feeding the tiered store (#28). Ties to #14/#24.
+
+## 30. Voice → dashboard control (close the loop)
+
+Today it's one-way: dashboard → voice (UI changes affect the daemon on the next call). Add the reverse — change settings/personality/rules/budget **by voice**: "switch to Batman", "add a rule: keep replies short", "set my budget to ten dollars", "turn on debug". Voice commands write to the bridge/stores. Plus a **"close dashboard"** phrase to match "open dashboard" (#6).
+
+## 31. Pluggable voice-model / TTS API
+
+Abstract TTS behind a small provider API so the voice can be swapped — macOS `say` now, a neural local model (Piper) or a cloud voice API later — without touching the rest (`tts.py` is already the swap point). Pairs with **M2**.
+
+## 32. Barge-in from phone-call agents — borrow the open-source playbook
+
+Open-source phone-call / sales voice agents have already solved real-time interruption + talk-over (they go silent the instant you speak over them). Mine those repos for their VAD / turn-taking / barge-in handling and fold the approach into Vox's barge-in (#19) + AEC (#21). See `research/voice-turn-taking.md`.
+
+## 33. Dashboard "Phrasebook / Help" tab
+
+A reference tab in the dashboard listing every wake phrase, command, mode, and feature — a living help book generated from the actual phrase config so it never drifts.
+
+## 34. "Speak when done" MCP for the coding agent (the concrete #3)
+
+An MCP server that lets the coding agent (Claude Code) speak through the system TTS, so while you work it can announce "workflow finished" / "tests passed" out loud — "give me a shout when you're done." The concrete form of #3.
+
+## 35. Vision as structure-as-text — the AX/DOM-tree path (of #18)
+
+Prefer "seeing" the screen as the **accessibility / DOM tree returned as text** (cheap, structured, token-light) over screenshots — reusing the **AX Tree reader now built for the dashboard** as a vision source the brain can read and act on. The text path of #18; the screenshot stays the fallback for the rare "just look at it" case.
+
 ## Sequencing note
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.
