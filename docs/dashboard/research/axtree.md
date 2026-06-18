@@ -69,8 +69,7 @@ AXDescription), no AppleScript-parsing quirks, finer error codes, and it can
 read **any** app by PID rather than only the frontmost.
 
 Cons (decisive for iteration 1):
-- **Heavy dependency.** `pyobjc-framework-*` wheels are large; the dev Mac mini
-  is ~97% full (see project memory) and the CONTRACT favours "no heavy deps —
+- **Heavy dependency.** `pyobjc-framework-*` wheels are large, and the CONTRACT favours "no heavy deps —
   the project already shells osascript".
 - **Confirmed not installed** here: `import ApplicationServices` →
   `ModuleNotFoundError`. Adding it means a non-trivial `uv add` + space cost for
