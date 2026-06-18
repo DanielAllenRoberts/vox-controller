@@ -26,15 +26,24 @@ import sys
 from datetime import datetime, timezone
 
 # Bounds to keep snapshots small and fast. Deep Electron apps chain single-child
-# AXGroups; native apps fan out — so we cap both dimensions. Tunable later.
+# AXGroups; native apps fan out — so we cap both dimensions. When a cap clips the
+# tree we emit a synthetic "… (truncated)" marker node so the UI can show it,
+# rather than silently dropping content. Tunable later.
 MAX_DEPTH = 12
-MAX_BREADTH = 20
+MAX_BREADTH = 40
 VALUE_MAXLEN = 120  # truncate long text values inside AppleScript before transfer
 OSA_TIMEOUT = 8  # seconds; a wedged System Events call must never freeze the loop
 
+# Sentinel role used for truncation markers (depth/breadth caps hit). Parsed into
+# a child AxNode with this role and a human-readable title.
+TRUNC_ROLE = "AXTruncated"
+
 # Recursive bounded traversal. Each property read is wrapped in its own
 # ``tell application "System Events"`` so the handlers parse outside the tell
-# block (UI-element terms are only defined inside it). Emits one line per node.
+# block (UI-element terms are only defined inside it). Emits one line per node:
+# ``depth<TAB>role<TAB>title<TAB>value<TAB>enabled`` (enabled = "1"/"0"/"").
+# When a node is clipped by MAX_DEPTH or MAX_BREADTH it emits a TRUNC_ROLE marker
+# line one level deeper so the truncation is visible in the rebuilt tree.
 _SCRIPT = """
 on roleOf(e)
 \ttry
@@ -63,19 +72,36 @@ on valueOf(e)
 \t\treturn ""
 \tend try
 end valueOf
+on enabledOf(e)
+\ttry
+\t\ttell application "System Events" to set en to enabled of e
+\t\tif en is missing value then return ""
+\t\tif en then return "1"
+\t\treturn "0"
+\ton error
+\t\treturn ""
+\tend try
+end enabledOf
 on walk(e, depth, acc)
-\tset end of acc to (depth as text) & tab & my roleOf(e) & tab & my titleOf(e) & tab & my valueOf(e)
-\tif depth >= %(maxd)d then return acc
+\tset end of acc to (depth as text) & tab & my roleOf(e) & tab & my titleOf(e) & tab & my valueOf(e) & tab & my enabledOf(e)
+\tif depth >= %(maxd)d then
+\t\tset end of acc to ((depth + 1) as text) & tab & "%(trunc)s" & tab & "… (max depth reached)" & tab & "" & tab & ""
+\t\treturn acc
+\tend if
 \ttry
 \t\ttell application "System Events" to set kids to UI elements of e
 \ton error
 \t\treturn acc
 \tend try
-\tset n to count of kids
+\tset total to count of kids
+\tset n to total
 \tif n > %(maxb)d then set n to %(maxb)d
 \trepeat with i from 1 to n
 \t\tmy walk(item i of kids, depth + 1, acc)
 \tend repeat
+\tif total > n then
+\t\tset end of acc to ((depth + 1) as text) & tab & "%(trunc)s" & tab & ("… (" & (total - n) & " more children truncated)") & tab & "" & tab & ""
+\tend if
 \treturn acc
 end walk
 tell application "System Events"
@@ -115,10 +141,12 @@ def _run_osa(script: str) -> tuple[bool, str]:
 
 
 def _parse(lines: list[str]) -> dict:
-    """Rebuild nested AxNodes from ``depth<TAB>role<TAB>title<TAB>value`` lines.
+    """Rebuild nested AxNodes from ``depth<TAB>role<TAB>title<TAB>value<TAB>enabled``.
 
     A stack indexed by depth: each node attaches to the last-seen node one level
-    up. Robust to AppleScript's pre-order emission order.
+    up. Robust to AppleScript's pre-order emission order. ``enabled`` is "1"/"0"
+    (coerced to bool) or "" (omitted — frequently missing on container roles).
+    Truncation markers (``TRUNC_ROLE``) become plain title-only leaf nodes.
     """
     root: dict | None = None
     stack: list[dict] = []  # stack[d] is the most recent node at depth d
@@ -130,11 +158,14 @@ def _parse(lines: list[str]) -> dict:
         role = parts[1] if len(parts) > 1 else "?"
         title = parts[2] if len(parts) > 2 else ""
         value = parts[3] if len(parts) > 3 else ""
+        enabled = parts[4] if len(parts) > 4 else ""
         node: dict = {"role": role, "children": []}
         if title:
             node["title"] = title
         if value:
             node["value"] = value
+        if enabled in ("0", "1"):
+            node["enabled"] = enabled == "1"
         if depth == 0:
             root = node
             stack = [node]
@@ -160,6 +191,7 @@ def snapshot() -> dict:
         "vmax": VALUE_MAXLEN,
         "maxd": MAX_DEPTH,
         "maxb": MAX_BREADTH,
+        "trunc": TRUNC_ROLE,
     }
     ok, out = _run_osa(script)
     if not ok:

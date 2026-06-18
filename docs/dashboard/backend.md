@@ -13,7 +13,7 @@ server always boots and the voice daemon never breaks. Follows
 | `server.py` | `create_app() -> FastAPI`; `run(host, port)`; `start_in_background(cfg) -> Thread`; routes; static dashboard + SPA fallback; CORS; `python -m vox.web.server`. |
 | `usage.py` | `record_usage(...)`, `recent(limit)`, `summary()`, `PRICES`, WS subscriber registry + `publish`; persists `data/usage.jsonl`. |
 | `settings_store.py` | `SCHEMA`, `get(key)`, `set(key, value)`, `all()`; persists `data/settings.json` as overrides over `Config`. |
-| `axtree.py` | `snapshot()` — read-only macOS AX tree (already present). |
+| `axtree.py` | `snapshot()` — read-only macOS AX tree (iter 5: `enabled` field + depth/breadth truncation markers). See [`axtree.md`](./axtree.md). |
 | `memory.py` (top-level) | `add/recall/all/remove` — used by the memory routes (already present). |
 
 `personalities.py` landed in iteration 4 (8 presets + custom CRUD; see the
@@ -357,3 +357,143 @@ p.set_active(''); print(repr(assistant._active_persona()))"
 ```
 
 > Remove the test `data/personalities.json` afterwards — it is gitignored runtime data.
+
+---
+
+## Iteration 5 — AX-tree / Rules / Memory routes hardened (server.py)
+
+This iteration fleshed out the remaining write/read routes in `src/vox/web/server.py`
+so they are fully functional, validate input, and **never 500** — a missing or
+half-built feature module degrades to a safe placeholder, and bad input returns a
+helpful `400`. No other module was touched; routes rely only on the signatures the
+axtree / rules / memory agents implement per `CONTRACT.md`.
+
+### Shared helpers (new, in `server.py`)
+- `_bad_request(msg)` → `400 {ok:false, error}`
+- `_not_found(what)` → `404 {ok:false, error:"<what> not found"}`
+- `_service_unavailable(what)` → `503 {ok:false, error:"<what> module not available"}`
+- `async _json_body(request)` → `(body, None)` on a valid JSON **object**, else
+  `({}, JSONResponse-400)`. Guards malformed JSON and non-object bodies so a bad
+  payload can't raise out of a route.
+
+### Routes
+- **`GET /api/axtree`** → `axtree.snapshot()` (`{app,capturedAt,tree}` or `{error}`).
+  Wrapped so even an unexpected raise becomes `{error: ...}` rather than a 500.
+- **`GET /api/rules`** → `rules.list_rules()` (or `[]` if the module is absent / read fails).
+- **`POST /api/rules`** `{text}` → `rules.add_rule(text.strip())`. `text` must be a
+  non-empty string (else 400). Module absent → returns `[]` (rules list stays empty).
+- **`PATCH /api/rules/{theId}`** `{text?, enabled?}` → forwards only well-typed,
+  known fields to `rules.update_rule(id, **patch)`. `text` must be a non-empty
+  string, `enabled` must be a bool, and at least one must be present (else 400).
+  Unknown id → 404.
+- **`DELETE /api/rules/{theId}`** → `rules.remove_rule(id)`; unknown id → 404, else `{ok:true}`.
+- **`GET /api/memory?query=&limit=`** → `memory.recall(query, k=limit)` when `query`
+  is present, else `memory.all()` sliced to `limit` (non-positive `limit` = all).
+  Read failures degrade to `[]`.
+- **`POST /api/memory`** `{text, tags?}` → `memory.add(text.strip(), tags)`. `text`
+  must be a non-empty string; `tags` (optional) must be a list of strings (else 400).
+  Module absent → 503.
+- **`DELETE /api/memory/{theId}`** → `memory.remove(id)`; unknown id → 404, else `{ok:true}`.
+
+### Decisions
+- **Guarded imports stay lazy and per-request** (`_try_import` / `_try_import_memory`),
+  preserving the daemon guarantee: `server.py`'s only top-level vox imports are
+  `config`, `settings_store`, `usage`. Verified the AST has no top-level
+  axtree/rules/memory import.
+- **Error contract:** read routes never error (return empty/`{error}`); write routes
+  return `400` for bad input, `404` for unknown ids, `503` only when a required
+  module is missing. Successful creates return the stored record as-is (matching the
+  `Rule` / `Memory` shapes), so the frontend can use the response directly.
+- **Path params renamed to `{theId}`** to match the CONTRACT's wording for this
+  iteration's routes; purely cosmetic (FastAPI binds by name).
+
+### Verify
+```bash
+uv run python -c "
+from fastapi.testclient import TestClient
+from vox.web.server import create_app
+c = TestClient(create_app())
+def show(l,r): print(l, r.status_code)
+show('axtree', c.get('/api/axtree'))                                   # 200
+show('rules.list', c.get('/api/rules'))                                # 200
+show('rules.post.empty', c.post('/api/rules', json={'text':' '}))      # 400
+show('rules.post.badjson', c.post('/api/rules', content='x'))          # 400
+show('rules.patch.nofields', c.patch('/api/rules/x', json={}))         # 400
+show('memory.list', c.get('/api/memory'))                              # 200
+show('memory.post.empty', c.post('/api/memory', json={'text':''}))     # 400
+show('memory.post.badtags', c.post('/api/memory', json={'text':'h','tags':[1]}))  # 400
+r = c.post('/api/memory', json={'text':'__t__','tags':['x']}); show('memory.post.ok', r)  # 200
+show('memory.del', c.delete('/api/memory/'+r.json()['id']))            # 200
+show('memory.del.missing', c.delete('/api/memory/nope'))               # 404
+"
+```
+
+> Runtime `data/rules.json` / `data/memory.jsonl` written during testing are
+> gitignored — clean up any `__t__` test records afterward.
+
+## Rules + memory in the live prompt (iteration 5) — `src/vox/assistant.py`
+
+Makes the dashboard's **rules** and **memory** actually shape Vox's replies. Iterations
+3-4 wired settings/personalities into the system prompt; this layers two more context
+blocks on top — **additively and fully guarded**, so a missing or broken `vox.web.rules`
+/ `vox.memory` leaves today's behavior EXACTLY unchanged.
+
+> Scope note: this sub-section is the **integration/assistant** agent's part and edits
+> `assistant.py` ONLY. The `vox.web.rules` and `vox.memory` stores + their REST routes
+> are documented in the server agent's sections above.
+
+### What changed (assistant.py only)
+
+Two new guarded helpers, plus three lines in `respond_turn`:
+
+- `_rules_block() -> str` — lazily imports `vox.web.rules` and calls
+  `enabled_rules_text()`. Renders the enabled rules as a labelled block telling the model
+  to follow them (they override defaults on conflict). Any import/attribute/call error → `""`.
+- `_memory_block(user_text) -> str` — lazily imports `vox.memory` and calls
+  `recall(user_text, k=3)`. Renders the hits as a short "Things you remember about the
+  user" bullet list (each record's `text`). Empty result or any error → `""`.
+- `respond_turn` builds `system` from `_SYSTEM` + `_active_persona()` exactly as before,
+  then appends whichever of `_rules_block()` / `_memory_block(text)` are non-empty.
+
+### Why these choices
+
+- **Layered on the existing persona, not replacing it** — order is persona → rules →
+  memories, so character framing comes first and concrete instructions/facts follow.
+- **Escalation gets it for free** — the small→big `[BIG]` re-call reuses the same
+  `system` string, so rules + memories also reach the big brain.
+- **k=3 for memory** — small relevant slice (per the task) to keep the spoken prompt
+  tight; `recall` already ranks by keyword score and returns each record's `text`.
+- **Telemetry/feature reads never break a reply** — both helpers swallow all exceptions,
+  matching the existing `_setting` / `_active_persona` / `_record_usage` guard style. The
+  helpers light up automatically once the stores hold data; no further assistant change.
+
+### Verify
+
+```bash
+# helpers are guarded → '' with no data (today's behavior unchanged)
+uv run python -c "from vox import assistant as a; \
+print(repr(a._rules_block())); print(repr(a._memory_block('what is my name')))"
+# expect: '' ''  (no enabled rules; memory store empty)
+
+# a broken rules module is swallowed (not raised)
+uv run python -c "import sys,types; from vox import assistant as a; \
+m=types.ModuleType('vox.web.rules'); \
+m.enabled_rules_text=lambda: (_ for _ in ()).throw(RuntimeError('boom')); \
+sys.modules['vox.web.rules']=m; print(repr(a._rules_block()))"
+# expect: ''
+
+# rules block lights up live once an enabled rule exists
+uv run python -c "from vox import assistant as a; from vox.web import rules; \
+r=rules.add_rule('Always greet the user by name.'); \
+print(a._rules_block()); rules.remove_rule(r['id'])"
+
+# memory block renders bullets once a relevant record exists
+uv run python -c "from vox import assistant as a; from vox import memory; \
+r=memory.add('The user prefers concise answers', tags=['pref']); \
+print(a._memory_block('concise answers user prefers')); memory.remove(r['id'])"
+# expect: 'Things you remember about the user (use if relevant):\n• The user prefers concise answers'
+```
+
+> Any `data/memory.jsonl` / `data/rules.json` written while verifying is gitignored
+> runtime data — remove test records with the modules' own `remove*()` APIs (don't
+> truncate the files; they may hold real user data).
