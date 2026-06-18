@@ -54,6 +54,22 @@ def _setting(key: str, fallback):
         return fallback
 
 
+def _active_persona() -> str:
+    """The live active persona text for the system prompt.
+
+    Reads the dashboard's personalities store (the persona the user picked in the UI),
+    falling back to CONFIG.personality, then "". Fully guarded: if vox.web.personalities
+    is missing or broken, behave exactly as today (CONFIG.personality / "")."""
+    try:
+        from vox.web import personalities
+        active = personalities.get_active()
+        if active:
+            return active
+    except Exception:
+        pass
+    return CONFIG.personality or ""
+
+
 def _record_usage(provider, model, brain, kind, usage, latency_ms):
     """Record one LLM call for the dashboard (token usage / cost). LAZY + GUARDED: a missing or
     broken vox.web.usage module must NEVER break a reply — recording is best-effort telemetry.
@@ -106,8 +122,9 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     whether Vox keeps listening. The small brain may emit [BIG] to defer the turn to the big
     brain. Falls back to a '?' heuristic if the model omits the tag.
     """
-    system = _SYSTEM if not CONFIG.personality else \
-        f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {CONFIG.personality}"
+    persona = _active_persona()
+    system = _SYSTEM if not persona else \
+        f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {persona}"
     raw = complete(text, history, brain=brain, system=system)
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):
