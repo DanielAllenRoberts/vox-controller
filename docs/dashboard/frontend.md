@@ -415,3 +415,221 @@ via the `onOpenPalette` prop). Portals to `document.body` at `z-[100]`.
    TopBar personality badge + toasts. ↑/↓ move selection, Esc closes. With the
    bridge down, navigation still works and persona activation shows an error
    toast without breaking the page.
+
+---
+
+## Cost Budget widget — Token Usage page (iteration 7)
+
+**Owned file:** `dashboard/src/pages/TokenUsage.tsx` (only).
+
+Adds a **Cost Budget** card near the top of the Token Usage page (directly under
+the page header / bridge-error banner, above the summary metric cards). It shows
+month-to-date spend against a configured monthly cap.
+
+### Data source
+- `GET /api/budget` → `{ budgetUsd, spentUsd, remainingUsd, percent, state }`
+  where `state ∈ { ok | warn | over | none }`.
+- The budget route is served by the Python bridge but is **not** part of the
+  typed `api` client in `lib/api.ts` (owned by another agent — not edited). The
+  widget therefore does a small **direct `fetch`** that mirrors `lib/api.ts`'s
+  `API_BASE` resolution (`import.meta.env.VITE_API_BASE`, same-origin in prod,
+  Vite-proxied in dev). Types are declared locally (`Budget`, `BudgetState`).
+- Polled every 10s via React Query (`queryKey: ["budget"]`), matching the
+  page's other usage queries.
+
+### Behavior / states
+- **none / error / unavailable** → clean empty state: a wallet glyph, "No monthly
+  budget set", and a hint chip pointing to **Settings → Monthly budget**
+  (`monthly_budget_usd`). Any fetch error or "budget module not available"
+  response is folded into this unset state so the widget never looks broken
+  (the backend `budget_status()` may not be wired up yet in every iteration).
+- **ok / warn / over** → an animated SVG progress **ring** (spent of budget) with
+  the percent counting up in the center (`SlidingNumber`), plus Spent / Remaining
+  / Budget figures. Remaining flips to red and reads "over the cap" (with a
+  signed `-$` value) when over.
+
+### Design
+- Glass card (`<Card glass>`), rounded-2xl, hairline border, generous padding —
+  consistent with the existing summary/chart cards.
+- **Color shifts by state:** `ok` = violet→cyan accent gradient, `warn` = amber,
+  `over` = red. The gradient drives both the ring stroke and a soft radial glow
+  in the card corner; the status `<Badge>` (accent/warning/danger) echoes it.
+- **Motion** (existing `motion/react` dep): the ring arc springs from empty to
+  its fill on mount/update; the percent + dollar figures use the shared
+  `SlidingNumber`. All respect `prefers-reduced-motion` via `useReducedMotion`
+  (ring renders instantly, numbers snap).
+- The arc is capped at 100% even when over budget (the badge + figures carry the
+  overspend), keeping the ring legible.
+
+### Verify
+1. `cd dashboard && npx tsc --noEmit` → passes (no new errors).
+2. `npm run build` → `dashboard/dist` rebuilt.
+3. In the app, open **Token Usage**:
+   - Bridge down / no `budget_status()` → the **"No monthly budget set"** empty
+     state shows with the Settings hint (no console errors, page intact).
+   - With a budget configured: ring fills to `percent`, badge + glow are violet
+     (ok), amber (warn), or red (over); Spent/Remaining/Budget read correctly and
+     Remaining turns red + signed when over.
+
+## System health card — Overview (Iteration 7)
+
+A compact **"System health"** card on the **Overview** page surfacing live
+process/runtime telemetry from `GET /api/diagnostics`: CPU %, memory MB, process
+uptime, the Whisper model + compute type, and the active small/big brains.
+
+### Files touched
+- `dashboard/src/pages/Overview.tsx` — **only** file edited (this agent owns it).
+  Added: a local `Diagnostics` type, a small `fetchDiagnostics()` reader, the
+  `SystemHealthCard` component (+ `HealthRow` row + `pressureClass`/`brainLabel`
+  helpers), and the layout change that hosts it. The rest of the Overview is
+  unchanged.
+
+### Data source — why a local reader, not `lib/api.ts`
+`GET /api/diagnostics` is owned by the parallel iteration-7 **backend** agent and
+is **not** in `lib/api.ts` (and we must not edit that file). So Overview reads it
+with a tiny direct `fetch` that mirrors the api client's conventions:
+- same `VITE_API_BASE` resolution (`(import.meta.env.VITE_API_BASE ?? "")`),
+  so it works identically in dev (Vite proxy) and prod (same-origin), and
+- the same `{detail|error}` error-envelope handling the api client uses.
+
+The `Diagnostics` type mirrors **`docs/dashboard/diagnostics.md`** (the backend
+agent's pinned shape) exactly, but every field is optional and rendered
+defensively (`—` placeholders, optional badges), so the card degrades gracefully
+when the backend returns its `"unknown"`/sentinel envelope (off-mac, missing
+`psutil`, etc.):
+```ts
+{
+  process?: { cpuPercent?: number; memMb?: number; uptimeSeconds?: number };
+  stt?: { model?: string; computeType?: string; sampleRate?: number };
+  smallBrain?: { provider?: string; model?: string };
+  bigBrain?: { provider?: string; model?: string };
+  error?: string;   // the endpoint returns {error} instead of a 500
+}
+```
+The backend uses the literal string `"unknown"` as its sentinel for unreadable
+config (not an omitted field), so `brainLabel()` and the STT/Whisper row treat
+`"unknown"` as empty and fall back to `—`. We read `memMb` (not `memoryMb`) and
+the nested `process.*` / `stt.*` / top-level `smallBrain`/`bigBrain` keys per
+that doc. The endpoint surfaces `tts` and `platform` too — not shown on this
+card by design (the card's scope is CPU/mem/uptime/Whisper/brains).
+> **TODO (cross-agent):** fold a typed `api.diagnostics()` into `lib/api.ts` in a
+> future iteration so this local reader can be removed (we couldn't edit
+> `lib/api.ts` here).
+
+### Design
+- Glass card (`<Card glass>`), rounded-2xl, hairline border, generous padding,
+  with a soft `accent-2` radial glow in a corner — consistent with the sibling
+  "Today's cost" card it stacks beneath.
+- **Small stat rows** (`HealthRow`): a muted icon+label on the left, the value on
+  the right, separated by `divide-y divide-border/60` hairlines — the established
+  stat-row idiom.
+- **Subtle live feel:** a header `ListeningPulse` (the dashboard's signature
+  violet pulse) animates only while the daemon is `running` and diagnostics are
+  healthy; the adjacent word reads `live` / `idle` / `offline`. Numbers animate
+  via the shared `SlidingNumber` (spring; `motion/react` dep), and CPU/memory/
+  uptime tick on the 4s `refetchInterval`.
+- **Pressure colour:** CPU value is green < 60%, amber 60–85%, red ≥ 85%
+  (`pressureClass`) so load reads at a glance.
+- Whisper compute type renders as a mono `outline` `<Badge>`; brains render as
+  `small · big` model labels in mono (falling back to provider, then `—`).
+- All motion respects `prefers-reduced-motion` via the existing primitives.
+
+### States
+- **Loading** — each row shows a `Skeleton`, matching the metric-card skeletons.
+- **Error / unavailable** — a thrown fetch error *or* an `{error}` envelope (e.g.
+  the diagnostics module not being built yet) shows a centered gauge icon,
+  "Diagnostics unavailable", and the underlying message; the indicator reads
+  `offline` with a static (non-pulsing) dot. No console noise, page stays intact.
+- **Populated** — the five stat rows with live, animated values.
+
+### Layout
+The lower Overview section is a 3-col grid. The left column (`lg:col-span-1`) now
+**stacks** the existing "Today's cost" card and the new "System health" card; the
+"Live activity" feed keeps `lg:col-span-2` on the right. This keeps the grid
+balanced and the existing cards byte-for-byte intact (only their wrapper changed).
+
+### Verify
+1. `cd dashboard && npm run typecheck` → passes (no new errors).
+2. `npm run build` → `dashboard/dist` builds clean.
+3. In the app, open **Overview**:
+   - Bridge down / `diagnostics` module missing → the **"Diagnostics
+     unavailable"** error state shows (offline dot, message), page intact.
+   - With the bridge live (or a stubbed `/api/diagnostics`): CPU/Memory/Uptime/
+     Whisper/Brains rows populate and animate; the header pulse goes `live`;
+     CPU colour reflects load. Verified via Playwright against both a stubbed
+     success response and the real bridge-down error path at 1440px.
+
+---
+
+## Iteration 7 — Theme switcher, keyboard shortcuts & help overlay (shell)
+
+Frontend-shell additions. **Owned files only:** `src/App.tsx`,
+`src/components/layout/*`, `src/index.css`, `src/lib/api.ts`. All additive; the
+voice daemon is untouched (no Python edited by this agent).
+
+### 1. Theme switcher (dark default + premium light)
+
+- **Tokens (`index.css`).** Dark stays the default and lives on `:root` (so the
+  hardcoded `class="dark"` in `index.html` and any no-JS render stay correct).
+  A new **`.light`** block overrides the same token names with a *premium
+  daylight* palette — cool off-white surfaces (misted slate `#f4f5f9`, never pure
+  white), cards lifted to `#fff` above the bg, deepened violet→cyan accent and
+  `-600` semantic colours for AA contrast on light, plus a soft cool shadow.
+- **Theme-aware glass.** `.glass` now reads `--glass-bg`, `--glass-bg-alpha`,
+  `--glass-border` (RGB), `--glass-border-alpha`, and `--glass-shadow`, all set
+  per theme. On dark: white hairline + black drop shadow. On light: white veil +
+  dark slate hairline + soft cool shadow. Every existing glass/accent surface
+  (cards, TopBar, palette, overlays) flips automatically — no per-component work.
+  The accent gradient (`.bg-brand-gradient`) and token-driven scrollbar already
+  worked in both.
+- **`ThemeProvider` / `useTheme` (`layout/theme.tsx`).** Toggles `.dark`/`.light`
+  + `color-scheme` on `<html>`, persists to `localStorage["vox.theme"]`,
+  **defaults to dark**. Storage failures (private mode) degrade to session-only.
+  Mounted in `App.tsx` (wraps `<Routes>`) so the context reaches the TopBar.
+- **`ThemeToggle` (`layout/ThemeToggle.tsx`).** Small TopBar button; Sun/Moon
+  cross-fades + rotates via `motion`, respects reduced-motion.
+
+### 2. Keyboard shortcuts (g-then-key navigation)
+
+- **Registry (`layout/shortcuts.ts`).** Single source of truth shared by the
+  handler and the help overlay so they never drift: `GO_SHORTCUTS`
+  (`g`→`o` Overview, `u` Usage, `s` Settings, `p` Personalities, `a` AX Tree,
+  `r` Rules, `m` Memory — mirrors the SideNav) and `GLOBAL_SHORTCUTS`
+  (⌘K, `?`, Esc).
+- **Handler (`layout/useKeyboardShortcuts.ts`).** Window `keydown` listener,
+  mounted once in `AppShell`. Arms on `g`, navigates on the next key within a
+  1.2 s timeout (a stray `g` disarms, never sticks). **Never fires while typing**
+  (ignores `INPUT`/`TEXTAREA`/`SELECT`/`contenteditable`) and ignores modified
+  chords so ⌘K (handled separately in `AppShell`) is unaffected. `?` opens help.
+
+### 3. Help overlay
+
+- **`layout/HelpOverlay.tsx`.** Glassy modal mirroring the CommandPalette recipe
+  (portal + `AnimatePresence` + reduced-motion fallback). Lists the full
+  `g`-nav set ("press `g` then…") and the general shortcuts (⌘K / `?` / Esc) as
+  `<kbd>` chips, with accent hairline, header icon, and footer hint. Opened by
+  `?` or the TopBar **`?`** button; closes on Esc / scrim / `×`. Mounted once in
+  `AppShell` alongside the palette.
+
+### 4. API client helpers (`lib/api.ts`)
+
+- `api.budget()` → `BudgetStatus | ApiErrorBody` for `GET /api/budget`
+  (`{budgetUsd, spentUsd, remainingUsd, percent, state}`, `state`:
+  none/ok/warn/over — mirrors `usage.budget_status()` per backend.md §it.7).
+- `api.diagnostics()` → `Diagnostics` for `GET /api/diagnostics` (open record;
+  shape owned by the diagnostics agent, `error?` present on failure).
+- Both routes return HTTP 200 with `{error}` when their bridge module is absent;
+  added `isApiError(value)` type-guard so page agents narrow before reading.
+
+### Verify
+1. `cd dashboard && npm run typecheck` → passes (no new errors).
+2. `npm run build` → `dashboard/dist` builds clean; the `.light` block and
+   `--glass-*` vars are present in `dist/assets/*.css`.
+3. In the app (verified via Playwright at 1440px against the built bundle):
+   - First load is **dark** (`html.dark`, bg zinc-950), no stored value.
+   - The TopBar **theme toggle** flips to `html.light` (bg `#f6f6f9`, ink text),
+     persists `vox.theme=light`, and survives reload.
+   - **`?`** opens the help overlay showing all 7 g-nav rows + ⌘K/?/Esc; **Esc**
+     closes it.
+   - **`g` then `u`** (within the timeout) navigates to `/usage`; the same chord
+     **typed inside an `<input>`** does **not** navigate (input guard holds).

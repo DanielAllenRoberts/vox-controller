@@ -3,10 +3,16 @@
 @tailwind utilities;
 
 /*
- * Vox Control Center — theme tokens (dark-first).
+ * Vox Control Center — theme tokens (dark-first, light optional).
  * Palette per docs/dashboard/research/ui.md §3: zinc surfaces, violet→cyan
  * accent. Values are HSL triplets ("H S% L%") so shadcn components can use
  * hsl(var(--token)) and Tailwind can map them in tailwind.config.ts.
+ *
+ * Theming: dark is the default and lives on :root (so the `class="dark"` in
+ * index.html and any no-JS render stays correct). The light palette overrides
+ * under `.light` on <html>; the ThemeProvider (components/layout/theme.tsx)
+ * toggles `.dark`/`.light` from localStorage, defaulting to dark. Glass +
+ * accent recipes read theme-aware tokens so both palettes stay premium.
  */
 :root {
   color-scheme: dark;
@@ -49,7 +55,71 @@
   --destructive-foreground: 0 0% 98%;
   --info: 213 94% 68%;                /* #60a5fa blue-400 */
 
+  /* Glass recipe knobs (theme-aware so .glass works in both palettes). */
+  --glass-bg: var(--card);
+  --glass-bg-alpha: 0.55;
+  --glass-border: 255 255 255;        /* RGB for hairline (white on dark) */
+  --glass-border-alpha: 0.08;
+  --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 8px 24px rgba(0, 0, 0, 0.4);
+
   --radius: 0.625rem;
+}
+
+/*
+ * Light theme — a premium "daylight control room", not flat white.
+ * Cool off-white surfaces (slate/zinc tint), layered cards a touch lighter
+ * than the page so glass still reads, slightly deepened accents for contrast
+ * on light, and a soft cool shadow. Tuned for AA text contrast.
+ */
+.light {
+  color-scheme: light;
+
+  /* Surfaces (cool off-white, never pure #fff) */
+  --background: 240 24% 97%;          /* #f4f5f9 misted slate */
+  --bg-elevated: 240 30% 99%;         /* #fbfbfe near-white panel rail */
+  --foreground: 240 24% 12%;          /* #181a24 ink */
+  --foreground-secondary: 240 9% 38%; /* #585a66 slate-600 */
+  --foreground-muted: 240 6% 52%;     /* #7e7f8c slate-500 */
+
+  --card: 0 0% 100%;                  /* cards lift above the misted bg */
+  --card-foreground: 240 24% 12%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 24% 12%;
+
+  --muted: 240 20% 94%;               /* #ebecf3 hover / fill */
+  --muted-foreground: 240 9% 38%;
+
+  --secondary: 240 20% 94%;
+  --secondary-foreground: 240 24% 12%;
+
+  --border: 240 16% 88%;              /* #dcdde6 hairline */
+  --border-strong: 240 12% 80%;       /* #c6c7d2 */
+  --input: 240 14% 85%;
+
+  /* Accent — deepen slightly so violet→cyan stays vivid on light. */
+  --accent: 258 82% 60%;              /* #7c4ddb */
+  --accent-foreground: 0 0% 100%;
+  --accent-2: 190 88% 42%;            /* #0eaecb deepened cyan */
+  --primary: 258 82% 60%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 258 82% 60%;
+
+  /* Semantic (-500/600, light-tuned for contrast) */
+  --success: 160 84% 32%;             /* emerald-600 */
+  --warning: 33 92% 44%;              /* amber-600 */
+  --danger: 0 74% 50%;                /* red-600 */
+  --destructive: 0 74% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --info: 217 83% 53%;                /* blue-600 */
+
+  /* Glass on light: white veil + cool slate hairline + soft cool shadow. */
+  --glass-bg: 0 0% 100%;
+  --glass-bg-alpha: 0.7;
+  --glass-border: 24 24 40;           /* dark RGB hairline reads on white */
+  --glass-border-alpha: 0.08;
+  --glass-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset,
+    0 8px 28px rgba(24, 24, 40, 0.1);
 }
 
 @layer base {
@@ -83,14 +153,13 @@
     background-clip: text;
     color: transparent;
   }
-  /* Glass card recipe (ui.md §3.5). */
+  /* Glass card recipe (ui.md §3.5) — theme-aware via --glass-* tokens. */
   .glass {
-    background: hsl(var(--card) / 0.55);
+    background: hsl(var(--glass-bg) / var(--glass-bg-alpha));
     backdrop-filter: blur(12px) saturate(120%);
     -webkit-backdrop-filter: blur(12px) saturate(120%);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
-      0 8px 24px rgba(0, 0, 0, 0.4);
+    border: 1px solid rgb(var(--glass-border) / var(--glass-border-alpha));
+    box-shadow: var(--glass-shadow);
   }
 }
 

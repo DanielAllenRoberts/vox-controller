@@ -1,16 +1,20 @@
-import { Command } from "lucide-react";
+import { Command, HelpCircle } from "lucide-react";
 import { ListeningPulse } from "@/components/animate/ListeningPulse";
+import { ThemeToggle } from "./ThemeToggle";
 import { Badge } from "@/components/ui/badge";
 import type { Status } from "@/lib/api";
 
 // 56px sticky glass top bar. Left: product mark + live listening status.
-// Right: ⌘K command-palette trigger + brain + personality chips (ui.md §5).
+// Right: theme toggle + ? help + ⌘K palette trigger + brain/personality chips
+// (ui.md §5). Help/palette are opened via callbacks owned by AppShell.
 export function TopBar({
   status,
   onOpenPalette,
+  onOpenHelp,
 }: {
   status?: Status;
   onOpenPalette?: () => void;
+  onOpenHelp?: () => void;
 }) {
   const listening = !!status?.running;
 
@@ -25,6 +29,18 @@ export function TopBar({
       </div>
 
       <div className="flex items-center gap-2">
+        <ThemeToggle />
+
+        <button
+          type="button"
+          onClick={onOpenHelp}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-strong text-foreground-muted transition-colors hover:border-accent/40 hover:text-foreground"
+          aria-label="Keyboard shortcuts"
+          title="Keyboard shortcuts (?)"
+        >
+          <HelpCircle className="h-4 w-4" />
+        </button>
+
         <button
           type="button"
           onClick={onOpenPalette}

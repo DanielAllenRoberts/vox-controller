@@ -381,6 +381,28 @@ def create_app() -> FastAPI:
         except Exception as exc:  # snapshot() shouldn't raise, but never 500
             return {"error": f"accessibility read failed: {exc}"}
 
+    # --- Budget (guarded) ---
+    @app.get("/api/budget")
+    def get_budget() -> dict:
+        mod = _try_import("usage")
+        if mod is None or not hasattr(mod, "budget_status"):
+            return {"error": "budget module not available"}
+        try:
+            return mod.budget_status()
+        except Exception as exc:  # budget_status() shouldn't raise, but never 500
+            return {"error": f"budget read failed: {exc}"}
+
+    # --- Diagnostics (guarded) ---
+    @app.get("/api/diagnostics")
+    def get_diagnostics() -> dict:
+        mod = _try_import("diagnostics")
+        if mod is None:
+            return {"error": "diagnostics module not available"}
+        try:
+            return mod.snapshot()
+        except Exception as exc:  # snapshot() shouldn't raise, but never 500
+            return {"error": f"diagnostics read failed: {exc}"}
+
     # --- Static dashboard + SPA fallback ---
     _mount_static(app)
 

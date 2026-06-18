@@ -125,6 +125,14 @@ _SCHEMA_META: list[dict] = [
         "type": "toggle",
         "help": "Keep listening during a blocking LLM call so you can cancel it.",
     },
+    # --- Cost ---
+    {
+        "key": "monthly_budget_usd",
+        "label": "Monthly budget (USD)",
+        "group": "Cost",
+        "type": "text",
+        "help": "Monthly spend budget in USD; 0 = no budget.",
+    },
     # --- Debug ---
     {
         "key": "debug",

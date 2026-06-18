@@ -271,6 +271,99 @@ def summary() -> dict:
     return {"totals": totals, "byModel": by_model_list, "byDay": by_day_list}
 
 
+# --- Cost budget -------------------------------------------------------------
+# Month-to-date spend vs an optional monthly budget (settings_store key
+# ``monthly_budget_usd``). Fully guarded + None-safe: a missing/garbage budget,
+# an unreadable settings store, or a corrupt ledger all degrade to "no budget"
+# rather than raising. The voice daemon never calls this, but the dashboard does.
+
+
+def _budget_usd() -> float:
+    """Read the monthly budget (USD) from the settings store, guarded.
+
+    Returns 0.0 when the setting is unset, blank, non-numeric, negative, or the
+    settings store can't be imported/read — i.e. "no budget" is the safe default.
+    """
+    try:
+        from . import settings_store  # lazy: keep usage.py importable standalone
+
+        raw = settings_store.get("monthly_budget_usd")
+    except Exception:
+        return 0.0
+    if raw is None:
+        return 0.0
+    try:
+        val = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0.0
+    return val if val > 0 else 0.0
+
+
+def _month_key(ts: str) -> str:
+    """Extract a YYYY-MM month key from an ISO timestamp (fallback: this month)."""
+    try:
+        return datetime.fromisoformat(ts).strftime("%Y-%m")
+    except (ValueError, TypeError):
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _month_to_date_cost() -> float:
+    """Sum ``costUsd`` over events in the current UTC calendar month. Guarded."""
+    this_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    try:
+        with _LOCK:
+            events = _read_all()
+    except Exception:
+        return 0.0
+    total = 0.0
+    for e in events:
+        if _month_key(e.get("ts", "")) == this_month:
+            try:
+                total += float(e.get("costUsd") or 0.0)
+            except (TypeError, ValueError):
+                continue
+    return round(total, 6)
+
+
+def budget_status() -> dict:
+    """Month-to-date spend vs the configured monthly budget.
+
+    Returns ``{budgetUsd, spentUsd, remainingUsd, percent, state}`` where:
+    - ``budgetUsd``    — the monthly budget (0.0 when unset / no budget).
+    - ``spentUsd``     — month-to-date total cost from the ledger.
+    - ``remainingUsd`` — ``budgetUsd - spentUsd`` (0.0 when no budget).
+    - ``percent``      — 0-100 share of budget spent (0.0 when no budget).
+    - ``state``        — "none" (no budget) | "ok" | "warn" (>=80%) | "over" (>=100%).
+
+    Fully guarded + None-safe: any failure degrades to the no-budget shape.
+    """
+    budget = _budget_usd()
+    spent = _month_to_date_cost()
+    if budget <= 0:
+        return {
+            "budgetUsd": 0.0,
+            "spentUsd": spent,
+            "remainingUsd": 0.0,
+            "percent": 0.0,
+            "state": "none",
+        }
+    percent = round(min(max(spent / budget * 100, 0.0), 100.0), 2)
+    raw_percent = spent / budget * 100
+    if raw_percent >= 100:
+        state = "over"
+    elif raw_percent >= 80:
+        state = "warn"
+    else:
+        state = "ok"
+    return {
+        "budgetUsd": round(budget, 6),
+        "spentUsd": spent,
+        "remainingUsd": round(budget - spent, 6),
+        "percent": percent,
+        "state": state,
+    }
+
+
 # --- Dev seed (visual QA only) ----------------------------------------------
 # Guarded sample data so the Token Usage page renders during local QA. Never
 # runs in normal operation: only when VOX_DEV_SEED=1, and only if the store has

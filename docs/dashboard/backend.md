@@ -497,3 +497,167 @@ print(a._memory_block('concise answers user prefers')); memory.remove(r['id'])"
 > Any `data/memory.jsonl` / `data/rules.json` written while verifying is gitignored
 > runtime data — remove test records with the modules' own `remove*()` APIs (don't
 > truncate the files; they may hold real user data).
+
+---
+
+## Iteration 7 — `/api/budget` & `/api/diagnostics` (server.py)
+
+Two additive read-only GET routes, mounted in `create_app()` just before the
+static dashboard mount. Both follow the established **guarded lazy-import**
+pattern (same shape as `/api/axtree`): import the feature module lazily, and on
+*any* failure return a safe default object — never a 500.
+
+### Routes
+
+- `GET /api/budget` → `vox.web.usage.budget_status()`
+  - On missing module / missing `budget_status` attribute → `{"error": "budget module not available"}`
+  - On exception inside `budget_status()` → `{"error": "budget read failed: <exc>"}`
+- `GET /api/diagnostics` → `vox.web.diagnostics.snapshot()`
+  - On missing module → `{"error": "diagnostics module not available"}`
+  - On exception inside `snapshot()` → `{"error": "diagnostics read failed: <exc>"}`
+
+All paths return **HTTP 200** with a JSON object; the dashboard treats an
+`{"error": ...}` body as "feature unavailable / degraded".
+
+### Decisions
+
+- **`/api/budget` uses `_try_import("usage")` + `hasattr` guard** rather than the
+  eagerly-imported top-level `usage`. The bridge imports `usage` at module load,
+  but `budget_status()` is added by the budget agent in a parallel iteration. The
+  `hasattr` check means that if `budget_status` isn't present yet, the route still
+  degrades gracefully to the "not available" object instead of raising
+  `AttributeError`. Once the budget agent lands `budget_status()`, the route lights
+  up automatically with no further change here.
+- **`/api/diagnostics` uses `_try_import("diagnostics")`** — that module doesn't
+  exist in the eager imports, so the standard guarded lazy import applies.
+- Both are read-only GETs with no request body, so no `_json_body` / validation
+  helpers are needed. Response shape is owned by the budget/diagnostics agents per
+  CONTRACT; this layer is a thin guarded pass-through.
+- Mounted **before** `_mount_static(app)` so the SPA catch-all (`/{full_path:path}`)
+  never shadows them — consistent with every other `/api/*` route.
+
+### How to verify
+
+```bash
+# Missing modules → safe defaults, HTTP 200 (no budget/diagnostics impl present)
+uv run python -c "
+from fastapi.testclient import TestClient
+from vox.web.server import create_app
+c = TestClient(create_app())
+for p in ('/api/budget', '/api/diagnostics'):
+    r = c.get(p); print(p, r.status_code, r.json())
+"
+
+# Working + raising implementations both stay HTTP 200
+uv run python -c "
+import sys, types
+from fastapi.testclient import TestClient
+import vox.web.usage as u
+u.budget_status = lambda: {'limitUsd': 50.0, 'spentUsd': 12.3, 'remainingUsd': 37.7}
+d = types.ModuleType('vox.web.diagnostics'); d.snapshot = lambda: {'pythonOk': True}
+sys.modules['vox.web.diagnostics'] = d
+from vox.web.server import create_app
+c = TestClient(create_app())
+print(c.get('/api/budget').json(), c.get('/api/diagnostics').json())
+u.budget_status = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
+d.snapshot = lambda: (_ for _ in ()).throw(RuntimeError('kaboom'))
+c2 = TestClient(create_app())
+print(c2.get('/api/budget').status_code, c2.get('/api/budget').json())
+print(c2.get('/api/diagnostics').status_code, c2.get('/api/diagnostics').json())
+"
+```
+
+### TODOs / dependencies
+
+- Response shapes for both routes are defined and owned by the **budget** and
+  **diagnostics** agents. The corresponding TS types in `dashboard/src/lib/api.ts`
+  and the new API routes in CONTRACT.md should be added by the integration agent —
+  this server change is intentionally additive and shape-agnostic.
+
+## Iteration 7 — cost budget (`settings_store.py` + `usage.py`)
+
+A monthly spend budget the dashboard can read to render a budget meter and
+warn/over states. Backend-only here (no new routes); the integration agent wires
+the `/api/usage/budget` route + the `BudgetStatus` TS type.
+
+### `settings_store.py` — new "Cost" setting group
+
+One new schema entry (additive — slotted before the Debug group):
+
+| key | group | type | default | help |
+| --- | --- | --- | --- | --- |
+| `monthly_budget_usd` | Cost | text | `"0"` | Monthly spend budget in USD; 0 = no budget. |
+
+- **`text`, not a number type** — the `Setting` schema only has `toggle|select|text`
+  (CONTRACT), so the budget rides as text and `_coerce` keeps the existing `str(...)`
+  validation (rejects `null`). `budget_status()` does the numeric parse/guard.
+- **Default "0" = no budget.** `Config` has no `monthly_budget_usd` attribute, so an
+  un-set `get("monthly_budget_usd")` returns `None`; `_budget_usd()` treats `None`,
+  blank, non-numeric, and negative all as 0.0 → the safe "no budget" default. The
+  contract's "default 0" surfaces via `budget_status()`/the meter, not a Config attr.
+- SCHEMA validation is unchanged: unknown keys and `null` text still raise
+  `SettingError` (→ 400 at the route).
+
+### `usage.py` — `budget_status()`
+
+```py
+budget_status() -> {budgetUsd, spentUsd, remainingUsd, percent, state}
+```
+
+- `budgetUsd`    — monthly budget from `settings_store.get("monthly_budget_usd")`,
+  float-coerced and guarded (0.0 when unset/blank/garbage/negative or the store
+  can't be imported/read).
+- `spentUsd`     — month-to-date total `costUsd`, summed over events whose `ts`
+  falls in the **current UTC calendar month** (`_month_to_date_cost`).
+- `remainingUsd` — `budgetUsd - spentUsd` (0.0 when no budget; **may go negative**
+  when over budget — the meter shows the overspend).
+- `percent`      — `spent/budget*100`, clamped to 0-100 for display (0.0 when no
+  budget). `state` is decided from the *raw* (un-clamped) percent so 120% still reads "over".
+- `state`        — `none` (budget 0) · `ok` · `warn` (raw% >= 80) · `over` (raw% >= 100).
+
+Guard/None-safety decisions:
+
+- **Lazy import of `settings_store`** inside `_budget_usd()` keeps `usage.py`
+  importable standalone and avoids an import cycle; any import/read failure → 0.0.
+- **None-safe everywhere** — a missing/garbage `ts` falls back to this month via
+  `_month_key`; a `None`/non-numeric `costUsd` is skipped, not summed.
+- **No new persistence, no new state** — `budget_status()` is a pure read over the
+  existing ledger + settings store. The voice daemon never calls it; it doesn't
+  touch `record_usage`, so recording stays best-effort and the daemon is untouched.
+
+### Verify
+
+```bash
+# schema: new key present, grouped Cost, in all()
+uv run python -c "from vox.web import settings_store as s; \
+m=next(x for x in s.SCHEMA if x['key']=='monthly_budget_usd'); print(m['group'], m['type']); \
+print('monthly_budget_usd' in {x['key'] for x in s.all()})"
+# expect: Cost text  /  True
+
+# validation still rejects unknown keys + null text
+uv run python -c "from vox.web import settings_store as s; \
+import contextlib
+for k,v in [('nope','1'),('monthly_budget_usd',None)]:
+    try: s.set(k,v); print('NO RAISE', k)
+    except s.SettingError: print('rejected', k)"
+# expect: rejected nope  /  rejected monthly_budget_usd
+
+# no budget -> state none, percent 0 (default)
+uv run python -c "from vox.web import usage as u; print(u.budget_status())"
+# expect: {'budgetUsd':0.0,'spentUsd':<mtd>,'remainingUsd':0.0,'percent':0.0,'state':'none'}
+
+# thresholds (mocked ledger + budget): 50->ok 85->warn 120->over
+uv run python -c "
+from unittest.mock import patch
+from datetime import datetime, timezone
+from vox.web import usage as u, settings_store as s
+ts=datetime.now(timezone.utc).strftime('%Y-%m-15T12:00:00+00:00')
+for spend,want in [(50,'ok'),(85,'warn'),(120,'over')]:
+    with patch.object(u,'_read_all',return_value=[{'ts':ts,'costUsd':spend}]), patch.object(s,'get',return_value='100'):
+        print(spend, u.budget_status()['state'])"
+# expect: 50 ok / 85 warn / 120 over
+```
+
+> Any `data/settings.json` override written while verifying is gitignored runtime
+> data — clear the `monthly_budget_usd` key via `settings_store.set(... '0')` or by
+> editing the file; don't delete the file (it may hold real user overrides).

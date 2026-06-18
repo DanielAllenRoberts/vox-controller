@@ -1,5 +1,6 @@
 import { Routes, Route, useLocation } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
+import { ThemeProvider } from "@/components/layout/theme";
 import { PageTransition } from "@/components/animate/PageTransition";
 import { Overview } from "@/pages/Overview";
 import { TokenUsage } from "@/pages/TokenUsage";
@@ -12,7 +13,8 @@ import { Memory } from "@/pages/Memory";
 export default function App() {
   const location = useLocation();
   return (
-    <Routes location={location}>
+    <ThemeProvider>
+      <Routes location={location}>
       <Route element={<AppShell />}>
         <Route
           index
@@ -78,7 +80,8 @@ export default function App() {
             </PageTransition>
           }
         />
-      </Route>
-    </Routes>
+        </Route>
+      </Routes>
+    </ThemeProvider>
   );
 }

@@ -1,3 +1,4 @@
+import { type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
@@ -12,6 +13,11 @@ import {
   Settings as SettingsIcon,
   Network,
   TrendingUp,
+  HeartPulse,
+  MemoryStick,
+  AudioWaveform,
+  BrainCircuit,
+  Gauge,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -30,6 +36,7 @@ import { FadeIn } from "@/components/animate/FadeIn";
 import { StatusDot, type StatusKind } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { LiveFeed } from "@/components/usage/LiveFeed";
 import { useUsageStream } from "@/hooks/useUsageStream";
 
@@ -39,6 +46,218 @@ function formatUptime(seconds: number): { value: number; unit: string } {
   if (seconds < 86400)
     return { value: Math.round((seconds / 3600) * 10) / 10, unit: "hrs" };
   return { value: Math.round((seconds / 86400) * 10) / 10, unit: "days" };
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics (GET /api/diagnostics) — local reader.
+//
+// The diagnostics endpoint is owned by the parallel iteration-7 backend agent
+// and isn't in lib/api.ts yet (and we must NOT edit lib/api.ts), so we read it
+// here with a small direct fetch that mirrors the api client's conventions
+// (same VITE_API_BASE resolution + camelCase + {error} envelope).
+//
+// Shape mirrors docs/dashboard/diagnostics.md exactly. Every field is optional
+// and rendered defensively, so the card degrades gracefully if the backend
+// returns its "unknown"/sentinel envelope (off-mac, missing psutil, etc).
+// ---------------------------------------------------------------------------
+interface BrainRefLoose {
+  provider?: string;
+  model?: string;
+}
+
+interface Diagnostics {
+  process?: { cpuPercent?: number; memMb?: number; uptimeSeconds?: number };
+  stt?: { model?: string; computeType?: string; sampleRate?: number };
+  smallBrain?: BrainRefLoose;
+  bigBrain?: BrainRefLoose;
+  error?: string;
+}
+
+const DIAG_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
+
+async function fetchDiagnostics(): Promise<Diagnostics> {
+  const res = await fetch(`${DIAG_BASE}/api/diagnostics`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body?.detail ?? body?.error ?? detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as Diagnostics;
+}
+
+// A single labelled stat row inside the System health card. Optional accent
+// colour for the value (used to flag CPU/memory pressure).
+function HealthRow({
+  icon: Icon,
+  label,
+  loading,
+  children,
+}: {
+  icon: LucideIcon;
+  label: string;
+  loading?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2">
+      <span className="flex items-center gap-2 text-sm text-foreground-muted">
+        <Icon className="h-3.5 w-3.5" />
+        {label}
+      </span>
+      {loading ? (
+        <Skeleton className="h-4 w-20" />
+      ) : (
+        <span className="min-w-0 text-right text-sm font-medium text-foreground-secondary">
+          {children}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function pressureClass(pct?: number): string {
+  if (pct == null || !Number.isFinite(pct)) return "text-foreground-secondary";
+  if (pct >= 85) return "text-danger";
+  if (pct >= 60) return "text-warning";
+  return "text-success";
+}
+
+function brainLabel(b?: BrainRefLoose): string {
+  if (!b) return "—";
+  // The backend's "unknown" sentinel reads as a real value; treat it as empty.
+  const model = b.model && b.model !== "unknown" ? b.model : "";
+  const provider = b.provider && b.provider !== "unknown" ? b.provider : "";
+  return model || provider || "—";
+}
+
+// Compact "System health" card — live process/runtime telemetry from
+// GET /api/diagnostics, in the established glass style (small stat rows + a
+// subtle live pulse). Premium loading / empty / error states.
+function SystemHealthCard({ running }: { running: boolean }) {
+  const { data, isLoading, isError, error } = useQuery<Diagnostics>({
+    queryKey: ["diagnostics"],
+    queryFn: fetchDiagnostics,
+    refetchInterval: 4000,
+    retry: 1,
+  });
+
+  // The endpoint never 500s — it returns {error} when the module is missing —
+  // so treat both a thrown fetch error and an {error} envelope as the failure.
+  const failure = isError
+    ? error instanceof Error
+      ? error.message
+      : "unreachable"
+    : data?.error;
+  const live = running && !failure && !isLoading;
+
+  const cpu = data?.process?.cpuPercent;
+  const mem = data?.process?.memMb;
+  const uptime = data?.process?.uptimeSeconds;
+  const sttModel =
+    data?.stt?.model && data.stt.model !== "unknown" ? data.stt.model : "";
+  const sttCompute =
+    data?.stt?.computeType && data.stt.computeType !== "unknown"
+      ? data.stt.computeType
+      : "";
+
+  return (
+    <Card glass className="relative flex h-full flex-col overflow-hidden p-5">
+      <div className="pointer-events-none absolute -left-10 -bottom-12 h-32 w-32 rounded-full bg-accent-2/15 opacity-50 blur-2xl" />
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-2 text-overline uppercase text-foreground-muted">
+          <HeartPulse className="h-3.5 w-3.5" />
+          System health
+        </span>
+        <span className="flex items-center gap-1.5 text-[11px] text-foreground-muted">
+          <ListeningPulse active={live} size="h-1.5 w-1.5" />
+          {failure ? "offline" : live ? "live" : "idle"}
+        </span>
+      </div>
+
+      {failure ? (
+        <div className="mt-4 flex flex-1 flex-col items-center justify-center gap-2 py-4 text-center">
+          <Gauge className="h-6 w-6 text-foreground-muted/60" />
+          <p className="text-sm text-foreground-secondary">
+            Diagnostics unavailable
+          </p>
+          <p className="max-w-[18rem] text-xs text-foreground-muted">{failure}</p>
+        </div>
+      ) : (
+        <div className="mt-3 flex-1 divide-y divide-border/60">
+          <HealthRow icon={Cpu} label="CPU" loading={isLoading}>
+            {cpu == null ? (
+              "—"
+            ) : (
+              <SlidingNumber
+                value={cpu}
+                decimals={cpu < 10 ? 1 : 0}
+                suffix="%"
+                className={pressureClass(cpu)}
+              />
+            )}
+          </HealthRow>
+
+          <HealthRow icon={MemoryStick} label="Memory" loading={isLoading}>
+            {mem == null ? (
+              "—"
+            ) : (
+              <span className="flex items-baseline justify-end gap-1">
+                <SlidingNumber value={mem} decimals={mem < 100 ? 1 : 0} />
+                <span className="text-xs text-foreground-muted">MB</span>
+              </span>
+            )}
+          </HealthRow>
+
+          <HealthRow icon={Clock} label="Uptime" loading={isLoading}>
+            {uptime == null ? (
+              "—"
+            ) : (
+              (() => {
+                const u = formatUptime(uptime);
+                return (
+                  <span className="flex items-baseline justify-end gap-1">
+                    <SlidingNumber
+                      value={u.value}
+                      decimals={u.unit === "sec" || u.unit === "min" ? 0 : 1}
+                    />
+                    <span className="text-xs text-foreground-muted">{u.unit}</span>
+                  </span>
+                );
+              })()
+            )}
+          </HealthRow>
+
+          <HealthRow icon={AudioWaveform} label="Whisper" loading={isLoading}>
+            <span className="flex items-center justify-end gap-1.5">
+              <span className="truncate font-mono text-xs">
+                {sttModel || "—"}
+              </span>
+              {sttCompute && (
+                <Badge variant="outline" className="font-mono text-[10px]">
+                  {sttCompute}
+                </Badge>
+              )}
+            </span>
+          </HealthRow>
+
+          <HealthRow icon={BrainCircuit} label="Brains" loading={isLoading}>
+            <span className="flex items-center justify-end gap-1.5 font-mono text-xs">
+              <span className="truncate">{brainLabel(data?.smallBrain)}</span>
+              <span className="text-foreground-muted">·</span>
+              <span className="truncate">{brainLabel(data?.bigBrain)}</span>
+            </span>
+          </HealthRow>
+        </div>
+      )}
+    </Card>
+  );
 }
 
 const QUICK_ACTIONS: { to: string; label: string; icon: LucideIcon }[] = [
@@ -234,9 +453,11 @@ export function Overview() {
         </StaggerItem>
       </Stagger>
 
-      {/* Lower section: hero today's-cost + sparkline, live feed, quick actions. */}
+      {/* Lower section: left column stacks hero today's-cost + System health;
+          right column holds the live feed. Quick actions sit below. */}
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <FadeIn delay={0.05} className="lg:col-span-1">
+        <div className="flex flex-col gap-6 lg:col-span-1">
+        <FadeIn delay={0.05}>
           <Card glass className="relative flex h-full flex-col overflow-hidden p-5">
             <div className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full bg-brand-gradient opacity-25 blur-2xl" />
             <div className="flex items-center justify-between">
@@ -300,7 +521,12 @@ export function Overview() {
           </Card>
         </FadeIn>
 
-        <FadeIn delay={0.1} className="lg:col-span-2">
+        <FadeIn delay={0.1}>
+          <SystemHealthCard running={running} />
+        </FadeIn>
+        </div>
+
+        <FadeIn delay={0.15} className="lg:col-span-2">
           <Card glass className="h-full p-5">
             <LiveFeed events={events} status={streamStatus} limit={8} />
           </Card>

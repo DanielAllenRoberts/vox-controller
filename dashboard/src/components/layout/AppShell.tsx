@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Outlet } from "react-router-dom";
 import { SideNav } from "./SideNav";
 import { TopBar } from "./TopBar";
+import { HelpOverlay } from "./HelpOverlay";
+import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { CommandPalette } from "@/components/CommandPalette";
 import { api, type Status } from "@/lib/api";
 import type { StatusKind } from "@/components/StatusDot";
@@ -19,6 +21,7 @@ export function AppShell() {
   });
 
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // Global ⌘K / Ctrl+K toggle (ignored inside text fields except to open).
   useEffect(() => {
@@ -32,6 +35,9 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // g-then-key navigation + `?` opens the shortcuts help (ignores typing).
+  useKeyboardShortcuts({ onHelp: () => setHelpOpen(true) });
+
   const status: StatusKind = isLoading
     ? "connecting"
     : isError || !data?.running
@@ -42,7 +48,11 @@ export function AppShell() {
     <div className="flex min-h-screen bg-background text-foreground">
       <SideNav status={status} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar status={data} onOpenPalette={() => setPaletteOpen(true)} />
+        <TopBar
+          status={data}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onOpenHelp={() => setHelpOpen(true)}
+        />
         <main className="flex-1">
           <div className="mx-auto w-full max-w-[1200px] px-6 py-6 lg:px-8">
             <Outlet />
@@ -50,6 +60,7 @@ export function AppShell() {
         </main>
       </div>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <HelpOverlay open={helpOpen} onOpenChange={setHelpOpen} />
     </div>
   );
 }
