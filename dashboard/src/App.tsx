@@ -9,6 +9,7 @@ import { Personalities } from "@/pages/Personalities";
 import { AxTree } from "@/pages/AxTree";
 import { Rules } from "@/pages/Rules";
 import { Memory } from "@/pages/Memory";
+import { Integrations } from "@/pages/Integrations";
 
 export default function App() {
   const location = useLocation();
@@ -69,6 +70,14 @@ export default function App() {
           element={
             <PageTransition>
               <Memory />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="integrations"
+          element={
+            <PageTransition>
+              <Integrations />
             </PageTransition>
           }
         />

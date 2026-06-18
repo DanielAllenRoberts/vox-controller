@@ -19,6 +19,9 @@ Public API (CONTRACT): ``create_app() -> FastAPI`` ; ``run(host, port)`` ;
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -352,13 +355,35 @@ def create_app() -> FastAPI:
             tags = []
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
             return _bad_request("'tags' must be a list of strings")
+        # Optional v2 tier ("core"/"daily"). Only forwarded when the underlying
+        # memory module advertises tiered support; otherwise we call the v1 shape
+        # so the older JSONL store keeps working unchanged.
+        tier = body.get("tier")
+        if tier is not None and (not isinstance(tier, str) or not tier.strip()):
+            return _bad_request("'tier' must be a string when provided")
         try:
+            if _memory_supports_tier(mod):
+                # v2 signature is add(text, tier=..., tags=...). Pass tags by
+                # keyword so it can't bind to the `tier` positional slot, and
+                # only set tier when the caller asked for one (else the module's
+                # default applies).
+                if tier:
+                    return mod.add(text.strip(), tier=tier.strip(), tags=tags)
+                return mod.add(text.strip(), tags=tags)
             return mod.add(text.strip(), tags)
+        except TypeError:
+            # add() doesn't accept the kwargs we passed (older signature) → retry v1.
+            try:
+                return mod.add(text.strip(), tags)
+            except Exception as exc:
+                return _bad_request(f"could not add memory: {exc}")
         except Exception as exc:
             return _bad_request(f"could not add memory: {exc}")
 
     @app.delete("/api/memory/{the_id}")
     def remove_memory(the_id: str):
+        # DELETE by id across tiers. v2 memory.remove(id) already searches every
+        # tier; the v1 store searches its single ledger. Same call either way.
         mod = _try_import_memory()
         if mod is None:
             return _not_found("memory")
@@ -369,6 +394,110 @@ def create_app() -> FastAPI:
         if not removed:
             return _not_found("memory")
         return {"ok": True}
+
+    @app.patch("/api/memory/{the_id}")
+    async def update_memory(the_id: str, request: Request):
+        # Edit an entry's text/tags in place (dashboard inline edit). Guarded:
+        # degrades to 404/400 rather than 500. Only available on the v2 store
+        # (memory.update); the legacy flat store has no editor.
+        mod = _try_import_memory()
+        if mod is None or not hasattr(mod, "update"):
+            return _not_found("memory")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        text = body.get("text")
+        if text is not None and not isinstance(text, str):
+            return _bad_request("'text' must be a string when provided")
+        tags = body.get("tags")
+        if tags is not None and (
+            not isinstance(tags, list) or not all(isinstance(t, str) for t in tags)
+        ):
+            return _bad_request("'tags' must be a list of strings when provided")
+        try:
+            updated = mod.update(the_id, text=text, tags=tags)
+        except Exception as exc:
+            return _bad_request(f"could not update memory: {exc}")
+        if not updated:
+            return _not_found("memory")
+        return updated
+
+    # --- Memory v2: tiered read + reveal (guarded) -------------------------
+    # All routes degrade to safe empty/{error} bodies (HTTP 200) when the
+    # tiered memory functions aren't present yet, so a half-migrated store can
+    # never 500 the dashboard or block the voice daemon.
+
+    @app.get("/api/memory/core")
+    def get_memory_core() -> list:
+        # hasattr() is inside the try so even a pathological module whose
+        # attribute access raises can never 500 — degrade to [].
+        try:
+            mod = _try_import_memory()
+            if mod is None or not hasattr(mod, "core"):
+                return []
+            return mod.core() or []
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.get("/api/memory/daily")
+    def get_memory_daily(date: str = "") -> list:
+        try:
+            mod = _try_import_memory()
+            if mod is None or not hasattr(mod, "daily"):
+                return []
+            # Empty/omitted date → module default (latest/today).
+            return mod.daily(date.strip() or None) or []
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.get("/api/memory/dates")
+    def get_memory_dates() -> list:
+        try:
+            mod = _try_import_memory()
+            if mod is None or not hasattr(mod, "dates"):
+                return []
+            return mod.dates() or []
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.post("/api/memory/reveal")
+    def reveal_memory() -> dict:
+        """Reveal data/memory/ in the macOS Finder (open -R <abs path>).
+
+        Best-effort: returns {ok: False, error} rather than 500ing if the path is
+        missing or `open` is unavailable (e.g. off-mac). The directory is created
+        if absent so there's always something to reveal."""
+        target = _memory_dir()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            return {"ok": False, "error": f"could not prepare memory dir: {exc}"}
+        opener = shutil.which("open")
+        if opener is None:
+            return {"ok": False, "error": "Finder reveal is only supported on macOS"}
+        try:
+            subprocess.run(
+                [opener, "-R", str(target)],
+                check=False,
+                timeout=5,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"could not reveal location: {exc}"}
+        return {"ok": True, "path": str(target)}
+
+    # --- MCP integration config (guarded) ----------------------------------
+    @app.get("/api/mcp/config")
+    def get_mcp_config() -> dict:
+        """vox-speak MCP setup for THIS machine (idea #34).
+
+        Returns the editor config block with the real absolute repo root computed
+        from this file's location — never a hardcoded personal path. Shape:
+        ``{cursor, claudeAdd, repoRoot}``. Fully guarded: any failure degrades to
+        ``{error}`` (HTTP 200)."""
+        try:
+            return _mcp_config()
+        except Exception as exc:
+            return {"error": f"could not build MCP config: {exc}"}
 
     # --- AX tree (guarded) ---
     @app.get("/api/axtree")
@@ -417,6 +546,92 @@ def _try_import_memory():
         return memory
     except Exception:
         return None
+
+
+def _memory_supports_tier(mod) -> bool:
+    """True if the memory module's ``add`` accepts a ``tier`` keyword (v2)."""
+    try:
+        import inspect
+
+        return "tier" in inspect.signature(mod.add).parameters
+    except Exception:
+        return False
+
+
+def _memory_dir() -> Path:
+    """Absolute path to ``data/memory/`` under the repo root.
+
+    Prefer the memory module's own ``path_for``/``DATA_DIR`` (so a future move
+    stays in sync), else fall back to ``<repo>/data/memory``."""
+    mod = _try_import_memory()
+    if mod is not None:
+        try:
+            if hasattr(mod, "path_for"):
+                # path_for returns a file inside the tier dir; its parent for a
+                # dated daily file is the daily/ subdir, so walk to data/memory.
+                p = Path(mod.path_for("core")).resolve()
+                # core.md lives directly in data/memory/
+                return p.parent
+        except Exception:
+            pass
+        for attr in ("MEMORY_DIR", "DATA_DIR"):
+            try:
+                val = getattr(mod, attr, None)
+                if val:
+                    return Path(val).resolve()
+            except Exception:
+                pass
+    return (_REPO_ROOT / "data" / "memory").resolve()
+
+
+def _mcp_config() -> dict:
+    """Build the vox-speak MCP config for this machine.
+
+    The real absolute repo root is computed from this file's location
+    (``_REPO_ROOT``) — never hardcoded. If a real ``.cursor/mcp.json`` exists on
+    disk we surface its ``mcpServers`` block verbatim (with cwd patched to the
+    real root); otherwise we generate the canonical vox-speak block (idea #34:
+    an MCP server that speaks finished-work announcements through system TTS)."""
+    repo_root = str(_REPO_ROOT)
+
+    # Canonical vox-speak server entry. Launched via the project's uv env so it
+    # picks up the same deps as the daemon. cwd is the real repo root so the
+    # server resolves the package regardless of where the editor invokes it.
+    server_entry = {
+        "command": "uv",
+        "args": ["run", "python", "-m", "vox.mcp.speak"],
+        "cwd": repo_root,
+    }
+
+    # Prefer a real on-disk .cursor/mcp.json if present, patching cwd to the real
+    # path so committed placeholder paths never leak through.
+    cursor_path = _REPO_ROOT / ".cursor" / "mcp.json"
+    servers = {"vox-speak": server_entry}
+    if cursor_path.is_file():
+        try:
+            data = json.loads(cursor_path.read_text())
+            on_disk = data.get("mcpServers")
+            if isinstance(on_disk, dict) and on_disk:
+                for entry in on_disk.values():
+                    if isinstance(entry, dict):
+                        entry["cwd"] = repo_root
+                servers = on_disk
+        except Exception:
+            # Malformed file → fall back to the canonical block.
+            servers = {"vox-speak": server_entry}
+
+    # `claude mcp add` one-liner for the same server, machine-local path filled in.
+    claude_add = (
+        "claude mcp add vox-speak "
+        f"--cwd {repo_root} "
+        "-- uv run python -m vox.mcp.speak"
+    )
+
+    return {
+        "cursor": servers,
+        "claudeAdd": claude_add,
+        "repoRoot": repo_root,
+    }
 
 
 def _mount_static(app: FastAPI) -> None:

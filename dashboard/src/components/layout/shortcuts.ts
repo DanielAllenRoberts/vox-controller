@@ -21,6 +21,7 @@ export const GO_SHORTCUTS: GoShortcut[] = [
   { key: "a", to: "/axtree", label: "AX Tree" },
   { key: "r", to: "/rules", label: "Rules" },
   { key: "m", to: "/memory", label: "Memory" },
+  { key: "i", to: "/integrations", label: "Integrations" },
 ];
 
 export interface ShortcutDoc {

@@ -110,6 +110,15 @@ _SCHEMA_META: list[dict] = [
         "type": "toggle",
         "help": "A long pause auto-exits dictation so it can't get stuck.",
     },
+    {
+        "key": "memory_autocapture",
+        "label": "Auto-capture memories",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "Let Vox save memories on its own — durable facts to core, "
+                "session notes to daily — and recall them in later turns. "
+                "Off means memories are only what you add by hand.",
+    },
     # --- Voice ---
     {
         "key": "tts_enabled",
