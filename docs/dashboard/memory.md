@@ -116,3 +116,130 @@ Expected: `memory.py OK`.
   BM25+vector hybrid when keyword recall starts missing paraphrases — **no API or
   on-disk change needed** (that's the seam).
 - **Bounding / GC:** optional size/age-based pruning if the log grows.
+
+---
+
+# Memory Store — v2: tiered Markdown (`src/vox/memory.py`)
+
+> **Supersedes the JSONL design above.** `src/vox/memory.py` was redesigned to the
+> tiered Markdown store in `MEMORY_DESIGN.md` (v1 of *that* design). The sections
+> above are retained for history; this section is the current source of truth for the
+> module. Same ownership rule: the memory agent owns `src/vox/memory.py` **only**.
+> Design research: `research/memory-tiered.md`.
+
+## What changed
+
+- **Two tiers, both plaintext Markdown** under the gitignored `data/memory/`:
+  - **Core** — `data/memory/core.md`: durable, always-relevant facts. **Always
+    injected** by `recall()`. May use `##` section headers (skipped on parse).
+  - **Daily** — `data/memory/daily/YYYY-MM-DD.md`: dated episodic logs. Recalled by
+    relevance (today + yesterday always, then keyword-matched older days).
+- **Entries are human-editable Markdown bullets**, one per line:
+  ```
+  - [2026-06-18T09:12Z] (#prefs #vox) Prefers concise, spoken-style answers.
+  ```
+  timestamp · optional `#tags` · text. The user can read/hand-edit the files; the
+  dashboard "open file location" button reveals them.
+- **`id` is a stable line-hash** (`sha1(tier + raw line)[:12]`) — survives edits to
+  *other* lines and reordering, so the dashboard can target edit/delete reliably.
+- **One-time JSONL migration:** any legacy `data/memory.jsonl` is folded into
+  `core.md` once (legacy memories were durable, curated facts), guarded by a
+  `data/memory/.migrated-jsonl` marker. Idempotent; the JSONL is then ignored.
+
+## Public API (additive + back-compatible)
+
+```python
+add(text, tier="daily", tags=None) -> dict   # append a bullet; returns the entry
+recall(query, k=5) -> list[dict]             # ALL core + top-k relevant daily
+core() -> list[dict]                         # all core entries (dashboard)
+daily(date=None) -> list[dict]               # one day's entries (default today)
+dates() -> list[str]                         # all dated logs, newest first
+remove(id) -> bool                           # delete by line-hash id
+path_for(tier, date=None) -> str             # on-disk path (open-location button)
+all() -> list[dict]                          # BACK-COMPAT: core + all daily, newest first
+```
+
+Every entry object is `{id, ts, text, tags, tier}` (+ `score` on `recall`/`all` is
+only on `recall`). `ts` is now an **ISO-8601 string** (matches the rest of the
+dashboard contract); `_ts_seconds` still tolerates the old float-epoch.
+
+### Back-compat shims (so existing callers / the dashboard don't break)
+- **`add(text, ["#tag"])`** — the *old* signature passed a list as the 2nd
+  positional arg. If `tier` is a list/tuple it's treated as `tags` and the entry
+  goes to `daily` (old default). The dashboard `POST /api/memory` (`add(text, tags)`)
+  keeps working unchanged.
+- **`all()`** is retained and returns core + every daily entry, newest first — what
+  the existing `GET /api/memory` list view calls.
+- Entry shape is a superset of the old `{id, ts, text, tags}` (adds `tier`), so
+  legacy readers are unaffected.
+
+### Dashboard route mapping (for the bridge agent, additive)
+- `GET /api/memory/core` → `core()`
+- `GET /api/memory/daily?date=` → `daily(date)`
+- `GET /api/memory/dates` → `dates()`
+- `POST /api/memory {text, tier?, tags?}` → `add(text, tier, tags)` (old
+  `{text, tags}` still works via the shim)
+- `DELETE /api/memory/{id}` → `remove(id)`
+- `POST /api/memory/reveal` → run `open -R` on `path_for(...)`
+- existing `GET /api/memory?query=&limit=` keeps working via `recall`/`all`.
+
+## Recall semantics
+
+`recall(query, k)` returns **all core first** (file order, `score` 0.0), then the
+selected **daily** entries:
+- **today + yesterday** are *always* included (continuity across a day boundary),
+  ordered newest-first;
+- then **keyword-matched older days**, ranked by `_score`;
+- capped at `k` daily entries total. Empty query → core + `k` most recent daily.
+
+This pins the always-load window per the research tweak (matches OpenClaw's
+"today + yesterday auto-loaded, older via search").
+
+## Scoring (unchanged seam)
+
+The keyword `_score(query_tokens, entry)` is unchanged in spirit (+1/token overlap,
++2 tag hit, ~+0.5 recency tiebreak) and is still the **only** function an
+embedding/hybrid ranker must replace. Markdown stays canonical; any future
+SQLite/vector layer is a *rebuildable index* and recall must fall back to a scan.
+
+## Robustness / guards
+
+- **Canonical-store invariant — reads never raise.** Every read path
+  (`core`/`daily`/`dates`/`recall`/`all`/`remove`/parse) is wrapped so a missing or
+  corrupt file yields an empty result, never an exception. The voice daemon's
+  guarded `_memory_block` therefore degrades to "no memories", never breaks a reply.
+- **Process-wide `RLock`** — voice thread + FastAPI thread never interleave writes.
+- **Writes are best-effort** — a write failure is swallowed (the caller still gets
+  its entry dict back); it never crashes the daemon.
+- Pure stdlib (`hashlib`, `json`, `re`, `threading`, `time`, `datetime`, `pathlib`).
+
+## How to verify
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0, 'src')
+from vox import memory as m
+e = m.add('I prefer concise spoken answers', tier='core', tags=['prefs'])
+d = m.add('Asked about the budget today', tier='daily', tags=['work'])
+assert e['tier'] == 'core' and d['tier'] == 'daily'
+assert m.add('legacy note', ['legacy'])['tier'] == 'daily'      # positional-tags shim
+r = m.recall('budget')
+assert any(x['tier'] == 'core' for x in r)                       # core always injected
+assert any('budget' in x['text'] for x in r)
+assert m.path_for('core').endswith('core.md')
+assert m.remove(d['id']) and not m.remove('deadbeef')
+print('memory v2 OK')
+PY
+```
+
+Note: this writes into the real `data/memory/`. The migration of an existing
+`data/memory.jsonl` runs automatically and idempotently on first use.
+
+## TODOs (post-v1)
+- **Bridge + page redesign** (bridge agent): the new `/api/memory/*` endpoints, the
+  Core/Daily two-section Memory page, the auto-capture toggle, and "open location".
+- **Auto-capture / recall in the prompt** (assistant agent): parse `MEMORY[core|daily]`
+  directives, inject `recall()` into the system prompt; both fully guarded.
+- **Dream/consolidation pass (#28):** scheduled big-brain dedupe + promotion of
+  recurrent daily signals into core, with `weekly/`/`monthly/`/`dream-log.md` rollups
+  (names reserved, not yet created). Embeddings/hybrid recall only at larger scale.

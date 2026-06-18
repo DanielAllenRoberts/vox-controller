@@ -661,3 +661,197 @@ for spend,want in [(50,'ok'),(85,'warn'),(120,'over')]:
 > Any `data/settings.json` override written while verifying is gitignored runtime
 > data — clear the `monthly_budget_usd` key via `settings_store.set(... '0')` or by
 > editing the file; don't delete the file (it may hold real user overrides).
+
+---
+
+## Memory v2 (tiered) + MCP integration routes — `server.py`
+
+> Added by the bridge-routes agent. Owns `src/vox/web/server.py` only. All routes
+> are **additive + guarded**: lazy imports inside `try/except`, safe `{error}`/`[]`
+> bodies on a missing/half-built module, HTTP 200 even when a feature isn't wired
+> yet. The voice daemon runs unchanged if memory/web is absent. See
+> `docs/dashboard/MEMORY_DESIGN.md` for the v1 memory contract these realise.
+
+### New endpoints
+
+| Method | Path | Returns | Notes |
+|--------|------|---------|-------|
+| GET  | `/api/memory/core` | `Memory[]` | All curated core entries (`memory.core()`). `[]` if the tiered API is absent. |
+| GET  | `/api/memory/daily?date=YYYY-MM-DD` | `Memory[]` | `memory.daily(date)`; omitted/empty `date` → module default (latest/today). Unknown date → `[]`. |
+| GET  | `/api/memory/dates` | `string[]` | Dates that have a daily log (`memory.dates()`), newest-first per the module. |
+| POST | `/api/memory/reveal` | `{ok, path?}` / `{ok:false, error}` | Reveals `data/memory/` in Finder via `open -R <abs path>`. Creates the dir if missing. Off-mac (no `open`) → `{ok:false}`, never 500. |
+| GET  | `/api/mcp/config` | `{cursor, claudeAdd, repoRoot}` / `{error}` | vox-speak MCP setup for **this** machine; repo root computed from the server file location, never hardcoded. |
+
+### Extended endpoints (back-compatible)
+
+- **`POST /api/memory`** now accepts an optional **`tier`** (`"core"` / `"daily"`).
+  Tier is forwarded only when the underlying `memory.add` advertises a `tier`
+  keyword (detected via `inspect.signature`); `tags` is always passed by keyword
+  on a tiered module so it can never bind to the `tier` positional slot. On a v1
+  store (no `tier` param) the call degrades to `add(text, tags)`. A `TypeError`
+  from an unexpected signature also retries the v1 shape. Body:
+  `{text, tags?: string[], tier?: "core"|"daily"}`.
+- **`DELETE /api/memory/{id}`** unchanged at the call site but now deletes **across
+  tiers** — `memory.remove(id)` in v2 searches every tier; v1 searches its single
+  ledger. Missing id → 404.
+
+### `GET /api/mcp/config` shape
+
+```jsonc
+{
+  "cursor": {                         // the .cursor/mcp.json mcpServers block, as an object
+    "vox-speak": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "vox.mcp.speak"],
+      "cwd": "<ABS REPO ROOT>"        // real path, computed at runtime
+    }
+  },
+  "claudeAdd": "claude mcp add vox-speak --cwd <ABS REPO ROOT> -- uv run python -m vox.mcp.speak",
+  "repoRoot": "<ABS REPO ROOT>"
+}
+```
+
+- The absolute repo root is `Path(__file__).resolve().parents[3]` (`_REPO_ROOT`) —
+  **never a hardcoded personal path**. Committed docs must use
+  `/ABSOLUTE/PATH/TO/vox-controller`; the real path only ever appears in the live
+  API response and the UI.
+- If a real `.cursor/mcp.json` exists on disk, its `mcpServers` block is surfaced
+  verbatim **with `cwd` patched to the real root** (so committed placeholder paths
+  can't leak). Otherwise the canonical vox-speak block above is generated.
+- `vox-speak` is idea #34 — an MCP server that speaks finished-work announcements
+  through the system TTS. The launch command (`python -m vox.mcp.speak`) is a
+  forward reference; the config is informational setup text, so the route works
+  whether or not that module exists yet.
+
+### Helpers added (module-level, private)
+
+- `_memory_supports_tier(mod)` — `True` if `mod.add` has a `tier` parameter.
+- `_memory_dir()` — abs path to `data/memory/`, preferring the memory module's own
+  `path_for("core")` parent / `MEMORY_DIR` / `DATA_DIR`, else `<repo>/data/memory`.
+- `_mcp_config()` — builds the `{cursor, claudeAdd, repoRoot}` payload.
+
+New stdlib imports: `json`, `shutil`, `subprocess`.
+
+### Verify
+
+```bash
+# All new routes against whatever memory module is present (v1 or v2), via TestClient.
+uv run python -c "
+from fastapi.testclient import TestClient
+from vox.web.server import create_app
+c = TestClient(create_app())
+print('core ', c.get('/api/memory/core').status_code, type(c.get('/api/memory/core').json()).__name__)
+print('daily', c.get('/api/memory/daily').status_code)
+print('dates', c.get('/api/memory/dates').status_code)
+print('reveal', c.post('/api/memory/reveal').json().get('ok') in (True, False))
+cfg = c.get('/api/mcp/config').json()
+print('mcp repoRoot endswith vox-controller:', cfg['repoRoot'].endswith('vox-controller'))
+print('mcp cursor has vox-speak:', 'vox-speak' in cfg['cursor'] or bool(cfg['cursor']))
+"
+# expect: core 200 list / daily 200 / dates 200 / reveal True / repoRoot True / cursor True
+
+# Tiered round-trip (v2 module): core POST lands in core, deletes across tiers.
+uv run python -c "
+from fastapi.testclient import TestClient
+from vox.web.server import create_app
+c = TestClient(create_app())
+r = c.post('/api/memory', json={'text':'verify core','tier':'core','tags':['t']})
+mid = r.json().get('id'); print('tier stored:', r.json().get('tier'))
+print('in core:', any(e['id']==mid for e in c.get('/api/memory/core').json()))
+print('delete:', c.delete('/api/memory/'+mid).json())
+"
+# expect: tier stored: core (on v2) / in core: True / delete: {'ok': True}
+```
+
+> `POST /api/memory/reveal` opens Finder on a dev Mac — harmless, but expect a
+> Finder window. Runtime memory data under `data/memory/` is gitignored.
+
+---
+
+## Memory auto-capture + recall wiring (`assistant.py`, `settings_store.py`)
+
+Wires the tiered Markdown memory store (see `MEMORY_DESIGN.md`) into the live voice
+brain: the model can **auto-capture** durable/contextual facts and Vox **recalls**
+them into later turns. Everything additive and try/except-guarded — if the memory or
+settings modules are missing or broken, the daemon behaves exactly as before.
+
+### `settings_store.py` — new toggle
+
+Added `memory_autocapture` to `SCHEMA` (group **Behavior**, type `toggle`). It has no
+`Config` attribute, so an unset value reads as `None` and the assistant's `_setting`
+helper falls back to **`True`** (auto-capture on by default, as the design requires).
+The dashboard writes the override to `data/settings.json`; the toggle takes effect on
+the next turn (no restart).
+
+### `assistant.py` — capture + recall
+
+All new helpers are lazy-importing and guarded; a failure is a silent no-op.
+
+- **`_autocapture_on()`** — `bool(_setting("memory_autocapture", True))`; the single
+  gate for every capture path. Guarded → `True` when the settings store is absent.
+- **`_mem_add(text, tier)`** — saves one memory. Calls `memory.add(text, tier=...)`
+  (tiered store) and falls back to `memory.add(text)` on `TypeError` (legacy flat
+  store). No-op on empty text or a missing module.
+- **`_capture_from_reply(reply)`** — parses `MEMORY[core]: <fact>` / `MEMORY[daily]:
+  <note>` directives (regex `_MEMORY_DIRECTIVE`, one per line), stores each at its
+  tier (gated on the toggle), and **strips the directive lines from the reply** so they
+  are never shown or spoken. A trailing `[OPEN]/[DONE]/[BIG]` turn-tag sharing the
+  directive's line is scrubbed from the stored fact. Stripping happens even when
+  capture is off, so the syntax never leaks. Fast-paths out when `"MEMORY["` isn't
+  present.
+- **`_capture_from_user(user_text)`** — handles an explicit **"remember that X" /
+  "remember to X"** → stores `X` to **core**; a bare **"remember this/that"** stores the
+  whole utterance to core. Gated on the toggle.
+- **`_memory_block(user_text)`** (rewritten) — injects **all core memories** under
+  *"What you always remember about the user:"* plus the **top relevant daily entries**
+  under *"Recent notes that may be relevant…"*. Uses `memory.core()` + `memory.recall(
+  user_text, k=5)` when available; a recall hit tagged `tier == "core"` is folded into
+  the core section (deduped, never shown twice). Falls back to the legacy single-block
+  *"Things you remember about the user"* when the store exposes no `core()`/`tier`
+  (back-compat). Empty string on any error.
+- **System prompt** — a short "Memory:" paragraph tells the model it can remember
+  across conversations and to append `MEMORY[core|daily]: …` **sparingly**, with the
+  core-vs-daily rule from `MEMORY_DESIGN.md` (core = rare, durable, high-signal; daily
+  = passing/contextual; don't repeat what it already remembers).
+
+**Wiring point:** `respond_turn` calls `_capture_from_user(text)` then
+`raw = _capture_from_reply(raw)` *before* `_split_signal`, so directives are stripped
+ahead of turn-tag parsing and the cleaned reply is what's shown/spoken. Recall is
+layered in the existing `_rules_block()/_memory_block()` loop that builds the system
+prompt — unchanged call site, richer block.
+
+### Guarantees
+
+- Missing/broken `vox.memory` → `_memory_block` returns `""`, captures no-op; reply
+  unchanged.
+- Missing/broken `vox.web.settings_store` → `_autocapture_on()` returns `True`
+  (capture works out of the box) and recall still functions.
+- A `MEMORY[...]` directive **never** leaks into shown/spoken text, on or off.
+- Works against **both** the tiered store (current) and the legacy flat store.
+
+### Verify
+
+```bash
+# schema: toggle present, Behavior group, in all()
+uv run python -c "from vox.web import settings_store as s; \
+m=next(x for x in s.SCHEMA if x['key']=='memory_autocapture'); print(m['group'], m['type']); \
+print('memory_autocapture' in {x['key'] for x in s.all()})"
+# expect: Behavior toggle  /  True
+
+# default gating is True when unset
+uv run python -c "from vox.web import settings_store as s; \
+ov=s._load_overrides(); ov.pop('memory_autocapture',None); s._save_overrides(ov); \
+import vox.assistant as a; print(a._autocapture_on())"
+# expect: True
+
+# directive parse + strip (does NOT leak the syntax or the [DONE] tag)
+uv run python -c "import vox.assistant as a; \
+print(repr(a._capture_from_reply('Done.\nMEMORY[core]: name is Dan\nMEMORY[daily]: note [DONE]')))"
+# expect: 'Done.'   (and two entries added: 1 core, 1 daily — clean up __TEST__ rows if you seed them)
+
+# recall block: core section + daily section, core not duplicated
+uv run python -c "import vox.assistant as a; print(a._memory_block('cursor'))"
+```
+
+> Capture writes real entries to `data/memory/` (gitignored). When verifying live,
+> prefix test facts with `__TEST__` and delete them via `vox.memory.remove(id)`.

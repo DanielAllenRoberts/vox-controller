@@ -266,3 +266,31 @@ The finalize pass: tied off the iteration-7 "Next" items, wrote the dashboard RE
 
 **Next (final wrap-up)**
 - Run the Playwright visual QA sweep across all pages at 1440px + mobile, write the critique, fix any visual rough edges, then do the closing commit + changelog/demo script.
+
+### Memory v1 — tiered Markdown + auto-capture + MCP Integrations (2026-06-18)
+
+A parallel-agent slice rebuilding memory around the v1 design doc (tiered human-editable Markdown), wiring auto-capture/recall into the voice brain, and shipping the Integrations page (vox-speak MCP setup). All additive + guarded; the voice daemon runs unchanged if `vox.web`/`vox.memory` is absent or broken; no git run.
+
+**Built**
+- Tiered Markdown store (`src/vox/memory.py`, full rewrite): `data/memory/core.md` (always injected) + `data/memory/daily/YYYY-MM-DD.md` logs; entries are human-editable bullets `- [ISO-ts] (#tags) text`. Additive API: `add(text, tier="daily", tags=None)`, `recall(query, k=5)` (all core + today/yesterday always, then keyword-matched older days), `core()`, `daily(date=None)`, `dates()`, `remove(id)`, `path_for(...)`; stable `sha1(tier+line)[:12]` id survives hand-edits/reordering. Back-compat: `all()` kept, legacy `add(text, tags_list)` positional shim, ISO-8601 `ts`. Legacy `data/memory.jsonl` folded into `core.md` once (idempotent `.migrated-jsonl` marker). Every read never raises (missing/corrupt → empty).
+- Auto-capture + recall in the voice brain (`src/vox/assistant.py`): guarded `_mem_add`/`_capture_from_reply`/`_capture_from_user`, rewritten `_memory_block`, a "Memory:" paragraph in `_SYSTEM`, wired into `respond_turn` before `_split_signal`. Model `MEMORY[core|daily]:` directives and "remember that X" turns now persist (gated, always stripped from shown/spoken output); core+daily recalled into the prompt with core dedup. New `memory_autocapture` toggle (`web/settings_store.py`, group **Behavior**), default-on via `_setting(..., True)`.
+- Backend bridge routes (`src/vox/web/server.py`): `GET /api/memory/core|daily?date=|dates`, `POST /api/memory/reveal` (Finder `open -R` of `data/memory/`), `GET /api/mcp/config` (vox-speak block, repo root computed at runtime from the server file — never hardcoded). `POST /api/memory` now accepts optional `tier` (forwarded only when `add` advertises it via `inspect.signature`); `DELETE /api/memory/{id}` deletes across tiers. Defense-in-depth: every route holds HTTP 200 even against a pathological memory module.
+- Frontend: app-shell slice (`layout/nav.ts`, `layout/shortcuts.ts`, `App.tsx`, `lib/api.ts`) adds the 8th nav item + `/integrations` route + `g`→`i` shortcut + tiered-memory/MCP client helpers/types (`MemoryTier`, `McpConfig`, `memoryCore/Daily/Dates`, `revealMemory`, extended `addMemory`, `mcpConfig`). `pages/Memory.tsx` redesigned to Core + Daily-logs tabs with an auto-capture toggle card, date picker, add/edit/delete, and "Open file location". `pages/Integrations.tsx` built as the vox-speak MCP setup page (Cursor + Claude Code wiring blocks, copy buttons, local-only note, guarded against the config route being absent). Docs appended across `memory.md`, `backend.md`, `frontend.md`, `integrations-page.md`.
+
+**Capture rules used (v1)**
+- Two tiers: **core** = always-injected curated facts; **daily** = dated log, recalled for today/yesterday always + keyword match on older days.
+- Capture triggers: explicit model `MEMORY[core|daily]:` directives, and a simple regex on user "remember that / to / this" turns → daily.
+- Gated by `memory_autocapture` (default-on); directives always stripped from output even when capture is off, so `MEMORY[...]` syntax never leaks; trailing turn-tags (`[OPEN]/[DONE]/[BIG]`) scrubbed from the stored fact; core recall hits deduped so a fact never shows twice.
+
+**Decisions**
+- Plaintext human-editable Markdown over JSONL so memories are hand-editable; line-hash ids keep dashboard edit/delete stable after manual edits. Dual-store compatible: assistant prefers the tiered API and falls back to the legacy single-block shape on `TypeError`. Default-on toggle via the already-guarded `_setting` helper (no store signature change). MCP block synthesized when no `.cursor/mcp.json` exists, with `cwd` always patched to the real runtime repo root so committed placeholder paths can't leak. Routes guard capability checks inside `try/except` so a broken module degrades to `[]`/`{error}`, never 500, never touching the daemon.
+
+**Verify**
+- `src/vox/memory.py` + `src/vox/assistant.py` `py_compile` clean; tiered store verified end-to-end (core/daily add, positional-tags shim, recall injecting core, `path_for`, `remove`); JSONL migration verified idempotent (one legacy record, no dup on re-run). Capture/recall validated against the real tiered store and the legacy fallback; `memory_autocapture` present in **Behavior** and defaults True; directives stripped even with capture off. Backend routes verified at HTTP 200 against the real v2 store and a pathological broken module (tiered POST routing, cross-tier DELETE 404-on-missing, reveal, dates, MCP config). Frontend `tsc --noEmit` + `vite build` clean with Integrations as the 8th nav row + ⌘K command; runtime `data/` left clean (test rows removed).
+
+**Known gaps / TODOs**
+- "remember that X" parser is intentionally simple (v1) — to be tuned with the user. `vox.mcp.speak` (idea #34) is a forward reference; the MCP config route is informational and works whether or not that module exists. Memory page's local `memoryApi` fetch helper + inline-edit verb (`PATCH /api/memory/{id}`) to be consolidated into `lib/api.ts` / confirmed with backend.
+
+**Next**
+- Big-brain "dream"/consolidation pass (#28): periodic pass that distills daily logs into core + `weekly/`/`monthly/`/`dream-log.md` (names reserved, not yet created).
+- Tune the capture rules (what gets auto-remembered, core-vs-daily routing, the "remember that" parser) with the user.

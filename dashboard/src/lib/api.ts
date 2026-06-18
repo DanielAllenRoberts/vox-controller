@@ -104,12 +104,41 @@ export interface Rule {
   enabled: boolean;
 }
 
+// Memory tier (MEMORY_DESIGN.md v1). "core" = durable, always-injected facts;
+// "daily" = dated, contextual notes recalled by relevance.
+export type MemoryTier = "core" | "daily";
+
 export interface Memory {
   id: string;
   ts: string;
   text: string;
   tags: string[];
   score?: number;
+  // Present on the tiered store; older /api/memory responses may omit it, so
+  // pages should default to "daily" when absent.
+  tier?: MemoryTier;
+}
+
+// vox-speak MCP setup block for THIS machine — mirrors GET /api/mcp/config.
+// `repoPath` is computed locally by the bridge and is never committed (docs use
+// the /ABSOLUTE/PATH/TO/vox-controller placeholder). Fields are read
+// defensively: the whole envelope may instead be { error } when the bridge
+// module is missing or a read fails (HTTP 200 either way).
+export interface McpConfig {
+  // Server id to register the MCP under (e.g. "vox-speak").
+  name: string;
+  // Absolute path to this repo on this machine (local-only, do not commit).
+  repoPath: string;
+  // Command + args the MCP host should launch (e.g. uv run ...).
+  command: string;
+  args: string[];
+  // Ready-to-paste `.cursor/mcp.json` block (the mcpServers entry).
+  cursorBlock: string;
+  // Ready-to-run `claude mcp add ...` shell command.
+  claudeAddCommand: string;
+  // On-disk path to the editor config we'd reveal (for "open config location").
+  configPath?: string;
+  error?: string;
 }
 
 export interface AxNode {
@@ -264,17 +293,40 @@ export const api = {
   removeRule: (id: string) =>
     request<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
 
+  // --- Memory (back-compat flat search; recalls across tiers) --------------
   memory: (query = "", limit = 50) =>
     request<Memory[]>(
       `/memory?query=${encodeURIComponent(query)}&limit=${limit}`,
     ),
-  addMemory: (text: string, tags?: string[]) =>
-    request<Memory>("/memory", {
+  // Extended add: optional tier (default "daily" server-side) + tags. Accepts
+  // either an options object {tier?, tags?} (preferred) or a bare string[] of
+  // tags (legacy positional form) so existing callers keep working.
+  addMemory: (
+    text: string,
+    opts?: { tier?: MemoryTier; tags?: string[] } | string[],
+  ) => {
+    const o = Array.isArray(opts) ? { tags: opts } : opts;
+    return request<Memory>("/memory", {
       method: "POST",
-      body: JSON.stringify({ text, tags }),
-    }),
+      body: JSON.stringify({ text, tier: o?.tier, tags: o?.tags }),
+    });
+  },
   removeMemory: (id: string) =>
     request<{ ok: boolean }>(`/memory/${id}`, { method: "DELETE" }),
+
+  // --- Memory (tiered, MEMORY_DESIGN.md v1) --------------------------------
+  // All curated core memories (always-injected facts).
+  memoryCore: () => request<Memory[]>("/memory/core"),
+  // Daily log for a date (YYYY-MM-DD); omit `date` for today.
+  memoryDaily: (date?: string) =>
+    request<Memory[]>(
+      date ? `/memory/daily?date=${encodeURIComponent(date)}` : "/memory/daily",
+    ),
+  // Dates (YYYY-MM-DD) that have a daily log, newest-first per the bridge.
+  memoryDates: () => request<string[]>("/memory/dates"),
+  // Reveal data/memory/ in the OS file manager (bridge runs `open -R`).
+  revealMemory: () =>
+    request<{ ok: boolean }>("/memory/reveal", { method: "POST" }),
 
   axtree: () => request<AxTree | AxTreeError>("/axtree"),
 
@@ -283,6 +335,11 @@ export const api = {
   // callers should narrow with isApiError() before reading the typed fields.
   budget: () => request<BudgetStatus | ApiErrorBody>("/budget"),
   diagnostics: () => request<Diagnostics>("/diagnostics"),
+
+  // vox-speak MCP setup for this machine. Returns HTTP 200 with an { error }
+  // body when the bridge module is absent; narrow with isApiError() before
+  // reading the typed fields (McpConfig.error is also set in that case).
+  mcpConfig: () => request<McpConfig | ApiErrorBody>("/mcp/config"),
 };
 
 // WebSocket URL for the live usage stream (CONTRACT.md WS /api/usage/stream).

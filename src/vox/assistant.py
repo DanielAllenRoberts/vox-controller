@@ -35,7 +35,15 @@ _SYSTEM = (
     "Voice: your reply is shown in full and also read aloud. When the spoken version should be "
     "shorter than the written one, add a final line 'SAY: <concise spoken version>' — then only "
     "that line is read aloud (it's removed from the shown text). Skip it when the whole reply is "
-    "fine to speak."
+    "fine to speak.\n\n"
+    "Memory: you can remember things across conversations. When the user shares something worth "
+    "keeping, append a capture directive on its own line at the very end of your reply — "
+    "'MEMORY[core]: <fact>' for durable, always-relevant facts (their name, standing "
+    "preferences, long-term projects, standing instructions) or 'MEMORY[daily]: <note>' for "
+    "passing, session-specific things (what you did today, one-off requests). It's stripped before "
+    "the reply is shown or spoken; never mention it. Use it sparingly and only for genuinely useful "
+    "facts — core is rare and high-signal, daily is contextual. Don't repeat things you already "
+    "remember."
 )
 
 _anthropic_client = None
@@ -87,20 +95,137 @@ def _rules_block() -> str:
     return ""
 
 
-def _memory_block(user_text: str) -> str:
-    """The most relevant remembered facts for this turn, rendered for the system prompt.
+def _mem_text(h) -> str:
+    """The text of a recall hit, whether it's a dict ({text:...}) or a plain string."""
+    if isinstance(h, dict):
+        return (h.get("text") or "").strip()
+    return (h or "").strip() if isinstance(h, str) else ""
 
-    Reads vox.memory.recall(user_text, k=3). Fully guarded: if the module is missing
-    or broken, return "" so the daemon behaves exactly as today (no memories layered on)."""
+
+def _memory_block(user_text: str) -> str:
+    """Remembered context for this turn, rendered for the system prompt.
+
+    Injects ALL core memories (labelled so the model treats them as durable) plus the
+    top relevant daily entries (keyword-matched to this turn). Works with both the
+    tiered store (memory.core() + memory.recall returning core+daily with a `tier`)
+    and the legacy flat store (recall only) — whichever ships. Fully guarded: if the
+    module is missing or broken, return "" so the daemon behaves exactly as today."""
     try:
         from vox import memory
-        hits = memory.recall(user_text, k=3) or []
-        lines = [f"• {(h.get('text') or '').strip()}" for h in hits if (h.get("text") or "").strip()]
-        if lines:
-            return "Things you remember about the user (use if relevant):\n" + "\n".join(lines)
+
+        core_lines: list[str] = []
+        # Prefer an explicit core() accessor (tiered store); fall back to filtering
+        # recall hits by their `tier`, then to nothing (legacy flat store has no core).
+        try:
+            core_lines = [t for t in (_mem_text(h) for h in (memory.core() or [])) if t]
+        except AttributeError:
+            pass
+
+        hits = memory.recall(user_text, k=5) or []
+        daily_lines: list[str] = []
+        for h in hits:
+            text = _mem_text(h)
+            if not text:
+                continue
+            tier = h.get("tier") if isinstance(h, dict) else None
+            if tier == "core" or text in core_lines:
+                # A core hit surfaced by recall — only keep it in the core section.
+                if not core_lines and tier == "core":
+                    core_lines.append(text)
+                continue
+            daily_lines.append(text)
+
+        # No core() accessor and no tier metadata (legacy store): treat recall hits as
+        # the things-you-remember block, preserving today's behaviour.
+        blocks: list[str] = []
+        if core_lines:
+            blocks.append("What you always remember about the user:\n"
+                          + "\n".join(f"• {t}" for t in core_lines))
+        if daily_lines:
+            label = ("Recent notes that may be relevant (use if helpful):"
+                     if core_lines else "Things you remember about the user (use if relevant):")
+            blocks.append(label + "\n" + "\n".join(f"• {t}" for t in daily_lines))
+        return "\n\n".join(blocks)
     except Exception:
         pass
     return ""
+
+
+def _autocapture_on() -> bool:
+    """Whether auto-capture is enabled (dashboard toggle, default on). Guarded → True
+    if the settings store is missing/broken, so capture works out of the box."""
+    return bool(_setting("memory_autocapture", True))
+
+
+def _mem_add(text: str, tier: str) -> None:
+    """Save one memory at the given tier. Tries the tiered API (add(text, tier=...))
+    and falls back to the legacy flat API (add(text)) if it doesn't accept a tier.
+    Fully guarded: a missing/broken memory module is a silent no-op — capture must
+    never break a reply."""
+    text = (text or "").strip()
+    if not text:
+        return
+    try:
+        from vox import memory
+        try:
+            memory.add(text, tier=tier)
+        except TypeError:
+            memory.add(text)  # legacy flat store: no tiers
+    except Exception:
+        pass
+
+
+# MEMORY[core]: ... / MEMORY[daily]: ... — a capture directive the model may append.
+# Matched on its own line; the rest of the line (to EOL) is the fact/note.
+_MEMORY_DIRECTIVE = re.compile(r"(?im)^[ \t]*MEMORY\[(core|daily)\]:[ \t]*(.+?)[ \t]*$")
+
+# Explicit user request to remember something → core by default. Captures the fact
+# after "remember that/to" so "remember that I like tea" stores "I like tea".
+_REMEMBER_THAT = re.compile(r"(?i)\bremember\s+(?:that|to)\s+(.+)", re.DOTALL)
+_REMEMBER_THIS = re.compile(r"(?i)\bremember\s+(?:this|that)\b")
+
+
+def _capture_from_reply(reply: str) -> str:
+    """Parse any MEMORY[core|daily] directives the model appended, store them (gated on
+    the autocapture setting), and return the reply with those directive lines stripped
+    so they're never shown or spoken. Always strips, even when capture is off, so a
+    directive never leaks into the output. Fully guarded."""
+    if not reply or "MEMORY[" not in reply:
+        return reply
+    try:
+        on = _autocapture_on()
+        if on:
+            for m in _MEMORY_DIRECTIVE.finditer(reply):
+                # A trailing [OPEN]/[DONE]/[BIG] tag may share the directive's line — drop it
+                # so it doesn't leak into the stored fact.
+                fact = re.sub(r"(?i)\[(open|done|big)\]", "", m.group(2)).strip()
+                _mem_add(fact, m.group(1).lower())
+        # Strip the directive lines regardless (don't leak the syntax to the user).
+        cleaned = _MEMORY_DIRECTIVE.sub("", reply)
+        # Collapse any blank lines the removal left behind.
+        cleaned = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", cleaned)
+        return cleaned.strip()
+    except Exception:
+        return reply
+
+
+def _capture_from_user(user_text: str) -> None:
+    """Handle an explicit 'remember that X' / 'remember this' user turn by saving to
+    core (gated on the autocapture setting). Best-effort and guarded — a no-op if the
+    turn isn't a remember request, capture is off, or the memory module is missing."""
+    if not user_text:
+        return
+    try:
+        if not _autocapture_on():
+            return
+        m = _REMEMBER_THAT.search(user_text)
+        if m:
+            _mem_add(m.group(1), "core")
+        elif _REMEMBER_THIS.search(user_text):
+            # "remember this" with no explicit fact → store the surrounding utterance.
+            _mem_add(user_text, "core")
+    except Exception:
+        pass
 
 
 def _record_usage(provider, model, brain, kind, usage, latency_ms):
@@ -166,6 +291,10 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):
         raw = complete(text, history, brain="big", system=system)  # small brain deferred
+    # Memory (both guarded): an explicit "remember that X" user turn → core; a
+    # MEMORY[core|daily] directive the model appended → captured and stripped from the reply.
+    _capture_from_user(text)
+    raw = _capture_from_reply(raw)
     return _split_signal(raw)
 
 

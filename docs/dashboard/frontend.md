@@ -633,3 +633,167 @@ voice daemon is untouched (no Python edited by this agent).
      closes it.
    - **`g` then `u`** (within the timeout) navigates to `/usage`; the same chord
      **typed inside an `<input>`** does **not** navigate (input guard holds).
+
+---
+
+## Iteration 8 — App shell: Integrations route + Memory v2 / MCP API client
+
+> Frontend "app shell" slice for the tiered-memory + Integrations work
+> (MEMORY_DESIGN.md v1). Owned files only: `src/App.tsx`,
+> `src/components/layout/*`, `src/lib/api.ts`. The Memory and Integrations
+> **page** agents own their `src/pages/*` files and consume the client helpers
+> added here. Additive; the build stays green and the voice daemon is untouched.
+
+### 1. Integrations nav item + `/integrations` route (8th page)
+
+- **`layout/nav.ts`.** Appended an 8th `NAV_ITEMS` entry —
+  `{ to: "/integrations", label: "Integrations", icon: Plug }` — after the
+  original 7 (Overview, Token Usage, Settings, Personalities, AX Tree, Rules,
+  Memory). Because the `SideNav` and the `CommandPalette` both render from
+  `NAV_ITEMS`, the item shows up in the sidebar **and** the ⌘K palette with no
+  further edits.
+- **`layout/shortcuts.ts`.** Added `g`→`i` to `GO_SHORTCUTS` (Integrations), so
+  the keyboard map and the help overlay stay in sync with the SideNav. Now 8
+  g-nav rows.
+- **`App.tsx`.** Added a `path="integrations"` `<Route>` wrapped in
+  `PageTransition`, mirroring the other pages, importing `Integrations` from
+  `@/pages/Integrations`.
+- **`pages/Integrations.tsx` (STUB).** Created a minimal stub that renders the
+  shared `ComingSoon` placeholder so the route resolves end-to-end **now** and
+  `tsc`/`vite build` stay green. **The Integrations page agent OWNS this file**
+  and replaces the export with the real MCP-setup page — no signature contract,
+  just the `Integrations` named export. A clear comment in the file says so.
+
+### 2. API client helpers + types (`lib/api.ts`)
+
+Tiered-memory + MCP additions (mirror the bridge per MEMORY_DESIGN.md §"New
+bridge endpoints"; camelCase JSON):
+
+- **Types.** `MemoryTier = "core" | "daily"`; `Memory` gains an optional
+  `tier?` (older `/api/memory` responses may omit it → default `"daily"` in
+  pages). New `McpConfig` shape for `GET /api/mcp/config`
+  (`{name, repoPath, command, args, cursorBlock, claudeAddCommand, configPath?,
+  error?}`) — `repoPath` is local-only/never committed; the envelope may instead
+  be `{error}`.
+- **Memory helpers.**
+  - `api.memoryCore()` → `Memory[]` (`GET /api/memory/core`).
+  - `api.memoryDaily(date?)` → `Memory[]` (`GET /api/memory/daily?date=`; omit
+    for today).
+  - `api.memoryDates()` → `string[]` (`GET /api/memory/dates`).
+  - `api.revealMemory()` → `{ok}` (`POST /api/memory/reveal`; bridge runs
+    `open -R data/memory/`).
+  - `api.addMemory(text, opts?)` — **extended** to take an options object
+    `{tier?, tags?}`. Back-compat: also accepts a bare `string[]` of tags
+    (legacy positional form the current Memory page uses) so nothing breaks
+    during the parallel rewrite. `tier` defaults to `"daily"` server-side.
+  - `api.memory(query, limit)` / `api.removeMemory(id)` unchanged (flat
+    cross-tier search + delete by id).
+- **MCP helper.** `api.mcpConfig()` → `McpConfig | ApiErrorBody`
+  (`GET /api/mcp/config`); narrow with the existing `isApiError()` before
+  reading typed fields.
+
+### Decisions / TODOs
+
+- **Stub `pages/Integrations.tsx`** is intentionally minimal so the route works
+  before the Integrations page agent lands. That agent simply overwrites the
+  file with the real page (same `Integrations` named export) — no other change
+  needed here.
+- **`addMemory` dual signature** (options object OR `string[]`) is a temporary
+  bridge so the existing Memory page keeps compiling. **TODO (Memory page
+  agent):** migrate the call site to `api.addMemory(text, { tier, tags })` and
+  the dual-accept can later be simplified to options-only.
+- All routes/keys assume the bridge endpoints from MEMORY_DESIGN.md exist; every
+  helper still returns through the same guarded `request()` (HTTP-200-`{error}`
+  bodies handled by `isApiError`), so a missing memory/MCP module degrades
+  gracefully rather than crashing a page.
+
+### Verify
+
+1. `cd dashboard && npx tsc --noEmit` → passes (0 errors).
+2. `npx vite build` → `dashboard/dist` builds clean (route + helpers compile).
+3. In the app: the **Integrations** item appears as the 8th SideNav row and in
+   the ⌘K palette; clicking it (or `g` then `i`) navigates to `/integrations`
+   and renders the page (stub → real page once the page agent lands).
+
+---
+
+## Memory page redesign — tiered Core + Daily (MEMORY_DESIGN v1)
+
+`src/pages/Memory.tsx` was rebuilt to the v1 tiered-memory contract
+(`docs/dashboard/MEMORY_DESIGN.md`). One owned file; no other frontend files
+touched, and **`lib/api.ts` was deliberately left untouched** (the tiered
+methods are owned by the shell/backend agents).
+
+### Layout
+
+- **Auto-capture card** (top, always visible): a prominent `Switch` bound to the
+  `memory_autocapture` setting, a one-line explainer of the Core/Daily split, a
+  transparency strip showing the on-disk folder path (`data/memory/` by
+  default), and an **"Open file location"** button.
+- **Two tabs** (`Tabs` primitive): **Core** (always-injected curated facts) and
+  **Daily logs** (browse by date).
+- **Core tab**: composer + a staggered grid of inline-editable cards with a
+  violet→cyan accent hairline (signals "always injected"). Add / edit / delete.
+- **Daily tab**: composer (writes to the selected date), a date picker
+  (prev/next + recent-day chips, "Today" always offered even before the file
+  exists), and the same card grid. Add / edit / delete.
+- Premium empty states per tier, per-section error cards, skeleton grids while
+  loading, and a delete-confirm dialog reused across both tiers.
+
+### Data access (why a local fetch client)
+
+The new endpoints aren't in `lib/api.ts` yet and the page may not edit it, so
+`Memory.tsx` carries a small typed `memoryApi` fetch helper (same `API_BASE` /
+`/api` convention as `lib/api.ts`). It talks to:
+
+- `GET /api/memory/core` → `MemoryEntry[]`
+- `GET /api/memory/daily?date=YYYY-MM-DD` → `MemoryEntry[]` (omit date → today)
+- `GET /api/memory/dates` → `string[]` (date keys, newest-first)
+- `POST /api/memory` `{text, tier:"core"|"daily", tags?, date?}` → `MemoryEntry`
+- `PATCH /api/memory/{id}` `{text?, tags?}` → `MemoryEntry`  (inline edit)
+- `DELETE /api/memory/{id}` → `{ok}`
+- `POST /api/memory/reveal` → `{ok?, path?}` (opens Finder; `path` shown for transparency)
+- `GET /api/settings` / `POST /api/settings` for the `memory_autocapture` toggle.
+
+`MemoryEntry` mirrors the contract `Memory` shape plus the new optional `tier`.
+
+### Guards / graceful degradation
+
+Every read is a React Query whose `queryFn` throws on a non-OK response; the UI
+renders the section error card instead of crashing, so the page stays usable as
+the backend routes land incrementally. The auto-capture switch is disabled (and
+shows an "unavailable" badge) when `/api/settings` lacks the
+`memory_autocapture` key. The toggle is optimistic with rollback on error. The
+voice daemon is unaffected — this is a static SPA asset only.
+
+### Decisions
+
+- **Tabs over a single scroll** — Core vs Daily are different mental models
+  (curated-and-permanent vs dated-and-transient); tabs keep each focused.
+- **Inline edit** (click text or pencil) for both tiers via `PATCH`, matching
+  the Rules page interaction. No separate edit dialog.
+- **`PATCH /api/memory/{id}`** assumed for edits (contract lists add/delete +
+  "extended with tier"; edit is implied by "add/edit/delete" in the page brief).
+  If the backend lands edit under a different verb/shape, only `memoryApi.update`
+  needs adjusting.
+- **Delete invalidation** keys off the entry's `tier` (and its `ts` date for
+  Daily) so the right cache refreshes.
+
+### TODOs / follow-ups
+
+- Move `memoryApi` into `lib/api.ts` once the shell agent adds the tiered
+  methods (then delete the local helper here) — purely a consolidation, no
+  behavior change.
+- Confirm the edit verb/shape (`PATCH /api/memory/{id}`) with the backend agent.
+- Search across tiers (the old flat page had keyword search) was dropped for v1;
+  recall scoring now lives in the assistant, not the dashboard. Re-add a
+  cross-tier search box later if wanted.
+
+### How to verify
+
+- `cd dashboard && npx tsc --noEmit` → clean. `npx vite build` → succeeds.
+- With the bridge running: toggle auto-capture (persists via `/api/settings`),
+  add/edit/delete a Core fact and a Daily note, switch dates, click
+  "Open file location" (reveals `data/memory/` in Finder on macOS).
+- With the bridge down: each section shows its error card; the daemon is
+  unaffected.
