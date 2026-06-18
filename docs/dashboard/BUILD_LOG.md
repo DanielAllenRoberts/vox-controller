@@ -182,3 +182,27 @@ This iteration folded the roadmap's AX-tree (5) and Rules & Memory (6) work toge
 - Visual QA pass (Playwright) over the four new pages at desktop + mobile widths per the Visual QA section; write a design critique and feed it into refinement.
 - Review + fix any cross-agent integration seams (e.g. confirm the now-resolved `AxTree.tsx` typecheck, rules/memory live in the prompt end-to-end, route error contracts) and refine rough edges; build the frontend.
 - Deferred TODOs to fold in: AX-tree bounds as `?depth=&breadth=` query params + optional `AXSubrole`/pyobjc fast-path; wire memory auto-capture on "remember that…" + pinned/threshold prompt injection; surface `AxNode.enabled` in the AX row; command history in the palette.
+
+### Iteration 6 — Audit & refine (2026-06-18)
+
+This iteration was a full audit pass: a severity-ranked code review of the dashboard backend + frontend, a live end-to-end exercise of the API, and targeted fixes for everything confirmed real. All fixes are backend-only and preserve the guarded-additive daemon invariant (no daemon touch points modified; memory/web calls stay lazy + `except Exception`-guarded; `data/` left as found).
+
+**Code-review findings (by severity)**
+- BLOCKER: 0.
+- HIGH: 1 — Memory `ts` written as a float epoch (`time.time()`) while the contract, the `Memory.ts: string` type, `usage.py`, and the frontend's `relativeTime`/`new Date(memory.ts)` all expect an ISO-8601 string; `new Date(1718700000.0)` was read as milliseconds → 1970 → garbage relative times ("20601d"). Fixed (A).
+- MEDIUM: 2 confirmed-real, both fixed (B) — (1) unguarded `await request.json()` on 3 POST handlers returned 500 instead of 400 on malformed/empty bodies; (2) CORS shipped `allow_credentials=True` alongside wildcard methods/headers (spec-invalid combo).
+- LOW: 4 — `setActivePersonality` TS return type understates the body (`api.ts:185`); `int(input_tokens or 0)` asymmetric-None (`usage.py:159`); WS loop-binding micro-race (`server.py`); dev-seed side effect guarded by `VOX_DEV_SEED=1` (`server.py:122`). All deferred as TODOs (no runtime impact).
+
+**E2E results**
+- All 14 endpoints PASSed; no 500s. The lone e2e note was the `Memory.ts` float-vs-ISO mismatch, which fix (A) resolves.
+
+**Fixes applied**
+- (A) HIGH — Memory timestamps. Fixed in one place, the backend `src/vox/memory.py`, matching `usage.py`'s convention: `add()` now writes `"ts": datetime.now(timezone.utc).isoformat()`; added a `_ts_seconds(ts)` helper that converts ISO (and tolerates legacy float + junk) to epoch seconds, used by `_score()`'s recency math and the three sort sites (`recall`, `recall` empty-query branch, `all`) so recency/sort stay correct and crash-free across mixed legacy+new records; updated the module-docstring example record to ISO. Frontend untouched — `relativeTime`/`formatTime` in `dashboard/src/lib/utils.ts` and their callers (`Memory.tsx` `memory.ts`, `LiveFeed.tsx` `e.ts`) were already ISO-correct and are now consistently ISO-fed.
+- (B) MEDIUM ×2 — `src/vox/web/server.py`. Routed `POST /api/settings`, `POST /api/personalities/active`, and `POST /api/personalities/custom` through the existing `_json_body(request)` helper (same pattern the rules/memory handlers use) so bad bodies return `400 {ok:false,error}` not 500. Set CORS `allow_credentials=False` (the client sends no cookies/auth), which makes the `["*"]` methods/headers valid per spec; origins remain restricted to localhost dev ports.
+- Deferred (LOW, left as TODOs): the 4 LOW items above — cosmetic/latent/practically-harmless, none with current runtime impact.
+
+**Verification**
+- Daemon imports clean (`vox.config`, `core.loop`, `assistant`, `executor`, `wakeword.backends`); `create_app()` builds all 24 routes; memory ISO round-trip parses and recall/sort work; mixed legacy-float + ISO records sort without crashing; no unguarded `request.json()` remains in route handlers; test artifact removed from `data/`. No git run. Touched files: `src/vox/memory.py`, `src/vox/web/server.py`.
+
+**Next (Iteration 7 — more end-to-end coverage + new creative features)**
+- Broaden end-to-end coverage beyond the 14 endpoints (write-path round-trips, error contracts, frontend-against-live-daemon for the four new pages); add new creative features on top of the now-audited base.

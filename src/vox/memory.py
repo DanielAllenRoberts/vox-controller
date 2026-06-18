@@ -3,7 +3,7 @@
 A single flat episodic log persisted as JSON Lines under ``data/memory.jsonl``.
 Each line is one ``Memory`` record::
 
-    {"id": "...", "ts": 1718700000.0, "text": "...", "tags": ["..."]}
+    {"id": "...", "ts": "2026-06-18T05:21:24+00:00", "text": "...", "tags": ["..."]}
 
 Recall ranks records against a query with a transparent keyword score (TF-style
 overlap + tag/recency boosts). The scorer is pluggable: swap ``_score`` for an
@@ -23,6 +23,7 @@ import re
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Runtime store lives under data/ (gitignored). Resolved relative to repo root
@@ -46,6 +47,22 @@ _STOPWORDS = frozenset(
 def _tokens(text: str) -> list[str]:
     """Lowercase word tokens with stopwords removed."""
     return [w for w in _WORD.findall(text.lower()) if w not in _STOPWORDS]
+
+
+def _ts_seconds(ts) -> float:
+    """Epoch seconds for a record's ``ts``, used for recency scoring + sorting.
+
+    ``ts`` is stored as an ISO-8601 string (matching usage.py and the dashboard
+    contract). Tolerates the legacy float-epoch format and junk → 0.0.
+    """
+    if isinstance(ts, (int, float)):
+        return float(ts)  # legacy records written before the ISO switch
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def _read_all() -> list[dict]:
@@ -108,7 +125,7 @@ def _score(query: str, record: dict) -> float:
         return 0.0
 
     # Recency tiebreak: newest record gets +~0.5, decaying over ~30 days.
-    age_days = max(0.0, (time.time() - float(record.get("ts", 0.0))) / 86_400)
+    age_days = max(0.0, (time.time() - _ts_seconds(record.get("ts"))) / 86_400)
     score += 0.5 / (1.0 + age_days / 30.0)
     return score
 
@@ -121,7 +138,7 @@ def add(text: str, tags: list[str] | None = None) -> dict:
     """
     record = {
         "id": uuid.uuid4().hex[:12],
-        "ts": time.time(),
+        "ts": datetime.now(timezone.utc).isoformat(),
         "text": text.strip(),
         "tags": list(tags or []),
     }
@@ -143,13 +160,13 @@ def recall(query: str, k: int = 5) -> list[dict]:
         records = _read_all()
 
     if not query or not query.strip():
-        recent = sorted(records, key=lambda r: r.get("ts", 0.0), reverse=True)[:k]
+        recent = sorted(records, key=lambda r: _ts_seconds(r.get("ts")), reverse=True)[:k]
         return [{**r, "score": 0.0} for r in recent]
 
     scored = ((_score(query, r), r) for r in records)
     ranked = sorted(
         (sr for sr in scored if sr[0] > 0),
-        key=lambda sr: (sr[0], sr[1].get("ts", 0.0)),
+        key=lambda sr: (sr[0], _ts_seconds(sr[1].get("ts"))),
         reverse=True,
     )
     return [{**r, "score": round(s, 4)} for s, r in ranked[:k]]
@@ -159,7 +176,7 @@ def all() -> list[dict]:  # noqa: A001 - matches the contract's API name
     """Return every memory, newest first."""
     with _LOCK:
         records = _read_all()
-    return sorted(records, key=lambda r: r.get("ts", 0.0), reverse=True)
+    return sorted(records, key=lambda r: _ts_seconds(r.get("ts")), reverse=True)
 
 
 def remove(id: str) -> bool:  # noqa: A002 - matches the contract's API name
