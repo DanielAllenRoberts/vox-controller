@@ -71,6 +71,15 @@ def create_app() -> FastAPI:
     """Build and return the FastAPI app with all routes mounted."""
     app = FastAPI(title="Vox Control Center", version="0.1.0")
 
+    # Dev-only: seed sample usage data for visual QA (no-op unless VOX_DEV_SEED=1
+    # and the ledger is empty). Guarded inside usage; never affects normal runs.
+    try:
+        seeded = usage.maybe_seed_dev()
+        if seeded:
+            print(f"[vox.web] VOX_DEV_SEED: seeded {seeded} sample usage events")
+    except Exception:
+        pass
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,

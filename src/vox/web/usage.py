@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Runtime store lives under data/ (gitignored). This file is src/vox/web/usage.py
@@ -70,6 +71,15 @@ def _cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int) 
         return 0.0
     in_rate, out_rate = price
     return round((input_tokens * in_rate + output_tokens * out_rate) / 1_000_000, 6)
+
+
+def is_subscription_call(provider: str, input_tokens, output_tokens) -> bool:
+    """True when a call carries no billable token counts — a flat-subscription
+    provider, or any provider that didn't expose tokens (both → cost 0, and the
+    dashboard renders 'subscription' rather than a misleading 0-token row)."""
+    return provider in _SUBSCRIPTION_PROVIDERS or (
+        input_tokens is None and output_tokens is None
+    )
 
 
 # --- Subscriber registry: async queues the WS route drains. ----------------
@@ -137,9 +147,18 @@ def record_usage(
     must not take down the voice loop.
 
     ``brain`` is "small"|"big"; ``kind`` is "chat"|"command"|"vision"|"rewrite".
+
+    ``input_tokens``/``output_tokens`` may be ``None`` when the provider didn't
+    expose token counts (SDK/CLI subscription calls). When both are ``None`` the
+    event records ``inputTokens``/``outputTokens`` as ``null`` and ``costUsd`` 0
+    so the dashboard can render it as a subscription call rather than a real
+    0-token request.
     """
-    input_tokens = int(input_tokens or 0)
-    output_tokens = int(output_tokens or 0)
+    subscription = is_subscription_call(provider, input_tokens, output_tokens)
+    # Subscription/no-token calls keep null token counts; everything else is an int.
+    in_tok = None if subscription and input_tokens is None else int(input_tokens or 0)
+    out_tok = None if subscription and output_tokens is None else int(output_tokens or 0)
+    cost = _cost_usd(provider, model, int(in_tok or 0), int(out_tok or 0))
     event = {
         "id": uuid.uuid4().hex[:12],
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -147,9 +166,9 @@ def record_usage(
         "model": model,
         "brain": brain,
         "kind": kind,
-        "inputTokens": input_tokens,
-        "outputTokens": output_tokens,
-        "costUsd": _cost_usd(provider, model, input_tokens, output_tokens),
+        "inputTokens": in_tok,
+        "outputTokens": out_tok,
+        "costUsd": cost,
         "latencyMs": int(latency_ms or 0),
     }
     try:
@@ -211,9 +230,9 @@ def summary() -> dict:
     )
 
     for e in events:
-        inp = int(e.get("inputTokens", 0))
-        out = int(e.get("outputTokens", 0))
-        cost = float(e.get("costUsd", 0.0))
+        inp = int(e.get("inputTokens") or 0)   # None (subscription) → 0 for totals
+        out = int(e.get("outputTokens") or 0)
+        cost = float(e.get("costUsd") or 0.0)
         totals["calls"] += 1
         totals["inputTokens"] += inp
         totals["outputTokens"] += out
@@ -250,3 +269,68 @@ def summary() -> dict:
     ]
 
     return {"totals": totals, "byModel": by_model_list, "byDay": by_day_list}
+
+
+# --- Dev seed (visual QA only) ----------------------------------------------
+# Guarded sample data so the Token Usage page renders during local QA. Never
+# runs in normal operation: only when VOX_DEV_SEED=1, and only if the store has
+# no real data yet (so it can't pollute a live ledger).
+
+_DEV_SEED_EVENTS = [
+    # (provider, model, brain, kind, in, out, latencyMs, days_ago, hour)
+    ("openai", "deepseek-chat", "small", "chat", 1840, 320, 900, 3, 9),
+    ("openai", "deepseek-chat", "small", "command", 2210, 96, 1100, 3, 14),
+    ("anthropic", "claude-haiku-4-5", "small", "chat", 980, 410, 1300, 2, 10),
+    ("openai", "deepseek-chat", "small", "rewrite", 3120, 540, 1500, 2, 11),
+    ("claude_sdk", "claude-opus-4-8", "big", "chat", None, None, 4200, 2, 16),
+    ("anthropic", "claude-haiku-4-5", "small", "vision", 1600, 180, 2100, 1, 8),
+    ("openai", "deepseek-chat", "small", "chat", 760, 240, 850, 1, 12),
+    ("claude_sdk", "claude-opus-4-8", "big", "command", None, None, 5300, 1, 15),
+    ("anthropic", "claude-opus-4-8", "big", "chat", 5400, 1280, 6100, 1, 18),
+    ("openai", "deepseek-chat", "small", "chat", 1320, 300, 940, 0, 9),
+    ("anthropic", "claude-haiku-4-5", "small", "command", 1180, 220, 1050, 0, 13),
+    ("claude_sdk", "claude-opus-4-8", "big", "chat", None, None, 4800, 0, 17),
+]
+
+
+def maybe_seed_dev() -> int:
+    """Seed ~12 realistic sample events when ``VOX_DEV_SEED=1``. Returns the
+    number of events written (0 if seeding is off or the store already has data).
+
+    Fully guarded — any failure is swallowed; seeding is a QA convenience and
+    must never affect startup or a real ledger.
+    """
+    if os.environ.get("VOX_DEV_SEED") != "1":
+        return 0
+    try:
+        with _LOCK:
+            if _read_all():
+                return 0  # real data present — don't pollute it
+            _DATA_DIR.mkdir(parents=True, exist_ok=True)
+            now = datetime.now(timezone.utc)
+            written = 0
+            with _STORE.open("a", encoding="utf-8") as f:
+                for prov, model, brain, kind, inp, out, lat, days_ago, hour in _DEV_SEED_EVENTS:
+                    ts = (now - timedelta(days=days_ago)).replace(
+                        hour=hour, minute=0, second=0, microsecond=0
+                    )
+                    sub = is_subscription_call(prov, inp, out)
+                    in_tok = None if sub and inp is None else int(inp or 0)
+                    out_tok = None if sub and out is None else int(out or 0)
+                    event = {
+                        "id": uuid.uuid4().hex[:12],
+                        "ts": ts.isoformat(),
+                        "provider": prov,
+                        "model": model,
+                        "brain": brain,
+                        "kind": kind,
+                        "inputTokens": in_tok,
+                        "outputTokens": out_tok,
+                        "costUsd": _cost_usd(prov, model, int(in_tok or 0), int(out_tok or 0)),
+                        "latencyMs": lat,
+                    }
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    written += 1
+            return written
+    except Exception:
+        return 0

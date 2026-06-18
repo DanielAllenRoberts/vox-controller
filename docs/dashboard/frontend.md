@@ -122,3 +122,67 @@ gated via `src/hooks/useReducedMotion.ts`:
 **Static checks already done (no runtime):** every `@/…` import maps to a created
 file; every external import is a declared dependency; named imports match exports;
 all files using the `React.` namespace import React.
+
+---
+
+## Iteration 2 — Token Usage page + Overview polish
+
+### New files
+- `src/hooks/useUsageStream.ts` — subscribes to WS `/api/usage/stream`, prepends
+  each incoming `UsageEvent` into a bounded newest-first buffer (dedupes by `id`),
+  auto-reconnects with a 2s backoff, exposes `{ events, status }` where status is
+  `connecting|live|offline`. Accepts a `seed` (the REST `usage/recent` snapshot) to
+  prime the feed before the first live push, without clobbering streamed rows.
+- `src/hooks/useNow.ts` — ticking `Date.now()` (default 1s) so relative timestamps
+  in the feed update from one shared timer instead of per-row intervals.
+- `src/components/usage/KindBadge.tsx` — kind glyph (chat/command/vision/rewrite)
+  with tint; falls back gracefully on unknown kinds.
+- `src/components/usage/LiveFeed.tsx` — shared live recent-calls feed. Newest-first,
+  spring slide-in per new row (`AnimatePresence` + `layout`, reduced-motion aware),
+  per-row `model · brain · tokens · latency · cost · relative-time`. Subscription
+  providers (`claude_sdk`/`claude_cli`) render a subtle **"subscription"** badge in
+  place of `$cost`. Great empty state when no calls yet. Used by both pages.
+
+### Changed files
+- `src/pages/TokenUsage.tsx` — replaced the ComingSoon stub with the full page:
+  - 4 summary cards with **animated counters** (`SlidingNumber`): total calls,
+    input tokens, output tokens, and a violet→cyan **hero "Total cost"** card
+    (gradient text + radial glow blob).
+  - **Cost over time** area chart (recharts) from `summary.byDay`, violet→cyan
+    gradient fill, glass tooltip.
+  - **Tokens by model** horizontal bar chart from `summary.byModel` (accent palette
+    per bar) paired with a legend list showing provider · calls · tokens · cost.
+  - **Live recent-calls feed** (`LiveFeed`) seeded from `usage/recent`, then live.
+  - Distinct empty states for each chart + the feed when there's no usage yet.
+- `src/pages/Overview.tsx` — kept all 6 status cards; addressed the visual critique:
+  - Added a fixed **background radial glow** (violet + cyan blurred blobs, `-z-10`).
+  - New lower section fills the dead space: a **"Today's cost"** hero card
+    (gradient counter + all-time total + a 14-day cost **sparkline**), a compact
+    **live activity feed**, and **quick-action chips** linking to key pages.
+  - Personality now renders **"Default"** when `status.personality` is empty.
+- `src/lib/utils.ts` — added shared display formatters: `formatTokens`,
+  `formatCost`, `formatLatency`, `formatTime`, `relativeTime`, `todayKey`.
+
+### Decisions
+- The WS pushes raw `UsageEvent` JSON (`server.py` `ws.send_json`, fields already
+  camelCase) so the hook `JSON.parse`s straight into the TS type — no mapping.
+- "Today" uses local `todayKey()` matched against `byDay[].date`; all-time totals
+  come from `summary.totals`.
+- Charts are inline `recharts` (already a dependency) with theme-matched HSL
+  literals; no new deps added.
+- Subscription cost surfaced as a badge (not `$0.00`) per the contract's note.
+
+### TODOs / future
+- byDay sparkline needs ≥2 days of data; until then a flat baseline shows.
+- Bundle is ~826kB (recharts) — fine for a local tool; could code-split later.
+
+### How to verify
+1. `cd dashboard && npm install && npx tsc -b --noEmit` — no errors in the touched
+   files (3 pre-existing `React`-unused errors in `animate/{FadeIn,Spring,Stagger}`
+   are unrelated to this iteration).
+2. `npm run build` → succeeds; `dashboard/dist` rebuilt.
+3. With the bridge up on `127.0.0.1:8765`: Overview shows today's cost + sparkline +
+   a live feed + quick-action chips, glassy radial-glow background, "Default"
+   personality when unset; `/usage` shows animated summary cards, both charts, and
+   the live feed prepending rows as you talk to Vox. With the bridge down both pages
+   degrade to empty/offline states (daemon unaffected — `vox.web` stays lazy).

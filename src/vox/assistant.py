@@ -71,6 +71,29 @@ def _record_usage(provider, model, brain, kind, usage, latency_ms):
         pass  # telemetry only — never surface to the voice loop
 
 
+def _sdk_extract_tokens(msg) -> tuple | None:
+    """Pull (input_tokens, output_tokens) from a claude-agent-sdk ResultMessage.
+
+    The ResultMessage carries the authoritative cumulative ``usage`` dict (Anthropic
+    API shape: ``input_tokens``/``output_tokens``, plus cache fields) and
+    ``total_cost_usd``. Returns a tuple when real counts are present, else None so
+    the usage store treats it as a subscription call (tokens null, cost 0).
+
+    Fully guarded: any shape mismatch returns None rather than raising — telemetry
+    must never break a reply."""
+    try:
+        u = getattr(msg, "usage", None)
+        if not isinstance(u, dict):
+            return None
+        inp = u.get("input_tokens")
+        out = u.get("output_tokens")
+        if inp is None and out is None:
+            return None
+        return (inp, out)
+    except Exception:
+        return None
+
+
 def respond(text: str, history=None, brain: str = "small") -> str:
     """One chat turn → reply text (control tag stripped)."""
     return respond_turn(text, history, brain)[0]
@@ -197,25 +220,26 @@ def _claude_sdk(text, history, model, system, brain="big", kind="chat"):
     convo = "\n".join(f"{'You' if r == 'user' else 'Vox'}: {c}" for r, c in (history or []))
     prompt = f"{convo + chr(10) if convo else ''}You: {text}"
     opts = ClaudeAgentOptions(system_prompt=system, allowed_tools=[], max_turns=6, model=model)
-    tokens = {}  # filled from a ResultMessage if the SDK exposes usage
+    captured = {}  # tokens from the ResultMessage if the SDK exposes usage
 
     async def _run():
         parts = []
         async for msg in query(prompt=prompt, options=opts):
             if isinstance(msg, AssistantMessage):
                 parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
-            u = getattr(msg, "usage", None)  # ResultMessage usage, if present
-            if isinstance(u, dict):
-                tokens["in"] = u.get("input_tokens")
-                tokens["out"] = u.get("output_tokens")
+            # The ResultMessage (has total_cost_usd) carries the cumulative usage.
+            if hasattr(msg, "total_cost_usd"):
+                got = _sdk_extract_tokens(msg)
+                if got is not None:
+                    captured["usage"] = got
         return "".join(parts).strip()
 
     t0 = time.monotonic()
     try:
         reply = asyncio.run(asyncio.wait_for(_run(), timeout=45)) or "(no response)"
         # Subscription call: tokens recorded only if the SDK exposed them (else None → cost 0).
-        usage = (tokens.get("in"), tokens.get("out")) if tokens else None
-        _record_usage("claude_sdk", model, brain, kind, usage, (time.monotonic() - t0) * 1000)
+        _record_usage("claude_sdk", model, brain, kind, captured.get("usage"),
+                      (time.monotonic() - t0) * 1000)
         return reply
     except asyncio.TimeoutError:
         return "(the brain timed out — try again)"  # never hang the loop on a wedged call
@@ -263,24 +287,24 @@ def _sdk_look(question, image_path, model, brain="small"):
     opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=8,
                               permission_mode="bypassPermissions", model=model)
 
-    tokens = {}
+    captured = {}
 
     async def _run():
         parts = []
         async for msg in query(prompt=prompt, options=opts):
             if isinstance(msg, AssistantMessage):
                 parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
-            u = getattr(msg, "usage", None)
-            if isinstance(u, dict):
-                tokens["in"] = u.get("input_tokens")
-                tokens["out"] = u.get("output_tokens")
+            if hasattr(msg, "total_cost_usd"):  # ResultMessage → cumulative usage
+                got = _sdk_extract_tokens(msg)
+                if got is not None:
+                    captured["usage"] = got
         return "".join(parts).strip()
 
     t0 = time.monotonic()
     try:
         reply = asyncio.run(asyncio.wait_for(_run(), timeout=90)) or "(no response)"
-        usage = (tokens.get("in"), tokens.get("out")) if tokens else None
-        _record_usage("claude_sdk", model, brain, "vision", usage, (time.monotonic() - t0) * 1000)
+        _record_usage("claude_sdk", model, brain, "vision", captured.get("usage"),
+                      (time.monotonic() - t0) * 1000)
         return reply
     except asyncio.TimeoutError:
         return "(vision timed out — try again)"

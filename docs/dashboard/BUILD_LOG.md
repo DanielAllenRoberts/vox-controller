@@ -52,3 +52,29 @@ Goal: make it genuinely look professional and cool — confirmed by eye, then im
 - Build the Token Usage page: `useUsageStream` on `WS /api/usage/stream`, animated `SlidingNumber` counters, recharts per-model/per-day breakdowns, live feed.
 - Refine SDK/subscription token extraction to the live SDK shape; verify `record_usage` against real provider calls end-to-end.
 - Confirm cost rendering for subscription (0) vs metered calls and the `data/usage.jsonl` read path.
+
+### Iteration 2 — Token usage & cost (2026-06-18)
+
+**Built**
+- Token Usage page (`dashboard/src/pages/TokenUsage.tsx`, replaced the ComingSoon stub): animated summary counters (violet→cyan hero cost), recharts cost-over-time area chart + tokens-by-model bar chart, and a WS-driven live feed that prepends rows.
+- New frontend pieces: `hooks/useUsageStream.ts` (parses raw camelCase `UsageEvent` JSON straight from `WS /api/usage/stream`, seeds from REST `usage/recent`, dedupes by `id`, 2s reconnect backoff), `hooks/useNow.ts`, `components/usage/LiveFeed.tsx` (shared by both pages), `components/usage/KindBadge.tsx`; shared formatters in `lib/utils.ts`.
+- Overview polish (`dashboard/src/pages/Overview.tsx`): kept all 6 status cards, added today's-cost + sparkline, live feed, quick-action chips over a radial glow; renders "Default" when `personality` is empty.
+- Backend token capture: `web/usage.py` adds `is_subscription_call()` and `maybe_seed_dev()` (+`_DEV_SEED_EVENTS`), `record_usage` now preserves `None` token counts as `null` (subscription) distinct from a true 0-token call, and `summary()`/byModel/byDay made None-safe; `web/server.py` `create_app()` calls `usage.maybe_seed_dev()` (guarded, gated on `VOX_DEV_SEED=1`); `assistant.py` adds `_sdk_extract_tokens(msg)` keyed off the claude-agent-sdk `ResultMessage` (`total_cost_usd` presence), recording `None` when tokens are absent.
+- Docs: appended "Iteration 2" sections to `docs/dashboard/frontend.md` and `docs/dashboard/backend.md`.
+
+**Decisions**
+- WS pushes raw camelCase `UsageEvent` JSON, so `useUsageStream` parses straight into the TS type with no mapping layer.
+- Subscription providers (`claude_sdk`/`claude_cli`) persist `inputTokens: null`/`outputTokens: null` (not 0) and render a subtle "subscription" badge instead of `$0.00`, so the UI distinguishes subscription from a genuine 0-token request.
+- Token extraction keys off the `ResultMessage` (the message carrying cumulative usage) rather than reading `usage` off every message, which previously also captured per-turn `AssistantMessage` usage; `_anthropic`/`_openai` already pass correct `(input,output)` tuples and were left unchanged.
+- No new deps — `recharts` and `motion` were already in `package.json`; charts use theme-matched HSL literals. All telemetry stays guarded so it can never break a reply.
+
+**Verify**
+- `cd dashboard && npx tsc -b --noEmit` clean for touched files (3 pre-existing TS6133 unused-`React` errors in `components/animate/{FadeIn,Spring,Stagger}.tsx` are unrelated and left as-is); `npm run build` succeeds with recharts/motion bundled (~826kB).
+- Backend three files `py_compile` clean; `ResultMessage` extraction, `AssistantMessage` exclusion, None-subscription recording, None-safe `summary()`, cross-thread WS delivery, dev-seed guard/idempotency, and FastAPI app build all tested green; runtime `data/usage.jsonl` restored to its original single row. No git run.
+
+**Known gaps / TODOs**
+- Sparkline needs ≥2 days of `byDay` data (flat baseline until then); bundle could be code-split later.
+- `/api/status.mode` still hardcoded `"idle"`; `usage.PRICES` are approximate; frontend should render `inputTokens: null` as "subscription" everywhere.
+
+**Next (Iteration 3 — Settings)**
+- Wire the runtime settings store so toggles take effect live; build the Settings page: brain provider/model (API vs SDK), escalation mode, feature flags.
