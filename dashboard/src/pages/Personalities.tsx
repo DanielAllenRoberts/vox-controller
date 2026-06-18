@@ -57,6 +57,83 @@ const SAY_VOICES = [
 // Sentinel for "no suggested voice" — Radix Select can't hold an empty value.
 const NO_VOICE = "__none__";
 
+// Kokoro TTS voices, grouped by language/accent for the custom-persona picker.
+// The selected id is sent as `kokoroVoice`; an empty value falls back to the
+// dashboard's global `kokoro_voice` setting. Only used when the TTS engine is
+// Kokoro. This is a plain <select> (not the Radix Select) so it can hold an
+// empty value and use native <optgroup> grouping.
+const KOKORO_VOICE_GROUPS: { label: string; voices: string[] }[] = [
+  {
+    label: "US English — Female",
+    voices: [
+      "af_alloy",
+      "af_aoede",
+      "af_bella",
+      "af_heart",
+      "af_jessica",
+      "af_kore",
+      "af_nicole",
+      "af_nova",
+      "af_river",
+      "af_sarah",
+      "af_sky",
+    ],
+  },
+  {
+    label: "US English — Male",
+    voices: [
+      "am_adam",
+      "am_echo",
+      "am_eric",
+      "am_fenrir",
+      "am_liam",
+      "am_michael",
+      "am_onyx",
+      "am_puck",
+      "am_santa",
+    ],
+  },
+  {
+    label: "British English — Female",
+    voices: ["bf_alice", "bf_emma", "bf_isabella", "bf_lily"],
+  },
+  {
+    label: "British English — Male",
+    voices: ["bm_daniel", "bm_fable", "bm_george", "bm_lewis"],
+  },
+  {
+    label: "Other languages (reads English with an accent)",
+    voices: [
+      "ef_dora",
+      "em_alex",
+      "em_santa",
+      "ff_siwis",
+      "hf_alpha",
+      "hf_beta",
+      "hm_omega",
+      "hm_psi",
+      "if_sara",
+      "im_nicola",
+      "jf_alpha",
+      "jf_gongitsune",
+      "jf_nezumi",
+      "jf_tebukuro",
+      "jm_kumo",
+      "pf_dora",
+      "pm_alex",
+      "pm_santa",
+      "zf_xiaobei",
+      "zf_xiaoni",
+      "zf_xiaoxiao",
+      "zf_xiaoyi",
+      "zm_yunjian",
+      "zm_yunxi",
+      "zm_yunxia",
+      "zm_yunyang",
+    ],
+  },
+];
+
 // The synthetic "Default" persona the bridge prepends to `presets` (id "default",
 // empty persona) — represents base Vox with no special character. Selecting it
 // DESELECTS any active persona. The bridge's set_active only accepts "" or a real
@@ -136,7 +213,14 @@ function useAddCustom(onDone: () => void) {
       persona: string;
       emoji?: string;
       suggestedVoice?: string;
-    }) => api.addCustomPersonality(body),
+      // Kokoro voice id for this persona; the backend forwards it to add_custom
+      // and the running TTS reads it (falling back to the global voice).
+      kokoroVoice?: string;
+    }) =>
+      // `api.addCustomPersonality` types its body without `kokoroVoice` (that
+      // file isn't ours to edit); spread through a const so the extra field is
+      // serialized into the POST without tripping TS's excess-property check.
+      api.addCustomPersonality({ ...body }),
     onSuccess: (created) => {
       qc.setQueryData<PersonalitiesData>(PERSONALITIES_KEY, (old) =>
         old ? { ...old, custom: [...old.custom, created] } : old,
@@ -419,12 +503,15 @@ function CreateDialog({
   const [emoji, setEmoji] = React.useState("");
   const [persona, setPersona] = React.useState("");
   const [voice, setVoice] = React.useState<string>(NO_VOICE);
+  // Kokoro voice id; "" means "use the dashboard's global kokoro_voice".
+  const [kokoroVoice, setKokoroVoice] = React.useState<string>("");
 
   const reset = React.useCallback(() => {
     setName("");
     setEmoji("");
     setPersona("");
     setVoice(NO_VOICE);
+    setKokoroVoice("");
   }, []);
 
   const addCustom = useAddCustom(() => {
@@ -441,6 +528,8 @@ function CreateDialog({
       persona: persona.trim(),
       emoji: emoji.trim() || undefined,
       suggestedVoice: voice === NO_VOICE ? undefined : voice,
+      // "" → omit so the backend falls back to the global kokoro_voice.
+      kokoroVoice: kokoroVoice || undefined,
     });
   };
 
@@ -527,6 +616,41 @@ function CreateDialog({
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="kokoro-voice"
+              className="mb-1.5 block text-xs font-medium text-foreground-secondary"
+            >
+              Voice
+              <span className="ml-1 font-normal text-foreground-muted">
+                (Kokoro)
+              </span>
+            </label>
+            {/* Native <select> (not the Radix Select) so it can hold an empty
+                value for the "Default" option and use <optgroup> grouping. */}
+            <select
+              id="kokoro-voice"
+              aria-label="Voice"
+              value={kokoroVoice}
+              onChange={(e) => setKokoroVoice(e.target.value)}
+              className="flex h-9 w-full items-center justify-between whitespace-nowrap rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-ring/60 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="">Default — use the global voice</option>
+              {KOKORO_VOICE_GROUPS.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.voices.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <p className="mt-1.5 text-xs text-foreground-muted">
+              Only used when the TTS engine is Kokoro.
+            </p>
           </div>
         </div>
 

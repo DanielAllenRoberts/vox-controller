@@ -162,6 +162,21 @@ PRESETS: list[dict] = [
     },
 ]
 
+# Per-persona Kokoro voice (persona-driven voices). Used when the TTS engine is "kokoro"; the
+# macOS "say" engine uses each preset's suggestedVoice instead. Custom personas can set their own.
+_PRESET_KOKORO = {
+    "posh-butler": "bm_george",     # formal UK butler
+    "batman": "am_onyx",            # low, gravelly
+    "jarvis": "bm_fable",           # refined UK majordomo
+    "philosopher": "am_adam",       # measured
+    "noir-detective": "am_fenrir",  # smoky, low
+    "surfer": "am_puck",            # laid-back
+    "bard": "bm_fable",             # theatrical UK
+    "sherlock": "bm_george",        # crisp UK
+}
+for _preset in PRESETS:
+    _preset["kokoroVoice"] = _PRESET_KOKORO.get(_preset["id"], "")
+
 # id → preset lookup for fast validation.
 _PRESETS_BY_ID = {p["id"]: p for p in PRESETS}
 
@@ -315,7 +330,7 @@ def set_active(pid) -> str:
     return pid
 
 
-def add_custom(name=None, persona=None, emoji=None, suggestedVoice=None, tagline=None) -> dict:
+def add_custom(name=None, persona=None, emoji=None, suggestedVoice=None, tagline=None, kokoroVoice=None) -> dict:
     """Create and persist a custom ``Personality`` (preset=False) with a slug id.
 
     ``name`` and ``persona`` are required; raises ``ValueError`` (→ 400) if either is
@@ -337,6 +352,7 @@ def add_custom(name=None, persona=None, emoji=None, suggestedVoice=None, tagline
             "tagline": (tagline or "").strip(),
             "persona": persona,
             "suggestedVoice": (suggestedVoice or "").strip() or None,
+            "kokoroVoice": (kokoroVoice or "").strip() or "",
             "preset": False,
         }
         state["custom"].append(personality)

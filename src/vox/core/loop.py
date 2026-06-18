@@ -15,7 +15,7 @@ import webbrowser
 from dotenv import load_dotenv
 
 from vox import actions, assistant, executor, sounds, tts
-from vox.audio import MicStream, capture_utterance
+from vox.audio import capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
@@ -155,13 +155,36 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     return text
 
 
-def _run_interruptible(work, frames, cfg, transcriber):
+def _passes_interrupt_gate(audio, text, cfg) -> bool:
+    """A mid-call barge-in must be REAL speech, not a blip (loop 1, O7/O8). Require the captured
+    audio to be sustained ≥ interrupt_min_seconds AND carry ≥ interrupt_min_words transcribed
+    words — mirrors livekit min_interruption_duration/min_interruption_words + pipecat's
+    MinWords strategy. Ambient TV/chatter that leaks one short word no longer cancels the call.
+    Read via the guarded _setting path so defaults are pure wins and dashboard toggles apply live."""
+    min_secs = _setting("interrupt_min_seconds", cfg.interrupt_min_seconds)
+    if min_secs and len(audio) / cfg.sample_rate < min_secs:
+        return False
+    min_words = _setting("interrupt_min_words", cfg.interrupt_min_words)
+    if min_words and len(normalize(text).split()) < min_words:
+        return False
+    return True
+
+
+def _run_interruptible(work, frames, cfg, transcriber, slow=True):
     """Run work() (a blocking LLM call) on a thread while still listening, so the user can cancel
     it by speaking a stop/sleep/quit/restart phrase (barge-in, idea #19). No echo worries — Vox
     isn't speaking during the call. Returns (result, interrupt): interrupt is None if work
     finished, else 'sleep' | 'quit' | 'restart'. An abandoned call finishes in the background and
-    its result is dropped (Python can't kill a thread)."""
-    if not _setting("barge_in_enabled", cfg.barge_in_enabled):
+    its result is dropped (Python can't kill a thread).
+
+    `slow` marks calls expected to outrun the poll loop (big-brain / vision / compose). When
+    interrupt_slow_calls_only is on (default), barge-in is NOT armed for fast calls — those finish
+    before the poll fires anyway, so arming there only wastes a capture window and risks a spurious
+    cancel (loop 1, part of O8)."""
+    arm = _setting("barge_in_enabled", cfg.barge_in_enabled)
+    if arm and _setting("interrupt_slow_calls_only", cfg.interrupt_slow_calls_only) and not slow:
+        arm = False
+    if not arm:
         return work(), None
     box: dict = {}
 
@@ -180,6 +203,8 @@ def _run_interruptible(work, frames, cfg, transcriber):
         text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
         if not text:
             continue
+        if not _passes_interrupt_gate(audio, text, cfg):
+            continue  # too short / too few words → a blip, not a barge-in; keep waiting for work()
         if _is_abort(text, cfg) or _is_sleep(text, cfg):
             return None, "sleep"
         if _is_quit(text, cfg):
@@ -193,6 +218,55 @@ def _run_interruptible(work, frames, cfg, transcriber):
     if "error" in box:
         raise box["error"]
     return box.get("result"), None
+
+
+def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
+    """Speak `spoken` while still listening, so the user can talk over the reply (loop 3 / R5).
+
+    Returns (interrupt, text):
+      • (None, None)            — the reply finished uninterrupted (the normal case).
+      • ("sleep", None)         — a stop/sleep/abort phrase cut the reply → caller goes idle.
+      • ("quit"|"restart", None)— those phrases cut the reply → caller raises.
+      • ("redirect", text)      — a real new utterance cut the reply → caller handles `text` next.
+
+    tts.speak() runs on a worker thread (it BLOCKS until the phrase finishes). Meanwhile we capture
+    utterances and apply the loop-1 _passes_interrupt_gate, so ambient blips don't cut the voice.
+    On a gated barge-in we call tts.stop_speaking() to halt Kokoro's streaming player immediately
+    and drop the unplayed audio, then return the decision.
+
+    IMPORTANT — HEADPHONES ONLY: Vox has no echo cancellation yet (loop 5 / AEC). On SPEAKERS the
+    mic hears the TTS and will interrupt Vox with its own voice. This whole path is gated OFF by
+    default (cfg.tts_interruptible) and is only armed for tts_engine=="kokoro" (the only engine
+    stop_speaking() can actually halt) — so the default speak path stays byte-for-byte unchanged."""
+    done = threading.Event()
+
+    def speaker():
+        try:
+            tts.speak(spoken)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=speaker, daemon=True)
+    t.start()
+    try:
+        while not done.is_set():
+            audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
+            if audio is None:
+                continue  # silence — keep speaking
+            text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
+            if not text or not _passes_interrupt_gate(audio, text, cfg):
+                continue  # blip / too short → not a real barge-in; let the reply continue
+            tts.stop_speaking()  # gated, real speech over the reply → cut the voice now
+            if _is_abort(text, cfg) or _is_sleep(text, cfg):
+                return "sleep", None
+            if _is_quit(text, cfg):
+                return "quit", None
+            if _is_restart(text, cfg):
+                return "restart", None
+            return "redirect", text  # anything else → handle it as the next turn
+        return None, None
+    finally:
+        done.wait()  # the speak thread BLOCKS to completion; if we cut it, stop_speaking already fired
 
 
 def _control_mode(frames, cfg, transcriber, out, mic) -> None:
@@ -252,8 +326,11 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             pending = []
         else:  # unparsed, or the deterministic attempt found no target → let the brain try
             sounds.play(cfg.sound_thinking)  # "thinking…" cue — the LLM can take a moment
+            # Control-mode executor is small-brain-first (a quick command translation) — it
+            # usually finishes before the poll loop ever captures an utterance, so arm barge-in
+            # only when interrupt_slow_calls_only is off (loop 1, O8).
             result, interrupt = _run_interruptible(
-                lambda: executor.execute(text, pending), frames, cfg, transcriber)
+                lambda: executor.execute(text, pending), frames, cfg, transcriber, slow=False)
             if interrupt == "quit":
                 raise _Quit
             if interrupt == "restart":
@@ -333,8 +410,10 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
                 continue
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
+        # Assistant chat is the slow path (full conversational reply, may escalate to the big
+        # brain) — worth arming barge-in so a long answer can be cut off (loop 1).
         result, interrupt = _run_interruptible(
-            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber)
+            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber, slow=True)
         if interrupt == "quit":
             raise _Quit
         if interrupt == "restart":
@@ -351,8 +430,35 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         shown, spoken = assistant.split_say(reply)  # brain may pick a shorter spoken version
         history += [("user", text), ("assistant", shown)]
         out.emit(f"  🔊 {shown}" + ("  (…your turn)" if expecting_answer else ""))
+        # Interruptible speaking (loop 3): only when tts_interruptible is ON *and* the engine is
+        # kokoro (the streaming player stop_speaking() can actually halt). HEADPHONES-only — no AEC
+        # yet, so on speakers the mic would hear the TTS. OFF by default → the original blocking
+        # speak + mic.flush path below, byte-for-byte unchanged.
+        if _setting("tts_interruptible", cfg.tts_interruptible) \
+                and _setting("tts_engine", cfg.tts_engine) == "kokoro":
+            interrupt, spoke_text = _speak_interruptible(spoken, frames, cfg, transcriber, mic)
+            mic.flush()  # drop any residual audio captured during/after the reply
+            if interrupt == "quit":
+                raise _Quit
+            if interrupt == "restart":
+                raise _Restart
+            if interrupt == "sleep":  # talked "stop"/"sleep" over the reply → cancel, go idle
+                sounds.play(cfg.sound_sleep)
+                out.emit("○ Sleeping.")
+                return None
+            if interrupt == "redirect":  # talked a new utterance over the reply → handle it next
+                out.emit(f"  ⤳ you cut in — handling {spoke_text!r}")
+                redirect = spoke_text
+                continue
+            if not expecting_answer:  # [DONE] → spoke through, exchange is over → back to idle
+                out.emit("  ✓ done — back to idle (say \"Hey Vox\" to chat again)")
+                return return_to
+            continue
         tts.speak(spoken)
         mic.flush()  # drop our own TTS audio so we don't hear ourselves
+        if not expecting_answer:  # [DONE] → the exchange reached a stopping point → back to idle
+            out.emit("  ✓ done — back to idle (say \"Hey Vox\" to chat again)")
+            return return_to
 
 
 def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
@@ -402,7 +508,7 @@ def main() -> None:
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
     try:
-        with MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device) as mic:
+        with open_mic_stream(cfg) as mic:
             frames = mic.frames()
             # _Quit/_Restart are handled INSIDE the `with` (not propagated out) so we never run
             # MicStream.__exit__: PortAudio's Pa_StopStream → CoreAudio DeviceStop can deadlock and

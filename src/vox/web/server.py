@@ -236,6 +236,8 @@ def create_app() -> FastAPI:
                 persona=body.get("persona"),
                 emoji=body.get("emoji"),
                 suggestedVoice=body.get("suggestedVoice"),
+                kokoroVoice=body.get("kokoroVoice"),
+                tagline=body.get("tagline"),
             )
         except ValueError as exc:  # missing name/persona
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
