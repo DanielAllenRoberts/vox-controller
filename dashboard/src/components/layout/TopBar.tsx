@@ -4,8 +4,14 @@ import { Badge } from "@/components/ui/badge";
 import type { Status } from "@/lib/api";
 
 // 56px sticky glass top bar. Left: product mark + live listening status.
-// Right: ⌘K affordance (scaffold) + brain + personality chips (ui.md §5).
-export function TopBar({ status }: { status?: Status }) {
+// Right: ⌘K command-palette trigger + brain + personality chips (ui.md §5).
+export function TopBar({
+  status,
+  onOpenPalette,
+}: {
+  status?: Status;
+  onOpenPalette?: () => void;
+}) {
   const listening = !!status?.running;
 
   return (
@@ -21,9 +27,9 @@ export function TopBar({ status }: { status?: Status }) {
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className="hidden items-center gap-1.5 rounded-lg border border-border-strong px-2.5 py-1 text-xs text-foreground-muted transition-colors hover:text-foreground sm:flex"
-          aria-label="Command palette (coming soon)"
-          disabled
+          onClick={onOpenPalette}
+          className="hidden items-center gap-1.5 rounded-lg border border-border-strong px-2.5 py-1 text-xs text-foreground-muted transition-colors hover:border-accent/40 hover:text-foreground sm:flex"
+          aria-label="Open command palette"
         >
           <Command className="h-3 w-3" />K
         </button>

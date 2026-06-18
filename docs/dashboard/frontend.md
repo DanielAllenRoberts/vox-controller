@@ -337,3 +337,81 @@ type changes were needed.
    dialog → DELETE removes it. With no custom personas the section shows the empty
    state. With the bridge down: offline notice; a failed activate rolls back +
    error toast (daemon unaffected — `vox.web` stays lazy).
+
+---
+
+## App shell + Command palette (iteration 5 — frontend agent)
+
+Owns the shared frontend chrome: `src/App.tsx` (router), `src/components/layout/*`
+(AppShell, SideNav, TopBar, nav.ts), `src/lib/api.ts`, plus the new
+`src/components/CommandPalette.tsx`.
+
+### Router + nav (verified, no change needed)
+The scaffold (iterations 1–4) already wires all 7 routes in `App.tsx`
+(`/`, `/usage`, `/settings`, `/personalities`, `/axtree`, `/rules`, `/memory`,
+plus a `*` → Overview fallback) and lists the matching `NAV_ITEMS` in
+`layout/nav.ts` (AX Tree, Rules, Memory present, correct icons + paths). The
+SideNav renders them with the animated `layoutId` gradient indicator. Left
+as-is — adding/duplicating routes would have been redundant.
+
+### lib/api.ts (verified, no change needed)
+Already exposes the full typed client + every TS type from CONTRACT.md
+(`Status`, `UsageEvent/Summary`, `Setting`, `Personality/Personalities`, `Rule`,
+`Memory`, `AxNode/AxTree/AxTreeError`) and helpers for status, usage, settings,
+personalities (incl. `setActivePersonality`), rules, memory, and axtree, plus
+`usageStreamUrl()` for the WS. Camel-case shapes match the bridge. The command
+palette consumes `api.personalities` + `api.setActivePersonality` from here;
+page agents rely on the rest (or fall back to direct fetch).
+
+### Command palette — `src/components/CommandPalette.tsx`
+A glassy ⌘K modal, mounted **once** in `AppShell`, toggled by a global
+`Cmd/Ctrl+K` handler (in AppShell) or the TopBar ⌘K button (now enabled, wired
+via the `onOpenPalette` prop). Portals to `document.body` at `z-[100]`.
+
+- **Search:** dependency-free subsequence `fuzzyScore()` (scoped to this file)
+  ranks commands across label + keywords; contiguous/early matches win, ties
+  break toward shorter targets. Empty query shows everything, grouped.
+- **Actions (3 groups):** *Navigate* → any of the 7 pages (from `NAV_ITEMS`,
+  single source of truth); *Personalities* → activate any preset/custom persona
+  (lazy-fetched via react-query the first time the palette opens; POSTs
+  `/api/personalities/active`, then invalidates `["status"]` + `["personalities"]`
+  so the TopBar chip + Personalities page update, and toasts); *Links* → open the
+  GitHub repo.
+- **Keyboard:** ↑/↓ wrap-around through the flat ranked list, Enter runs the
+  active row, Esc / scrim-click / ⌘K closes. Active row auto-scrolls into view;
+  mouse hover syncs the active index. Input auto-focuses on open; query +
+  selection reset each open.
+- **Design:** `.glass` card, brand-gradient hairline at the top edge, accent
+  (violet) active state with a subtle ring/glow on the leading icon tile,
+  section overlines, spring open/close via the existing `motion` dep,
+  reduced-motion aware (opacity-only fallback), footer hint bar (↑↓ / ↵). Empty
+  state for no matches.
+- **Resilience:** personality fetch failure degrades gracefully (palette still
+  navigates); a failed activate shows an error toast and never throws. No new
+  deps; no daemon touch points.
+
+### Files touched
+- `src/components/CommandPalette.tsx` (new)
+- `src/components/layout/AppShell.tsx` (mount palette + global ⌘K hotkey)
+- `src/components/layout/TopBar.tsx` (enable ⌘K button, `onOpenPalette` prop)
+- `App.tsx`, `lib/api.ts`, `layout/nav.ts`, `layout/SideNav.tsx`: verified
+  contract-correct, left unchanged.
+
+### Decisions / TODOs
+- Palette state lives in AppShell (closest common owner of TopBar + hotkey); no
+  global store added for one boolean.
+- Personalities fetched lazily on first open (not on shell mount) to avoid an
+  extra request for users who never open the palette.
+- No "recent actions" / command history (not requested; would need persistence).
+- GitHub link is the only quick link; more can be appended to `linkCmds`.
+
+### How to verify
+1. `cd dashboard && npx tsc -b --noEmit` — the only errors are in `AxTree.tsx`
+   (owned by the AX Tree page agent); the shell/palette/api files are clean.
+2. `npm run build` once AxTree typechecks → `dashboard/dist` rebuilt.
+3. In the app: press `⌘K` (or `Ctrl+K`, or click the ⌘K chip) → glass palette
+   springs in. Type "mem" → Memory ranks first; Enter navigates there and the
+   palette closes. Type a persona name (e.g. "batman") → activating it moves the
+   TopBar personality badge + toasts. ↑/↓ move selection, Esc closes. With the
+   bridge down, navigation still works and persona activation shows an error
+   toast without breaking the page.

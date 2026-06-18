@@ -70,6 +70,39 @@ def _active_persona() -> str:
     return CONFIG.personality or ""
 
 
+def _rules_block() -> str:
+    """The user's enabled custom rules, rendered for the system prompt.
+
+    Reads the dashboard's rules store (vox.web.rules.enabled_rules_text()). Fully
+    guarded: if the module is missing or broken, return "" so the daemon behaves
+    exactly as today (no rules layered on)."""
+    try:
+        from vox.web import rules
+        text = (rules.enabled_rules_text() or "").strip()
+        if text:
+            return ("Additional rules from the user (follow these, they override "
+                    f"defaults where they conflict):\n{text}")
+    except Exception:
+        pass
+    return ""
+
+
+def _memory_block(user_text: str) -> str:
+    """The most relevant remembered facts for this turn, rendered for the system prompt.
+
+    Reads vox.memory.recall(user_text, k=3). Fully guarded: if the module is missing
+    or broken, return "" so the daemon behaves exactly as today (no memories layered on)."""
+    try:
+        from vox import memory
+        hits = memory.recall(user_text, k=3) or []
+        lines = [f"• {(h.get('text') or '').strip()}" for h in hits if (h.get("text") or "").strip()]
+        if lines:
+            return "Things you remember about the user (use if relevant):\n" + "\n".join(lines)
+    except Exception:
+        pass
+    return ""
+
+
 def _record_usage(provider, model, brain, kind, usage, latency_ms):
     """Record one LLM call for the dashboard (token usage / cost). LAZY + GUARDED: a missing or
     broken vox.web.usage module must NEVER break a reply — recording is best-effort telemetry.
@@ -125,6 +158,10 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     persona = _active_persona()
     system = _SYSTEM if not persona else \
         f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {persona}"
+    # Layer the user's dashboard rules + relevant memories on top (both guarded → no-op if absent).
+    for block in (_rules_block(), _memory_block(text)):
+        if block:
+            system = f"{system}\n\n{block}"
     raw = complete(text, history, brain=brain, system=system)
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):

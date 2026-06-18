@@ -67,6 +67,36 @@ def _try_import(name: str):
         return None
 
 
+# --- Small response helpers --------------------------------------------------
+# Keep error shapes consistent across the write routes and never let bad input
+# (or a half-built feature module) turn into a 500.
+
+def _bad_request(message: str) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": message}, status_code=400)
+
+
+def _not_found(what: str) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": f"{what} not found"}, status_code=404)
+
+
+def _service_unavailable(what: str) -> JSONResponse:
+    return JSONResponse(
+        {"ok": False, "error": f"{what} module not available"}, status_code=503
+    )
+
+
+async def _json_body(request: Request):
+    """Parse a JSON object body. Returns ``(body, None)`` on success, or
+    ``({}, JSONResponse)`` with a 400 when the body is missing/not a JSON object."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {}, _bad_request("request body must be valid JSON")
+    if not isinstance(body, dict):
+        return {}, _bad_request("request body must be a JSON object")
+    return body, None
+
+
 def _apply_suggested_voice(mod) -> None:
     """If the now-active persona declares a ``suggestedVoice``, persist it as the TTS
     voice via settings_store so spoken output matches the character. Fully guarded and
@@ -209,55 +239,127 @@ def create_app() -> FastAPI:
     @app.get("/api/rules")
     def get_rules() -> list:
         mod = _try_import("rules")
-        return mod.list_rules() if mod else []
+        if mod is None:
+            return []
+        try:
+            return mod.list_rules()
+        except Exception:  # never 500 a list read
+            return []
 
     @app.post("/api/rules")
-    async def add_rule(request: Request) -> dict:
+    async def add_rule(request: Request):
         mod = _try_import("rules")
         if mod is None:
-            return {"ok": False}
-        body = await request.json()
-        return mod.add_rule(body.get("text", ""))
+            return []  # rules module not present yet → list stays empty
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return _bad_request("'text' is required and must be a non-empty string")
+        try:
+            return mod.add_rule(text.strip())
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add rule: {exc}")
 
-    @app.patch("/api/rules/{rid}")
-    async def update_rule(rid: str, request: Request) -> dict:
+    @app.patch("/api/rules/{the_id}")
+    async def update_rule(the_id: str, request: Request):
         mod = _try_import("rules")
         if mod is None:
-            return {"ok": False}
-        body = await request.json()
-        return mod.update_rule(rid, **body)
+            return _not_found("rule")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        # Only forward known, well-typed fields so a bad payload can't crash the
+        # store. At least one of text/enabled must be present.
+        patch: dict = {}
+        if "text" in body:
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return _bad_request("'text' must be a non-empty string")
+            patch["text"] = text.strip()
+        if "enabled" in body:
+            enabled = body.get("enabled")
+            if not isinstance(enabled, bool):
+                return _bad_request("'enabled' must be a boolean")
+            patch["enabled"] = enabled
+        if not patch:
+            return _bad_request("provide at least one of 'text' or 'enabled'")
+        try:
+            updated = mod.update_rule(the_id, **patch)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not update rule: {exc}")
+        if not updated:
+            return _not_found("rule")
+        return updated
 
-    @app.delete("/api/rules/{rid}")
-    def remove_rule(rid: str) -> dict:
+    @app.delete("/api/rules/{the_id}")
+    def remove_rule(the_id: str):
         mod = _try_import("rules")
         if mod is None:
-            return {"ok": False}
-        return {"ok": bool(mod.remove_rule(rid))}
+            return _not_found("rule")
+        try:
+            removed = bool(mod.remove_rule(the_id))
+        except Exception as exc:
+            return _bad_request(f"could not remove rule: {exc}")
+        if not removed:
+            return _not_found("rule")
+        return {"ok": True}
 
     # --- Memory (guarded; src/vox/memory.py) ---
     @app.get("/api/memory")
-    def get_memory(query: str = "", limit: int = 20) -> list:
+    def get_memory(query: str = "", limit: int = 20):
         mod = _try_import_memory()
         if mod is None:
             return []
-        if query and query.strip():
-            return mod.recall(query, k=limit)
-        return mod.all()[: limit if limit and limit > 0 else None]
+        # Clamp limit to a sane positive bound; a non-positive limit means "all".
+        k = limit if isinstance(limit, int) and limit > 0 else None
+        try:
+            if query and query.strip():
+                # recall needs a concrete k; fall back to a generous default.
+                return mod.recall(query.strip(), k=k or 50)
+            records = mod.all()
+            return records[:k] if k else records
+        except Exception:  # never 500 a list read
+            return []
 
     @app.post("/api/memory")
-    async def add_memory(request: Request) -> dict:
+    async def add_memory(request: Request):
         mod = _try_import_memory()
         if mod is None:
-            return {"ok": False}
-        body = await request.json()
-        return mod.add(body.get("text", ""), body.get("tags") or [])
+            return _service_unavailable("memory")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return _bad_request("'text' is required and must be a non-empty string")
+        tags = body.get("tags")
+        if tags is None:
+            tags = []
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            return _bad_request("'tags' must be a list of strings")
+        try:
+            return mod.add(text.strip(), tags)
+        except Exception as exc:
+            return _bad_request(f"could not add memory: {exc}")
 
-    @app.delete("/api/memory/{mid}")
-    def remove_memory(mid: str) -> dict:
+    @app.delete("/api/memory/{the_id}")
+    def remove_memory(the_id: str):
         mod = _try_import_memory()
         if mod is None:
-            return {"ok": False}
-        return {"ok": bool(mod.remove(mid))}
+            return _not_found("memory")
+        try:
+            removed = bool(mod.remove(the_id))
+        except Exception as exc:
+            return _bad_request(f"could not remove memory: {exc}")
+        if not removed:
+            return _not_found("memory")
+        return {"ok": True}
 
     # --- AX tree (guarded) ---
     @app.get("/api/axtree")
@@ -265,7 +367,10 @@ def create_app() -> FastAPI:
         mod = _try_import("axtree")
         if mod is None:
             return {"error": "AX tree module not available"}
-        return mod.snapshot()
+        try:
+            return mod.snapshot()
+        except Exception as exc:  # snapshot() shouldn't raise, but never 500
+            return {"error": f"accessibility read failed: {exc}"}
 
     # --- Static dashboard + SPA fallback ---
     _mount_static(app)
