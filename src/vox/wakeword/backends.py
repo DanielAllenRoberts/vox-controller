@@ -97,6 +97,7 @@ def make_backend(cfg, transcriber, out=None):
         [("control", cfg.control_phrases),
          ("assistant", cfg.assistant_phrases),
          ("dictation", dictate_from_idle),
+         ("dashboard", cfg.open_dashboard_phrases),
          ("quit", cfg.quit_phrases),
          ("restart", cfg.restart_phrases)],
         transcriber, cfg,
