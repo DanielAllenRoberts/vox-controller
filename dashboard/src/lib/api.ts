@@ -130,6 +130,42 @@ export interface AxTreeError {
   error: string;
 }
 
+// Monthly cost budget meter — mirrors usage.budget_status() (backend.md §it.7).
+// `state`: none (no budget set) · ok · warn (>=80%) · over (>=100%).
+// remainingUsd may go negative when over budget (the meter shows the overspend).
+export type BudgetState = "none" | "ok" | "warn" | "over";
+
+export interface BudgetStatus {
+  budgetUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+  percent: number;
+  state: BudgetState;
+}
+
+// Either route may return a plain { error } when its bridge module is absent
+// or a read fails (the FastAPI bridge returns HTTP 200 with this body).
+export interface ApiErrorBody {
+  error: string;
+}
+
+// Diagnostics snapshot — shape is owned by the diagnostics agent (a flat record
+// of health probes). Typed openly so the page can render whatever lands; the
+// `error` field is present when the bridge module is missing or the read fails.
+export interface Diagnostics {
+  error?: string;
+  [key: string]: unknown;
+}
+
+export function isApiError(value: unknown): value is ApiErrorBody {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "error" in value &&
+    typeof (value as { error: unknown }).error === "string"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Fetch client
 // ---------------------------------------------------------------------------
@@ -229,6 +265,12 @@ export const api = {
     request<{ ok: boolean }>(`/memory/${id}`, { method: "DELETE" }),
 
   axtree: () => request<AxTree | AxTreeError>("/axtree"),
+
+  // Iteration 7 — cost budget meter + runtime diagnostics. Both routes return
+  // HTTP 200 even when their bridge module is absent, with an { error } body;
+  // callers should narrow with isApiError() before reading the typed fields.
+  budget: () => request<BudgetStatus | ApiErrorBody>("/budget"),
+  diagnostics: () => request<Diagnostics>("/diagnostics"),
 };
 
 // WebSocket URL for the live usage stream (CONTRACT.md WS /api/usage/stream).

@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { motion } from "motion/react";
 import {
   Area,
   AreaChart,
@@ -19,6 +20,9 @@ import {
   BarChart3,
   TrendingUp,
   Sparkles,
+  Wallet,
+  Settings as SettingsIcon,
+  AlertTriangle,
 } from "lucide-react";
 import { api, type UsageSummary, type UsageEvent } from "@/lib/api";
 import { formatCost, formatTokens } from "@/lib/utils";
@@ -31,6 +35,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LiveFeed } from "@/components/usage/LiveFeed";
 import { useUsageStream } from "@/hooks/useUsageStream";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
 
 // Accent palette for per-model bars (violet→cyan family + semantics).
 const BAR_COLORS = [
@@ -40,6 +45,247 @@ const BAR_COLORS = [
   "hsl(160 64% 52%)", // emerald
   "hsl(43 96% 56%)", // amber
 ];
+
+// ---------------------------------------------------------------------------
+// Cost budget widget
+// ---------------------------------------------------------------------------
+//
+// Reads GET /api/budget. The budget route lives in the Python bridge but is
+// NOT in the typed `api` client (lib/api.ts is owned by another agent), so we
+// fetch it directly here, mirroring lib/api.ts's API_BASE resolution.
+
+type BudgetState = "ok" | "warn" | "over" | "none";
+
+interface Budget {
+  budgetUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+  percent: number;
+  state: BudgetState;
+}
+
+interface BudgetError {
+  error: string;
+}
+
+const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
+
+async function fetchBudget(): Promise<Budget | BudgetError> {
+  const res = await fetch(`${API_BASE}/api/budget`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    return { error: `budget request failed (${res.status})` };
+  }
+  return (await res.json()) as Budget | BudgetError;
+}
+
+// Per-state accent: ok=violet→cyan, warn=amber, over=red. Drives both the ring
+// stroke and the surrounding glow so the card reads at a glance.
+const BUDGET_THEME: Record<
+  Exclude<BudgetState, "none">,
+  { from: string; to: string; badge: "accent" | "warning" | "danger"; label: string }
+> = {
+  ok: { from: "hsl(258 90% 66%)", to: "hsl(187 85% 53%)", badge: "accent", label: "On track" },
+  warn: { from: "hsl(43 96% 56%)", to: "hsl(38 92% 50%)", badge: "warning", label: "Approaching limit" },
+  over: { from: "hsl(0 91% 71%)", to: "hsl(0 84% 60%)", badge: "danger", label: "Over budget" },
+};
+
+function BudgetRing({
+  percent,
+  from,
+  to,
+}: {
+  percent: number;
+  from: string;
+  to: string;
+}) {
+  const reduced = useReducedMotion();
+  const size = 132;
+  const stroke = 11;
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  // Cap the visible arc at 100% even when over budget; the badge/figures carry
+  // the "over" story so the ring stays legible.
+  const frac = Math.max(0, Math.min(1, percent / 100));
+  const dash = circ * frac;
+  const gradId = "budgetRing";
+
+  return (
+    <svg width={size} height={size} className="-rotate-90" role="img" aria-label={`${Math.round(percent)}% of budget used`}>
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor={from} />
+          <stop offset="100%" stopColor={to} />
+        </linearGradient>
+      </defs>
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="hsl(240 4% 16%)"
+        strokeWidth={stroke}
+      />
+      <motion.circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke={`url(#${gradId})`}
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={circ}
+        initial={reduced ? { strokeDashoffset: circ - dash } : { strokeDashoffset: circ }}
+        animate={{ strokeDashoffset: circ - dash }}
+        transition={reduced ? { duration: 0 } : { type: "spring", stiffness: 120, damping: 22 }}
+      />
+    </svg>
+  );
+}
+
+function BudgetEmptyState() {
+  return (
+    <div className="flex flex-col items-center gap-3 py-6 text-center sm:flex-row sm:items-center sm:py-2 sm:text-left">
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-border bg-muted/40">
+        <Wallet className="h-5 w-5 text-foreground-muted" />
+      </div>
+      <div className="flex-1">
+        <p className="text-sm font-medium text-foreground">No monthly budget set</p>
+        <p className="mt-0.5 text-xs text-foreground-muted">
+          Set a spend cap to track cost against a target.
+        </p>
+      </div>
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-border-strong px-2.5 py-1 text-xs text-foreground-secondary">
+        <SettingsIcon className="h-3.5 w-3.5" />
+        Settings → Monthly budget
+      </span>
+    </div>
+  );
+}
+
+function BudgetWidget() {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["budget"],
+    queryFn: fetchBudget,
+    refetchInterval: 10_000,
+  });
+
+  // Treat any error / unavailable backend as "no budget set" — the widget is
+  // additive and must never look broken if the budget module isn't wired up.
+  const budget =
+    data && !("error" in data) ? (data as Budget) : null;
+  const state: BudgetState = budget?.state ?? "none";
+  const hasBudget = budget !== null && state !== "none" && budget.budgetUsd > 0;
+
+  return (
+    <FadeIn className="mt-6">
+      <Card glass className="relative overflow-hidden p-5">
+        {hasBudget && (
+          <div
+            className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full opacity-25 blur-3xl"
+            style={{
+              background: `radial-gradient(circle, ${BUDGET_THEME[state as "ok" | "warn" | "over"].from}, transparent 70%)`,
+            }}
+          />
+        )}
+        <div className="mb-4 flex items-center justify-between">
+          <span className="flex items-center gap-2 text-overline uppercase text-foreground-muted">
+            <Wallet className="h-3.5 w-3.5" />
+            Cost budget
+          </span>
+          {hasBudget ? (
+            <Badge variant={BUDGET_THEME[state as "ok" | "warn" | "over"].badge}>
+              {state === "over" && <AlertTriangle className="h-3 w-3" />}
+              {BUDGET_THEME[state as "ok" | "warn" | "over"].label}
+            </Badge>
+          ) : (
+            <span className="text-xs text-foreground-muted">monthly</span>
+          )}
+        </div>
+
+        {isLoading ? (
+          <div className="flex items-center gap-6">
+            <div className="h-[132px] w-[132px] shrink-0 animate-pulse rounded-full bg-muted/40" />
+            <div className="flex-1 space-y-2">
+              <div className="h-4 w-32 animate-pulse rounded bg-muted/40" />
+              <div className="h-3 w-24 animate-pulse rounded bg-muted/30" />
+            </div>
+          </div>
+        ) : !hasBudget ? (
+          <BudgetEmptyState />
+        ) : (
+          <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center">
+            <div className="relative grid shrink-0 place-items-center">
+              <BudgetRing
+                percent={budget!.percent}
+                from={BUDGET_THEME[state as "ok" | "warn" | "over"].from}
+                to={BUDGET_THEME[state as "ok" | "warn" | "over"].to}
+              />
+              <div className="absolute flex flex-col items-center">
+                <SlidingNumber
+                  value={budget!.percent}
+                  decimals={budget!.percent < 10 ? 1 : 0}
+                  suffix="%"
+                  className="text-2xl font-semibold text-foreground"
+                />
+                <span className="text-[11px] uppercase tracking-wide text-foreground-muted">
+                  used
+                </span>
+              </div>
+            </div>
+
+            <div className="grid w-full grid-cols-1 gap-4 sm:grid-cols-3">
+              <div>
+                <div className="text-overline uppercase text-foreground-muted">Spent</div>
+                <div className="mt-1 text-lg font-semibold text-foreground">
+                  <SlidingNumber
+                    value={budget!.spentUsd}
+                    decimals={budget!.spentUsd < 1 ? 3 : 2}
+                    prefix="$"
+                  />
+                </div>
+                <div className="mt-0.5 text-xs text-foreground-muted">
+                  of {formatCost(budget!.budgetUsd)}
+                </div>
+              </div>
+              <div>
+                <div className="text-overline uppercase text-foreground-muted">Remaining</div>
+                <div
+                  className={`mt-1 text-lg font-semibold ${
+                    state === "over" ? "text-danger" : "text-foreground"
+                  }`}
+                >
+                  <SlidingNumber
+                    value={Math.abs(budget!.remainingUsd)}
+                    decimals={Math.abs(budget!.remainingUsd) < 1 ? 3 : 2}
+                    prefix={budget!.remainingUsd < 0 ? "-$" : "$"}
+                  />
+                </div>
+                <div className="mt-0.5 text-xs text-foreground-muted">
+                  {state === "over" ? "over the cap" : "left this month"}
+                </div>
+              </div>
+              <div>
+                <div className="text-overline uppercase text-foreground-muted">Budget</div>
+                <div className="mt-1 text-lg font-semibold text-foreground">
+                  {formatCost(budget!.budgetUsd)}
+                </div>
+                <div className="mt-0.5 text-xs text-foreground-muted">monthly cap</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isError && !budget && (
+          <p className="mt-3 text-xs text-foreground-muted">
+            Budget data unavailable — showing the unset state.
+          </p>
+        )}
+      </Card>
+    </FadeIn>
+  );
+}
 
 function shortModel(model: string): string {
   if (!model) return "—";
@@ -149,8 +395,11 @@ export function TokenUsage() {
         </Card>
       )}
 
+      {/* Cost budget — spend-vs-cap ring, color-shifting by state. */}
+      <BudgetWidget />
+
       {/* Summary cards — animated counters. The cost card is the violet→cyan hero. */}
-      <Stagger className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+      <Stagger className="mt-6 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
         <StaggerItem>
           <Card glass className="relative overflow-hidden p-5">
             <div className="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full bg-brand-gradient opacity-20 blur-2xl" />
