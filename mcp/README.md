@@ -30,7 +30,7 @@ Add to `.cursor/mcp.json` (project-level) or your global Cursor MCP settings:
     "vox-speak": {
       "command": "uv",
       "args": ["run", "python", "mcp/vox_speak_server.py"],
-      "cwd": "/Users/danielroberts/Repos/Personal/vox-controller"
+      "cwd": "/ABSOLUTE/PATH/TO/vox-controller"
     }
   }
 }
