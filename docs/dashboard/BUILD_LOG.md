@@ -242,3 +242,24 @@ A parallel-agent creative round adding four user-facing features full-stack (sto
 **Next (Iterations 8–10 — more end-to-end coverage, final polish, README)**
 - Iteration 8–9: broaden end-to-end coverage (write-path round-trips, error contracts, the new budget/diagnostics routes + widgets against the live daemon), wire the budget/diagnostics CONTRACT.md entries + typed-client consumption, and final UI polish (empty/error states, animations, theme edge cases).
 - Iteration 10: full docs + README + run steps, final frontend build + smoke test, changelog/demo script.
+
+### Iteration 8 — Finalize (2026-06-18)
+
+The finalize pass: tied off the iteration-7 "Next" items, wrote the dashboard README, and ran a clean-room QA sweep. Strictly additive/cosmetic — no daemon touch points changed, the guarded-additive invariant holds, and no git run.
+
+**Tidy / cleanup**
+- Closed the iter-7 integration debt so the budget + diagnostics widgets stop reaching around the typed client: `GET /api/budget` and `GET /api/diagnostics` are now first-class entries in `docs/dashboard/CONTRACT.md`, and the page widgets consume `api.budget()` / `api.diagnostics()` from `dashboard/src/lib/api.ts` instead of their local direct-`fetch` shims (the `Diagnostics` TS type tightened to the real nested backend shape).
+- Touched only the files carrying that debt: `dashboard/src/lib/api.ts`, `dashboard/src/pages/Overview.tsx` (System Health card → typed `api.diagnostics()`), `dashboard/src/pages/TokenUsage.tsx` (Cost Budget widget → typed `api.budget()`), and `docs/dashboard/CONTRACT.md`. No store/route signatures changed; no new deps.
+
+**README**
+- Wrote `docs/dashboard/README.md` (NEW, 183 lines) — the dashboard's front-door doc: what the Control Center is, the additive/guarded design promise ("the voice assistant runs unchanged if `vox.web` is absent, half-built, or broken"), the full feature tour (Overview, Token Usage + cost, Cost budget, Settings, Personalities, AX Tree, Rules, Memory, command palette, themes/shortcuts), how to run it (bridge + Vite dev, or the daemon-served prod build at `http://127.0.0.1:8765`), the "open dashboard" wake phrase, and the loopback-only / no-committed-runtime-data safety posture. The repo-root `README.md` (M0-scoped voice daemon) was intentionally left unchanged — the dashboard is documented under `docs/dashboard/` to keep the public root README focused on the daemon.
+
+**Final QA results**
+- Build clean: `cd dashboard && npm run build` exits 0 — 2702 modules transformed, `dist/assets/index-*.js` ~979kB (gzip ~289kB), `index-*.css` ~43kB; only the known >500kB chunk-size advisory (non-blocking, code-split deferred).
+- Daemon imports clean: `import vox.config, vox.core.loop, vox.assistant, vox.executor, vox.wakeword.backends` all import with the dashboard code present (the guarded-additive invariant verified once more — the daemon still doesn't depend on `vox.web`).
+- Endpoints pass: `create_app()` builds with 20 `/api` routes registered; all 10 read endpoints (`/api/status`, `/api/usage/recent`, `/api/usage/summary`, `/api/settings`, `/api/personalities`, `/api/rules`, `/api/memory`, `/api/axtree`, `/api/budget`, `/api/diagnostics`) return HTTP 200 via TestClient with zero failures and no 500s.
+
+**Feature set is complete.** All ten roadmap areas are built and full-stack (store/module → guarded route → typed client → page): Overview/diagnostics, Token Usage + cost + budget, Settings, Personalities, AX Tree, Rules, Memory, plus the creative layer (command palette, themes, keyboard shortcuts). The only remaining step is a final visual QA pass (Playwright over every page at desktop + mobile widths per the Visual QA section) and the wrap-up (commit, changelog/demo script).
+
+**Next (final wrap-up)**
+- Run the Playwright visual QA sweep across all pages at 1440px + mobile, write the critique, fix any visual rough edges, then do the closing commit + changelog/demo script.

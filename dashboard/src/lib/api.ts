@@ -149,12 +149,24 @@ export interface ApiErrorBody {
   error: string;
 }
 
-// Diagnostics snapshot — shape is owned by the diagnostics agent (a flat record
-// of health probes). Typed openly so the page can render whatever lands; the
-// `error` field is present when the bridge module is missing or the read fails.
+// Diagnostics snapshot — mirrors diagnostics.snapshot() (backend diagnostics.py).
+// All nested fields are read defensively by the page: brain/stt strings can be
+// the backend "unknown" sentinel, and the whole envelope may instead be { error }
+// when the bridge module is missing or a read fails (HTTP 200 either way).
+export interface DiagnosticsBrain {
+  provider: string;
+  model: string;
+}
+
 export interface Diagnostics {
+  capturedAt?: string;
+  platform?: string;
+  process?: { cpuPercent: number; memMb: number; uptimeSeconds: number };
+  stt?: { model: string; computeType: string; sampleRate: number };
+  smallBrain?: DiagnosticsBrain;
+  bigBrain?: DiagnosticsBrain;
+  tts?: { enabled: boolean; voice: string };
   error?: string;
-  [key: string]: unknown;
 }
 
 export function isApiError(value: unknown): value is ApiErrorBody {
@@ -219,7 +231,7 @@ export const api = {
 
   personalities: () => request<Personalities>("/personalities"),
   setActivePersonality: (id: string) =>
-    request<{ ok: boolean }>("/personalities/active", {
+    request<{ ok: boolean; active: string }>("/personalities/active", {
       method: "POST",
       body: JSON.stringify({ id }),
     }),
