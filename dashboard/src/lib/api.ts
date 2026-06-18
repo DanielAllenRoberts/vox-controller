@@ -298,6 +298,7 @@ export const api = {
     persona: string;
     emoji?: string;
     suggestedVoice?: string;
+    kokoroVoice?: string;
   }) =>
     request<Personality>("/personalities/custom", {
       method: "POST",

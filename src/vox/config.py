@@ -102,7 +102,44 @@ class Config:
     # "quit" can cancel it (no echo worries — Vox isn't speaking then). False = wait it out.
     barge_in_enabled: bool = True
     barge_in_poll_seconds: float = 0.8   # interrupt-listener re-check interval during a call
+    # Barge-in gate (loop 1): a mid-call interruption must be REAL speech, not a blip — sustained
+    # ≥ interrupt_min_seconds of captured audio AND ≥ interrupt_min_words transcribed words.
+    # Mirrors livekit min_interruption_duration/min_interruption_words + pipecat MinWords strategy.
+    # Targets O7 (ambient/speaker audio falsely interrupting) and O8 (flaky barge-in).
+    interrupt_min_words: int = 1         # ≥ this many transcribed words before a barge-in counts
+    interrupt_min_seconds: float = 0.4   # captured audio must be at least this long to count
+    # Only arm the interrupt-listener for SLOW calls (big-brain / vision / compose). Fast
+    # small-brain/deterministic calls finish before the poll ever fires — arming barge-in there
+    # just wastes a capture window and risks a spurious cancel (part of O8). True = slow-only.
+    interrupt_slow_calls_only: bool = True
     preroll_frames: int = 3              # ~240 ms kept before onset so word attacks ("stand…") aren't clipped
+
+    # Semantic turn-detection (voice-upgrade loop 4): how the END of an utterance is decided.
+    #   "vad"        = DEFAULT — end on a fixed `silence_seconds` trailing pause (today's behavior,
+    #                  byte-for-byte unchanged). Nothing new is loaded.
+    #   "smart_turn" = run the local pipecat-ai/smart-turn-v3 ONNX model (Whisper-Tiny encoder +
+    #                  linear head, ~8M, BSD-2) on the recent audio when a short pause is detected:
+    #                  if it judges the turn COMPLETE → end now (snappy); if INCOMPLETE → keep
+    #                  listening up to `max_endpointing_delay` (patient, won't cut you off mid-thought).
+    # LAZY + GUARDED: the model is loaded only when turn_detection=="smart_turn", and ANY failure
+    # (missing huggingface_hub, download/model/inference error) falls back to the fixed-silence path,
+    # so the daemon always runs. Model (~8MB) downloads once to ~/.cache/vox/smart-turn/.
+    turn_detection: str = "vad"
+    min_endpointing_delay: float = 0.5   # pause (s) before smart-turn is consulted (mirrors livekit min_delay)
+    max_endpointing_delay: float = 3.0   # hard cap (s): end the turn even if smart-turn keeps saying INCOMPLETE
+
+    # Acoustic echo cancellation (voice-upgrade loop 5 / R7): how the mic is captured.
+    #   false = DEFAULT — capture via the sounddevice/PortAudio MicStream (today's behavior,
+    #           byte-for-byte unchanged). Nothing native is loaded.
+    #   true  = capture via the native macOS VoiceProcessingIO path (AVAudioEngine with
+    #           setVoiceProcessingEnabled(True) on the input node). The system applies AEC + AGC +
+    #           noise suppression referencing the speaker output, so Vox stops hearing its own TTS /
+    #           ambient speaker audio (the real fix for O1 talk-over-on-speakers and O7).
+    # LAZY + GUARDED: PyObjC/AVFoundation is imported only when audio_aec is true, and ANY failure
+    # (missing pyobjc, mic permission denied, engine/tap/convert error) falls back to the sounddevice
+    # MicStream with a logged warning — so the daemon always keeps listening. The native path can only
+    # be quality-validated with a live mic + speakers (see docs/plan/VOICE_UPGRADE.md, Loop 5).
+    audio_aec: bool = False
 
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
     whisper_model: str = "small.en"   # more accurate for accents than base.en (~250MB 1-time download, ~2-3x slower STT but still <1s). Revert to "base.en" for max speed.
@@ -175,6 +212,25 @@ class Config:
     tts_enabled: bool = True
     tts_voice: str = "Daniel"  # British (en_GB). "" = system default. Premium voices sound best (System Settings)
     tts_rate: int = 0      # words per minute; 0 = the voice's default
+
+    # TTS engine (voice-upgrade loop 2): "say" (default — macOS, zero-install, unchanged) |
+    # "kokoro" (local neural ONNX, opt-in). Kokoro lazy-loads: nothing is imported/downloaded
+    # unless tts_engine=="kokoro", and ANY Kokoro failure (missing package, model download,
+    # synth, playback) silently falls back to the `say` path — so the daemon is never at risk.
+    # Model + voices (~353MB) auto-download to ~/.cache/vox/kokoro/ on first kokoro use.
+    tts_engine: str = "say"
+    kokoro_voice: str = "af_heart"  # Kokoro voice id (e.g. af_heart, af_bella, am_michael, bf_emma). See voices list.
+    kokoro_speed: float = 1.0       # 0.5–2.0; 1.0 = natural pace
+
+    # Interruptible speaking (voice-upgrade loop 3): keep listening WHILE Vox speaks a reply, and
+    # if a captured utterance passes the loop-1 interrupt gate, cut the voice (tts.stop_speaking())
+    # and handle that new utterance as a cancel (stop/sleep) or the next turn. Only takes effect
+    # when tts_engine=="kokoro" (the `say`/afplay path can't be flushed mid-utterance); OFF leaves
+    # the speak path byte-for-byte unchanged (blocking speak + mic.flush after).
+    # IMPORTANT: Vox has NO echo cancellation yet (loop 5 / AEC). With this ON, the mic hears the
+    # TTS on SPEAKERS and will interrupt itself — so talk-over only works cleanly on HEADPHONES.
+    # Stays OFF by default until AEC (VoiceProcessingIO) lands.
+    tts_interruptible: bool = False
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
