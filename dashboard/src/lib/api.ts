@@ -304,6 +304,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  updateCustomPersonality: (
+    id: string,
+    body: {
+      name?: string;
+      persona?: string;
+      emoji?: string;
+      tagline?: string;
+      suggestedVoice?: string;
+      kokoroVoice?: string;
+    },
+  ) =>
+    request<Personality>(`/personalities/custom/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   removeCustomPersonality: (id: string) =>
     request<{ ok: boolean }>(`/personalities/custom/${id}`, {
       method: "DELETE",

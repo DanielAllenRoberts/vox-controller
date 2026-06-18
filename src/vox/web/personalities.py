@@ -376,3 +376,38 @@ def remove_custom(pid) -> bool:
         if removed:
             _save_state(state)
     return removed
+
+
+def update_custom(pid, name=None, persona=None, emoji=None, suggestedVoice=None,
+                  tagline=None, kokoroVoice=None) -> dict:
+    """Edit a custom persona in place. Only the fields passed (non-None) change; the rest are left
+    as-is. The id is kept stable (so the active reference survives a rename). Returns the updated
+    Personality. Raises ValueError (→ 400) if ``pid`` is a preset (read-only) or isn't a known
+    custom persona. Empty strings clear optional fields (tagline/voice); name/persona can't be blank.
+    """
+    pid = "" if pid is None else str(pid)
+    if pid in _PRESETS_BY_ID:
+        raise ValueError("presets can't be edited")
+    with _LOCK:
+        state = _load_state()
+        target = next((c for c in state["custom"] if c.get("id") == pid), None)
+        if target is None:
+            raise ValueError(f"unknown custom personality id: {pid!r}")
+        if name is not None:
+            if not name.strip():
+                raise ValueError("personality 'name' is required")
+            target["name"] = name.strip()
+        if persona is not None:
+            if not persona.strip():
+                raise ValueError("personality 'persona' is required")
+            target["persona"] = persona.strip()
+        if emoji is not None:
+            target["emoji"] = emoji.strip() or "✨"
+        if tagline is not None:
+            target["tagline"] = tagline.strip()
+        if suggestedVoice is not None:
+            target["suggestedVoice"] = suggestedVoice.strip() or None
+        if kokoroVoice is not None:
+            target["kokoroVoice"] = kokoroVoice.strip() or ""
+        _save_state(state)
+        return dict(target)

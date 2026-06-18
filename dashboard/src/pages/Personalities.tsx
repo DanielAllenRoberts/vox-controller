@@ -9,6 +9,8 @@ import {
   Wand2,
   UserPlus,
   Mic,
+  Pencil,
+  Eye,
 } from "lucide-react";
 import {
   api,
@@ -243,6 +245,51 @@ function useAddCustom(onDone: () => void) {
 }
 
 // ---------------------------------------------------------------------------
+// Edit custom persona (PATCH — only sent fields change; id stays stable).
+// ---------------------------------------------------------------------------
+
+function useUpdateCustom(onDone: () => void) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: ({
+      id,
+      body,
+    }: {
+      id: string;
+      body: {
+        name?: string;
+        persona?: string;
+        emoji?: string;
+        tagline?: string;
+        suggestedVoice?: string;
+        kokoroVoice?: string;
+      };
+    }) => api.updateCustomPersonality(id, body),
+    onSuccess: (updated) => {
+      // Re-fetch so the list reflects the persisted persona (the PATCH echoes
+      // the full updated object, but invalidating keeps us in sync with the
+      // bridge's canonical shape).
+      qc.invalidateQueries({ queryKey: PERSONALITIES_KEY });
+      toast({
+        variant: "success",
+        title: "Persona updated",
+        description: `${updated.emoji} ${updated.name}`,
+      });
+      onDone();
+    },
+    onError: () => {
+      toast({
+        variant: "error",
+        title: "Couldn't update persona",
+        description: "Is the bridge running?",
+      });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Delete custom persona.
 // ---------------------------------------------------------------------------
 
@@ -365,12 +412,16 @@ function PersonaCard({
   active,
   pending,
   onActivate,
+  onView,
+  onEdit,
   onDelete,
 }: {
   persona: Personality;
   active: boolean;
   pending: boolean;
   onActivate: () => void;
+  onView?: () => void;
+  onEdit?: () => void;
   onDelete?: () => void;
 }) {
   return (
@@ -459,29 +510,73 @@ function PersonaCard({
             <span />
           )}
 
-          {onDelete && (
-            // Nested interactive control — stop propagation so it doesn't
-            // also activate the card.
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={`Delete ${persona.name}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
+          {/* Nested interactive controls — each stops propagation so it doesn't
+              also activate the card. */}
+          <div className="flex items-center gap-1">
+            {onView && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={`View full persona text for ${persona.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onView();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onView();
+                  }
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-0 transition-all hover:bg-accent/15 hover:text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
+              >
+                <Eye className="h-3.5 w-3.5" />
+              </span>
+            )}
+            {onEdit && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={`Edit ${persona.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEdit();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onEdit();
+                  }
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-0 transition-all hover:bg-accent/15 hover:text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </span>
+            )}
+            {onDelete && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={`Delete ${persona.name}`}
+                onClick={(e) => {
                   e.stopPropagation();
                   onDelete();
-                }
-              }}
-              className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-0 transition-all hover:bg-danger/15 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </span>
-          )}
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onDelete();
+                  }
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-0 transition-all hover:bg-danger/15 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </span>
+            )}
+          </div>
         </div>
       </Card>
     </button>
@@ -489,40 +584,88 @@ function PersonaCard({
 }
 
 // ---------------------------------------------------------------------------
-// Create-custom dialog.
+// Create-or-edit custom persona dialog.
+//
+// With no `editing` prop it POSTs a new custom persona (as before). With an
+// `editing` persona it pre-fills every field and PATCHes that persona in place
+// (its id stays stable). Presets are never passed here — they're read-only.
 // ---------------------------------------------------------------------------
 
-function CreateDialog({
+// `Personality` doesn't carry kokoroVoice in its type (the create flow only
+// sends it), but the bridge persists and may echo it back. Read it defensively
+// so editing pre-fills the saved voice when present.
+function personaKokoroVoice(p: Personality): string {
+  const v = (p as { kokoroVoice?: unknown }).kokoroVoice;
+  return typeof v === "string" ? v : "";
+}
+
+function PersonaFormDialog({
   open,
   onOpenChange,
+  editing,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  // When set, the dialog edits this custom persona instead of creating one.
+  editing?: Personality | null;
 }) {
   const [name, setName] = React.useState("");
   const [emoji, setEmoji] = React.useState("");
+  const [tagline, setTagline] = React.useState("");
   const [persona, setPersona] = React.useState("");
   const [voice, setVoice] = React.useState<string>(NO_VOICE);
   // Kokoro voice id; "" means "use the dashboard's global kokoro_voice".
   const [kokoroVoice, setKokoroVoice] = React.useState<string>("");
 
-  const reset = React.useCallback(() => {
-    setName("");
-    setEmoji("");
-    setPersona("");
-    setVoice(NO_VOICE);
-    setKokoroVoice("");
-  }, []);
+  const isEdit = !!editing;
 
-  const addCustom = useAddCustom(() => {
-    reset();
-    onOpenChange(false);
-  });
+  // Pre-fill (edit) or clear (create) the form whenever the dialog opens or the
+  // target persona changes. Keying off `open` + `editing?.id` keeps the fields
+  // in sync without clobbering in-progress typing on unrelated re-renders.
+  React.useEffect(() => {
+    if (!open) return;
+    if (editing) {
+      setName(editing.name ?? "");
+      setEmoji(editing.emoji ?? "");
+      setTagline(editing.tagline ?? "");
+      setPersona(editing.persona ?? "");
+      setVoice(editing.suggestedVoice || NO_VOICE);
+      setKokoroVoice(personaKokoroVoice(editing));
+    } else {
+      setName("");
+      setEmoji("");
+      setTagline("");
+      setPersona("");
+      setVoice(NO_VOICE);
+      setKokoroVoice("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, editing?.id]);
+
+  const addCustom = useAddCustom(() => onOpenChange(false));
+  const updateCustom = useUpdateCustom(() => onOpenChange(false));
+  const pending = addCustom.isPending || updateCustom.isPending;
 
   const canSubmit = name.trim().length > 0 && persona.trim().length > 0;
 
   const handleSubmit = () => {
-    if (!canSubmit || addCustom.isPending) return;
+    if (!canSubmit || pending) return;
+    if (editing) {
+      updateCustom.mutate({
+        id: editing.id,
+        body: {
+          name: name.trim(),
+          persona: persona.trim(),
+          // Empty strings clear these fields server-side (PATCH only touches
+          // sent keys); send "" rather than undefined so edits can remove them.
+          emoji: emoji.trim(),
+          tagline: tagline.trim(),
+          suggestedVoice: voice === NO_VOICE ? "" : voice,
+          kokoroVoice: kokoroVoice,
+        },
+      });
+      return;
+    }
     addCustom.mutate({
       name: name.trim(),
       persona: persona.trim(),
@@ -534,20 +677,18 @@ function CreateDialog({
   };
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) reset();
-        onOpenChange(o);
-      }}
-    >
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/15 text-accent">
-              <Wand2 className="h-4 w-4" />
+              {isEdit ? (
+                <Pencil className="h-4 w-4" />
+              ) : (
+                <Wand2 className="h-4 w-4" />
+              )}
             </span>
-            Craft a persona
+            {isEdit ? "Edit persona" : "Craft a persona"}
           </DialogTitle>
           <DialogDescription>
             Give Vox a voice and a point of view. The persona text becomes its
@@ -581,6 +722,21 @@ function CreateDialog({
                 aria-label="Name"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-foreground-secondary">
+              Tagline
+              <span className="ml-1 font-normal text-foreground-muted">
+                (optional)
+              </span>
+            </label>
+            <Input
+              value={tagline}
+              onChange={(e) => setTagline(e.target.value)}
+              placeholder="e.g. Calm, grounded, unflappable"
+              aria-label="Tagline"
+            />
           </div>
 
           <div>
@@ -658,17 +814,83 @@ function CreateDialog({
           <Button
             variant="ghost"
             onClick={() => onOpenChange(false)}
-            disabled={addCustom.isPending}
+            disabled={pending}
           >
             Cancel
           </Button>
           <Button
             variant="gradient"
             onClick={handleSubmit}
-            disabled={!canSubmit || addCustom.isPending}
+            disabled={!canSubmit || pending}
           >
             <Sparkles className="h-4 w-4" />
-            {addCustom.isPending ? "Creating…" : "Create persona"}
+            {isEdit
+              ? pending
+                ? "Saving…"
+                : "Save changes"
+              : pending
+                ? "Creating…"
+                : "Create persona"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// View full persona text (read-only) — works for presets and custom alike.
+// Presets can't be edited, so this is the only way to read their full prompt.
+// ---------------------------------------------------------------------------
+
+function ViewDialog({
+  persona,
+  onOpenChange,
+}: {
+  persona: Personality | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={persona !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/15 text-accent text-lg">
+              {persona?.emoji || "✨"}
+            </span>
+            {persona?.name}
+          </DialogTitle>
+          {persona?.tagline && (
+            <DialogDescription>{persona.tagline}</DialogDescription>
+          )}
+        </DialogHeader>
+
+        <div className="grid gap-3 py-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="font-normal">
+              {persona?.preset ? "Preset · read-only" : "Custom"}
+            </Badge>
+            {persona?.suggestedVoice && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-foreground-secondary">
+                <AudioLines className="h-3 w-3 text-accent" />
+                {persona.suggestedVoice}
+              </span>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-foreground-secondary">
+              Persona (full system prompt)
+            </label>
+            <div className="max-h-[55vh] overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-muted/40 px-3.5 py-3 text-sm leading-relaxed text-foreground-secondary">
+              {persona?.persona || "—"}
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Close
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -819,6 +1041,8 @@ export function Personalities() {
     : null;
 
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [toEdit, setToEdit] = React.useState<Personality | null>(null);
+  const [toView, setToView] = React.useState<Personality | null>(null);
   const [toDelete, setToDelete] = React.useState<Personality | null>(null);
 
   const activeId = data?.active ?? "";
@@ -920,6 +1144,7 @@ export function Personalities() {
                     onActivate={() => {
                       if (p.id !== activeId) setActive.mutate(p.id);
                     }}
+                    onView={() => setToView(p)}
                   />
                 </StaggerItem>
               ))}
@@ -944,6 +1169,8 @@ export function Personalities() {
                       onActivate={() => {
                         if (p.id !== activeId) setActive.mutate(p.id);
                       }}
+                      onView={() => setToView(p)}
+                      onEdit={() => setToEdit(p)}
                       onDelete={() => setToDelete(p)}
                     />
                   </StaggerItem>
@@ -956,7 +1183,22 @@ export function Personalities() {
         </div>
       )}
 
-      <CreateDialog open={createOpen} onOpenChange={setCreateOpen} />
+      {/* Create */}
+      <PersonaFormDialog open={createOpen} onOpenChange={setCreateOpen} />
+      {/* Edit — driven by the selected custom persona. */}
+      <PersonaFormDialog
+        open={toEdit !== null}
+        editing={toEdit}
+        onOpenChange={(o) => {
+          if (!o) setToEdit(null);
+        }}
+      />
+      <ViewDialog
+        persona={toView}
+        onOpenChange={(o) => {
+          if (!o) setToView(null);
+        }}
+      />
       <DeleteDialog
         persona={toDelete}
         onOpenChange={(o) => {

@@ -380,15 +380,28 @@ def split_say(text: str) -> tuple[str, str]:
 
 
 def _split_signal(raw: str) -> tuple[str, bool]:
-    """Pull the trailing [OPEN]/[DONE] turn-taking tag off a reply → (clean text, expects_reply)."""
+    """Pull the trailing [OPEN]/[DONE] turn-taking tag off a reply → (clean text, expects_reply).
+
+    The model is told to append [OPEN]/[DONE], but in practice it drifts — /done, (done), **DONE**,
+    a bare 'done' alone on the last line, etc. We recognize all of those so a mis-formatted tag still
+    (a) drives turn-taking and (b) is stripped from what's spoken; otherwise Vox reads the tag aloud
+    ('slash done') and never leaves the chat. A bare in-sentence 'done'/'open' (e.g. '...the download
+    is done') is left untouched."""
     s = (raw or "").strip()
     if s.upper().startswith("[BIG]"):  # stray defer token (big brain shouldn't emit it) → drop
         s = s[5:].strip()
-    m = re.search(r"\[(open|done)\]", s, re.IGNORECASE)  # normally trailing; match anywhere to be safe
+    # 1) Trailing tag wrapped in any delimiter: [DONE], /done, (done), **DONE**, [/done] …
+    m = re.search(r"\s*[\[\(\{/<*]+\s*(open|done)\b[\s\]\)\}>*/.!]*$", s, re.IGNORECASE)
+    if not m:
+        # 2) A bare open/done token alone on the final line (model put the tag on its own line).
+        m = re.search(r"(?:^|\n)\s*(open|done)\b[\s.!]*$", s, re.IGNORECASE)
     if m:
-        clean = (s[: m.start()] + s[m.end():]).strip()
-        return clean, m.group(1).lower() == "open"
-    return s, s.endswith("?")  # model didn't tag → fall back to the question heuristic
+        return s[: m.start()].strip(), m.group(1).lower() == "open"
+    # 3) Strict bracketed form anywhere (original behaviour — a tag that isn't at the very end).
+    m = re.search(r"\[(open|done)\]", s, re.IGNORECASE)
+    if m:
+        return (s[: m.start()] + s[m.end():]).strip(), m.group(1).lower() == "open"
+    return s, s.endswith("?")  # model didn't tag at all → fall back to the question heuristic
 
 
 def _anthropic(text, history, model, system, brain="small", kind="chat"):

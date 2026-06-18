@@ -32,7 +32,8 @@ class Config:
 
     # Sleep / deactivate — matched in transcribed text (no model needed; we're
     # already transcribing once a mode is active).
-    sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep", "go ahead and sleep", "going to sleep")
+    sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep", "go ahead and sleep", "going to sleep",
+                                      "nevermind", "never mind", "cancel that", "forget it")
     sleep_spoken: str = "stand down"
 
     # Emergency stop — drop straight to idle from any mode (more forceful than "stand down").
