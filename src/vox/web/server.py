@@ -128,10 +128,13 @@ def create_app() -> FastAPI:
     except Exception:
         pass
 
+    # No cookies/auth are used, so credentials stay off — which also keeps the
+    # wildcard methods/headers valid per the CORS spec (browsers reject "*" when
+    # credentials are allowed). Origins are still restricted to localhost dev ports.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_DEV_ORIGINS,
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -155,7 +158,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/settings")
     async def post_settings(request: Request):
-        body = await request.json()
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
         key = body.get("key")
         value = body.get("value")
         try:
@@ -202,7 +207,9 @@ def create_app() -> FastAPI:
         mod = _try_import("personalities")
         if mod is None:
             return {"ok": False, "error": "personalities module not available"}
-        body = await request.json()
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
         try:
             active = mod.set_active(body.get("id"))
         except ValueError as exc:  # unknown id
@@ -217,7 +224,9 @@ def create_app() -> FastAPI:
         mod = _try_import("personalities")
         if mod is None:
             return {"ok": False, "error": "personalities module not available"}
-        body = await request.json()
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
         try:
             return mod.add_custom(
                 name=body.get("name"),
