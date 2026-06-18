@@ -45,3 +45,11 @@ node_modules/
 .DS_Store
 .vscode/
 .idea/
+
+# Playwright visual-QA scratch
+.playwright-mcp/
+/overview-*.png
+/page-*.png
+
+# TS incremental build cache
+*.tsbuildinfo

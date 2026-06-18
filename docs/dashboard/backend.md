@@ -109,3 +109,75 @@ The WS stream (`/api/usage/stream`) emits one `UsageEvent` whenever
   mode once a shared state handle exists.
 - **Pricing** in `usage.PRICES` is approximate — refresh as model prices change.
 ```
+
+---
+
+## Iteration 2 — token-usage capture (backend)
+
+This iteration hardens the token-usage ledger and the SDK token extraction so a
+call recorded from the voice thread reaches WS subscribers, persists correctly,
+and renders on the Token Usage page. Additive only; the voice daemon's
+`vox.web` touch points stay lazy + guarded.
+
+### `usage.py`
+
+- **Subscription calls now record `null` tokens, not 0.** `record_usage(...)`
+  accepts `input_tokens`/`output_tokens` of `None` (SDK/CLI subscription calls
+  that don't expose counts) and persists `inputTokens: null` / `outputTokens:
+  null` with `costUsd: 0` — distinct from a genuine 0-token request, so the UI
+  can render "subscription" instead of a misleading 0. Helper:
+  `is_subscription_call(provider, in, out)` — true for `claude_sdk`/`claude_cli`
+  or when both token counts are `None`.
+- **`summary()` is None-safe** — totals/byModel/byDay treat `null` token counts
+  as 0 for aggregation (`int(e.get("inputTokens") or 0)`), so a ledger mixing
+  subscription and metered calls aggregates without errors. Shape per CONTRACT:
+  `{totals:{calls,inputTokens,outputTokens,costUsd}, byModel:[...], byDay:[...]}`.
+- **Cross-thread WS fan-out** (unchanged design, verified): `record_usage` runs
+  on the voice daemon thread and calls `_publish`, which schedules
+  `put_nowait` onto each subscriber queue's bound loop via
+  `loop.call_soon_threadsafe`. The WS route binds `queue._vox_loop` on accept.
+  Verified end-to-end: a record from a non-loop thread is delivered to a
+  subscriber awaiting on the API event loop.
+- **Persistence**: append-only JSON Lines under `data/usage.jsonl`, one event per
+  line, under a process-wide `RLock`; `recent(limit)` returns newest-first;
+  `_read_all` tolerates blank/corrupt lines.
+
+### `assistant.py` — SDK token extraction
+
+- `_sdk_extract_tokens(msg)` pulls `(input_tokens, output_tokens)` from a
+  `claude-agent-sdk` **`ResultMessage`** `usage` dict (Anthropic API shape;
+  ignores cache fields). The `ResultMessage` is the message that also carries
+  `total_cost_usd` and the cumulative `usage`, so the call sites in
+  `_claude_sdk` / `_sdk_look` now match on `hasattr(msg, "total_cost_usd")`
+  rather than reading `usage` off every message (e.g. per-turn
+  `AssistantMessage`). Guarded: any shape mismatch → `None`, which the store
+  records as a subscription call (tokens `null`, cost 0). Never breaks a reply.
+- `_anthropic` already passes `(resp.usage.input_tokens,
+  resp.usage.output_tokens)`; `_openai` passes `(u.prompt_tokens,
+  u.completion_tokens)` guarded with a `None` fallback. Unchanged.
+
+### Dev seed (visual QA only)
+
+- `usage.maybe_seed_dev()` seeds ~12 realistic `UsageEvent`s **only when
+  `VOX_DEV_SEED=1`** and the ledger is empty (so it can't pollute a real one).
+  Mix: `deepseek-chat`, `claude-opus-4-8` (subscription, `null` tokens),
+  `claude-haiku-4-5`, spread across 4 days. Called once from `create_app()`,
+  fully guarded. **Never seeds in normal operation.**
+
+### How to verify
+
+```bash
+# unit-level (no server): seed + summary
+VOX_DEV_SEED=1 uv run python -c "from vox.web import usage; print(usage.maybe_seed_dev()); print(usage.summary()['totals'])"
+
+# run the bridge with seed data for the Token Usage page
+VOX_DEV_SEED=1 uv run python -m vox.web.server
+curl -s 'http://127.0.0.1:8765/api/usage/recent?limit=5'
+curl -s  http://127.0.0.1:8765/api/usage/summary   # totals + byModel + byDay
+
+# live feed: open the WS, then trigger a voice call (or any record_usage)
+#   ws://127.0.0.1:8765/api/usage/stream  → one UsageEvent per call
+```
+
+> Remove `data/usage.jsonl` (gitignored) before seeding a clean QA run — the
+> seed is a no-op if real data is already present.
