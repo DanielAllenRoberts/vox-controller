@@ -106,11 +106,14 @@ def create_app() -> FastAPI:
         return settings_store.all()
 
     @app.post("/api/settings")
-    async def post_settings(request: Request) -> dict:
+    async def post_settings(request: Request):
         body = await request.json()
         key = body.get("key")
         value = body.get("value")
-        return settings_store.set(key, value)
+        try:
+            return settings_store.set(key, value)
+        except ValueError as exc:  # SettingError: unknown key / bad enum / wrong type
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
     # --- Usage ---
     @app.get("/api/usage/recent")

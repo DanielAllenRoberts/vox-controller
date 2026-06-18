@@ -23,6 +23,20 @@ from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.backends import make_backend, normalize, phrase_match
 
 
+def _setting(key: str, fallback):
+    """Read a runtime override from the dashboard's settings_store, else fall back to Config.
+    Fully guarded (mirrors assistant._setting): if vox.web.settings_store is missing or errors,
+    return the fallback so the daemon behaves exactly as before. None from the store means
+    'unset' → fallback. This is what lets dashboard toggles take effect on the NEXT relevant
+    action without a restart."""
+    try:
+        from vox.web import settings_store
+        val = settings_store.get(key)
+        return fallback if val is None else val
+    except Exception:
+        return fallback
+
+
 class _Quit(Exception):
     """Raised to exit the whole program by voice."""
 
@@ -106,7 +120,7 @@ def _wants_escalation(text: str, cfg) -> bool:
     In "auto" mode (default) everything does. In "keywords" mode it must contain an escalation
     keyword — you opt the brain in by phrasing ("Vox, write me…"), so ambient audio stops tripping
     the LLM (issues.md O7). A pending clarification bypasses this (handled by the caller)."""
-    if cfg.escalation_mode != "keywords":
+    if _setting("escalation_mode", cfg.escalation_mode) != "keywords":
         return True
     t = normalize(text)
     return any(k in t for k in cfg.escalation_keywords)
@@ -130,7 +144,7 @@ def _run_interruptible(work, frames, cfg, transcriber):
     isn't speaking during the call. Returns (result, interrupt): interrupt is None if work
     finished, else 'sleep' | 'quit' | 'restart'. An abandoned call finishes in the background and
     its result is dropped (Python can't kill a thread)."""
-    if not cfg.barge_in_enabled:
+    if not _setting("barge_in_enabled", cfg.barge_in_enabled):
         return work(), None
     box: dict = {}
 
@@ -305,7 +319,7 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
     while True:
         audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
         if audio is None:  # long pause
-            if not cfg.dictation_exit_on_silence:
+            if not _setting("dictation_exit_on_silence", cfg.dictation_exit_on_silence):
                 continue  # setting: stay in dictation until an explicit "stop typing"
             sounds.play(cfg.sound_dictate_stop)
             out.emit("✎ Stopped typing.")

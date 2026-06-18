@@ -138,8 +138,49 @@ _SCHEMA_META: list[dict] = [
 # Public schema (without live values). Use ``all()`` for values-filled Settings.
 SCHEMA: list[dict] = _SCHEMA_META
 
+# Key → schema-meta lookup for validation in set().
+_BY_KEY = {m["key"]: m for m in _SCHEMA_META}
 # Set of valid keys for guarding set().
-_KEYS = {m["key"] for m in _SCHEMA_META}
+_KEYS = set(_BY_KEY)
+
+
+class SettingError(ValueError):
+    """Raised by ``set`` on an unknown key or a value that fails schema validation.
+
+    A ``ValueError`` subclass so callers that only catch ``ValueError`` still work; the
+    server maps it to a 4xx with the message.
+    """
+
+
+def _coerce(meta: dict, value):
+    """Validate ``value`` against ``meta`` and return the coerced value.
+
+    - ``toggle`` → bool (accepts real bools and the JSON-ish strings "true"/"false").
+    - ``select`` → must be one of the declared option values.
+    - ``text``   → coerced to str.
+
+    Raises ``SettingError`` with a human-readable message on bad input.
+    """
+    typ = meta["type"]
+    if typ == "toggle":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            return value.lower() == "true"
+        raise SettingError(f"{meta['key']} expects a boolean, got {value!r}")
+    if typ == "select":
+        allowed = [o["value"] for o in meta.get("options", [])]
+        if value not in allowed:
+            raise SettingError(
+                f"{meta['key']} must be one of {allowed}, got {value!r}"
+            )
+        return value
+    if typ == "text":
+        if value is None:
+            raise SettingError(f"{meta['key']} expects text, got null")
+        return str(value)
+    # Unknown type in schema → accept as-is (shouldn't happen).
+    return value
 
 
 def _load_overrides() -> dict:
@@ -176,18 +217,22 @@ def get(key: str):
 
 
 def set(key: str, value) -> dict:  # noqa: A001 - matches the contract's API name
-    """Persist an override for ``key`` and return ``{ok, value}``.
+    """Validate ``value`` against the schema, persist it as an override, and return
+    ``{ok, value}`` (the coerced value).
 
-    Only schema keys are accepted; unknown keys return ``{ok: False}`` without
-    writing anything.
+    Raises ``SettingError`` (a ``ValueError``) for an unknown key or a value that
+    fails the schema's type/enum rules — the server maps that to a 4xx with the
+    message. Only the validated override is written to ``data/settings.json``.
     """
-    if key not in _KEYS:
-        return {"ok": False, "value": None}
+    meta = _BY_KEY.get(key)
+    if meta is None:
+        raise SettingError(f"unknown setting key: {key!r}")
+    coerced = _coerce(meta, value)
     with _LOCK:
         overrides = _load_overrides()
-        overrides[key] = value
+        overrides[key] = coerced
         _save_overrides(overrides)
-    return {"ok": True, "value": value}
+    return {"ok": True, "value": coerced}
 
 
 def all() -> list[dict]:  # noqa: A001 - matches the contract's API name
