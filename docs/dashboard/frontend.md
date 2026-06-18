@@ -186,3 +186,85 @@ all files using the `React.` namespace import React.
    personality when unset; `/usage` shows animated summary cards, both charts, and
    the live feed prepending rows as you talk to Vox. With the bridge down both pages
    degrade to empty/offline states (daemon unaffected — `vox.web` stays lazy).
+
+---
+
+## Iteration 3 — Settings page + toast system
+
+### New files
+- `src/hooks/useToast.tsx` — dependency-free toast system (no `sonner`/radix-toast).
+  A `<ToastProvider>` holds a bounded (newest-4) queue; `useToast().toast({title,
+  description?, variant?, duration?})` pushes one; `dismiss(id)` and auto-dismiss
+  timers (default 3.2s, `0` = sticky) clean up. Variants: `success | error | info`.
+- `src/components/ui/toast.tsx` — `<Toaster/>`: mounted once near the app root,
+  reads the queue from context and renders a bottom-right stack of glass cards with
+  spring slide-in / fade-out (`AnimatePresence` + `layout`, reduced-motion aware),
+  tinted icon chip per variant, and a manual dismiss button.
+
+### Changed files
+- `src/main.tsx` — wrapped the app in `<ToastProvider>` and mounted `<Toaster/>`
+  (inside `TooltipProvider`, alongside `BrowserRouter`). Additive; no behavior change
+  to existing providers.
+- `src/pages/Settings.tsx` — replaced the `ComingSoon` stub with the full page:
+  - **Data:** react-query `["settings"]` against `GET /api/settings` (`Setting[]`,
+    contract shape `{key,label,group,type,value,options?,help}`).
+  - **Grouping:** settings bucketed by `Setting.group` and rendered as one glass
+    card per group in a 2-col grid, ordered **Brains → Behavior → Voice → Debug**
+    (unknown groups fall after, ungrouped). Each group card has an icon chip + a
+    one-line blurb; within a group the API's schema order is preserved.
+  - **Controls per `type`:** `toggle` → shadcn `Switch` (animated, with an On/Off
+    label); `select` → shadcn `Select` driven by the API's `options[]` (covers
+    `provider` + `escalation_mode`); `text` → shadcn `Input` (mono) that commits on
+    **blur / Enter** (Escape reverts) so we don't POST per keystroke.
+  - **Optimistic save:** a `useMutation` writes the new value into the cached
+    `Setting[]` immediately (`onMutate`), POSTs `{key,value}` to `/api/settings`,
+    then on success **reflects the server's returned `value`** over the optimistic
+    one and fires a subtle **success toast**; on error it **rolls back** to the
+    snapshot and fires an **error toast**. A non-`ok` response (unknown key) surfaces
+    a "Rejected" toast. The mutating row dims (`opacity-70`) while in flight.
+  - **Hints:** each row shows the setting's `help` text plus a small badge —
+    **"needs restart"** (amber, `RotateCcw`) when the help text says so, else
+    **"applies on next call"** (`Zap`). The restart/next-call split is derived from
+    `help` (the store encodes it there), so no client-side key list to maintain.
+  - **Header:** a tasteful explainer banner (gradient-glow glass) stating these are
+    **runtime overrides layered over the daemon's `Config`** — no code edit / config
+    file — and that the voice assistant keeps running while you tune it.
+  - **States:** skeleton group cards while loading; an offline notice (with the
+    "falls back to Config" reassurance) when the bridge is unreachable.
+
+### Decisions
+- **Own toast system, no new dep.** Reused `motion` (already a dependency) +
+  `useReducedMotion` for the animation; a tiny context provider is simpler than
+  pulling in `sonner` and matches the hand-authored-components rule.
+- **Text fields commit on blur/Enter, not per keystroke** — avoids a POST storm on
+  model-name edits and keeps the optimistic cache from thrashing.
+- **Restart vs. next-call is read from `help`**, not hard-coded — keeps the schema
+  the single source of truth (the Python `settings_store` already encodes "Restart
+  to apply." in those help strings).
+- **Optimistic + server-authoritative.** We render the change instantly but always
+  overwrite with the POST's returned `value`, so the UI can't drift from the store.
+- Group icons/blurbs are presentation-only; an unknown group still renders (generic
+  icon, no blurb) so adding a setting server-side never 404s the UI.
+
+### TODOs / future
+- No "reset to Config default" affordance yet (store has no per-key clear endpoint;
+  out of contract scope for iter 3).
+- Toasts are bottom-right, single-region; a future iter could add per-page anchoring
+  or an undo action on the save toast.
+
+### How to verify
+1. `cd dashboard && npm install && npx tsc -b --noEmit` — clean (no errors).
+2. `npm run build` → succeeds; `dashboard/dist` rebuilt.
+3. With the bridge up on `127.0.0.1:8765`: `/settings` shows four grouped glass
+   cards (Brains/Behavior/Voice/Debug) with animated switches, provider +
+   escalation-mode selects populated from the API, mono model-name inputs, per-row
+   help + restart/next-call badges, and the runtime-override header banner.
+   Toggling a switch or changing a select/model **updates instantly**, POSTs to
+   `/api/settings`, persists to `data/settings.json`, and pops a success toast;
+   reflected value matches the server. With the bridge down the page shows the
+   offline notice and a failed save rolls back + shows an error toast (daemon
+   unaffected — `vox.web` stays lazy).
+
+   Verified live at 1440px: all four groups render cohesively (dark glass +
+   backdrop-blur, violet accent toggles, hairline borders), a Debug toggle POSTed
+   and persisted `{"debug": false}` to `data/settings.json`, 0 console errors.

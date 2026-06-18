@@ -78,3 +78,31 @@ Goal: make it genuinely look professional and cool — confirmed by eye, then im
 
 **Next (Iteration 3 — Settings)**
 - Wire the runtime settings store so toggles take effect live; build the Settings page: brain provider/model (API vs SDK), escalation mode, feature flags.
+
+### Iteration 3 — Settings (2026-06-18)
+
+**Built**
+- Settings page (`dashboard/src/pages/Settings.tsx`, replaced the ComingSoon stub): GET `/api/settings` drives four grouped glass cards (Brains / Behavior / Voice / Debug) in a 2-col grid, with animated Switch / Select / Input controls, restart-vs-next-call badges, and a runtime-override header. Unknown groups still render gracefully.
+- Toast system (no new deps): `hooks/useToast.tsx` (dependency-free provider/queue), `components/ui/toast.tsx` (`<Toaster/>`, motion-animated glass stack honoring `useReducedMotion`), mounted via `main.tsx`. Saves use an optimistic react-query mutation (`onMutate` writes cache, `onSuccess` reflects the server's authoritative `value`, `onError` rolls back) + success/error toasts; text/model inputs commit on blur/Enter, Escape reverts.
+- Backend now makes settings take effect live: `web/settings_store.py` `set()` validates against `SCHEMA` (added `SettingError(ValueError)` + `_coerce()`: toggles must be bool/`"true"`/`"false"`, selects must match options, text coerced to str, unknown keys raise); only validated overrides persist to `data/settings.json`. `web/server.py` POST `/api/settings` returns `{ok,value}` or HTTP 400 `{ok:false,error}` on `ValueError`.
+- Live wiring via guarded module-local `_setting(key, fallback)` in `core/loop.py` (`escalation_mode`, `barge_in_enabled`, `dictation_exit_on_silence`) and `executor.py` (`llm_executor_enabled`, `screen_vision_enabled`); each falls back to `Config` when the store is missing/broken. `assistant.py` untouched (brains already read live).
+- Docs: appended "Iteration 3" sections to `docs/dashboard/backend.md` and `docs/dashboard/frontend.md`.
+
+**Decisions**
+- Hand-rolled a tiny toast system on the existing `motion` dep rather than adding `sonner`, matching the hand-authored-components rule.
+- "Needs restart" vs "applies on next call" is derived from each setting's `help` text, so the Python `SCHEMA` stays the single source of truth (no client-side key list). Only the four brain provider/model fields carry a conservative "Restart to apply" hint.
+- `set` raises `SettingError` (a `ValueError` subclass) so the existing `except ValueError` in `server.py` maps to 400 without a new import. Optimistic-update mutation keeps the UI from drifting from the store.
+
+**Live vs restart**
+- Apply on next call (no restart): `escalation_mode`, `barge_in_enabled`, `dictation_exit_on_silence`, `llm_executor_enabled`, `screen_vision_enabled`, plus debug/voice toggles — read live via the guarded `_setting` reads.
+- Needs restart: the four brain provider/model fields (flagged in `SCHEMA.help`).
+
+**Verify**
+- `cd dashboard && npx tsc -b --noEmit` clean; `npm run build` succeeds. Page verified live at 1440px: four grouped glass cards, animated switches, populated selects, mono inputs, restart/next-call badges, override header; a Debug toggle POSTed and persisted `{"debug": false}` to `data/settings.json` with 0 console errors; bridge-down shows the offline notice and rolls back failed saves.
+- Backend: 12 settings / required keys / groups validated; `set` accepts and coerces valid toggle/str-bool/enum/text, rejects unknown key + bad enum + bad toggle, persists only overrides. TestClient: GET 200 (12), valid POST 200, bad enum 400, unknown key 400. `loop._setting`/`executor._setting` return live values and fall back on unset keys; all four daemon files `py_compile` clean. Runtime test `data/settings.json` removed after testing. No git run.
+
+**Known gaps / TODOs**
+- No per-key "reset to Config default" (no store endpoint; out of iter-3 scope); toasts are a single bottom-right region (could add undo-on-save later). Frontend should surface the 400 `error` message text on invalid input.
+
+**Next (Iteration 4 — Personalities)**
+- Build the Personalities page: presets + custom editor wired to the live `personality` setting, with persona previews.

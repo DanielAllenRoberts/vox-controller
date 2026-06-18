@@ -181,3 +181,92 @@ curl -s  http://127.0.0.1:8765/api/usage/summary   # totals + byModel + byDay
 
 > Remove `data/usage.jsonl` (gitignored) before seeding a clean QA run — the
 > seed is a no-op if real data is already present.
+
+---
+
+## Iteration 3 — settings take effect LIVE
+
+This iteration makes dashboard setting toggles change daemon behaviour **without a
+restart** for runtime-read flags, and tightens `settings_store.set` validation.
+Strictly additive; all daemon reads are lazy + guarded and fall back to `Config`,
+so a missing/broken `settings_store` never changes daemon behaviour.
+
+### `settings_store.py`
+
+- **`SCHEMA`** covers all 12 CONTRACT keys with the right `type`/`group`/`options`/`help`:
+  `small_brain_provider`, `small_brain_model`, `big_brain_provider`, `big_brain_model`,
+  `escalate_to_big_brain`, `escalation_mode` (Brains); `llm_executor_enabled`,
+  `screen_vision_enabled`, `dictation_exit_on_silence` (Behavior); `tts_enabled`,
+  `barge_in_enabled` (Voice); `debug` (Debug).
+- **`set(key, value)` now VALIDATES against the schema** and coerces:
+  - unknown key → raises `SettingError` (a `ValueError` subclass).
+  - `toggle` → must be a bool (also accepts the strings `"true"`/`"false"`); else raises.
+  - `select` → must be one of the declared option values; else raises.
+  - `text` → coerced to `str` (rejects `null`).
+  Only the validated/coerced override is persisted to `data/settings.json`; the file
+  holds **overrides only** (keys never set keep their `Config` default).
+- **`all()`** returns full `Setting[]` descriptors (`key,label,group,type,value,help`,
+  plus `options` for selects) with live effective values (override → `Config`).
+- **`get(key)`** unchanged: override → `Config` → `None`.
+
+### `server.py`
+
+- `GET /api/settings` → `settings_store.all()`.
+- `POST /api/settings` `{key,value}` → `settings_store.set(...)` returning `{ok,value}`
+  on success, or **HTTP 400** `{ok:false, error:"<message>"}` when `set` raises
+  `ValueError` (unknown key / bad enum / wrong type).
+
+### Daemon wiring — guarded live reads
+
+A module-local `_setting(key, cfg_fallback)` helper (the same lazy+guarded pattern
+already in `assistant.py`) was added to `core/loop.py` and `executor.py`. Each tries
+`vox.web.settings_store.get(key)` and falls back to the `Config`/`cfg` value when the
+store is missing, errors, or returns `None`. Wired in:
+
+| Setting | Read site | Effect |
+|---------|-----------|--------|
+| `escalation_mode` | `loop._wants_escalation` | next utterance the parser can't handle |
+| `barge_in_enabled` | `loop._run_interruptible` | next blocking LLM call |
+| `dictation_exit_on_silence` | `loop._dictation_mode` | next long pause in dictation |
+| `llm_executor_enabled` | `executor.execute` | next uncertain command |
+| `screen_vision_enabled` | `executor.execute` (LOOK branch) | next "read the screen" request |
+
+Brain provider/model are already read live in `assistant.py` (`settings_store.get` →
+`Config`); **assistant.py was left untouched.**
+
+### Next-call vs restart
+
+**Take effect on the NEXT relevant action (no restart):**
+`escalation_mode`, `barge_in_enabled`, `dictation_exit_on_silence`,
+`llm_executor_enabled`, `screen_vision_enabled`, and the brain `*_provider`/`*_model`
+(via assistant.py). `escalate_to_big_brain`, `tts_enabled`, and `debug` are read at
+their existing `Config` call sites and take effect whenever those sites next read them.
+
+**Restart required:** none of the keys above strictly need a restart for the wired
+sites. Schema `help` text still notes "Restart to apply" for the four brain
+provider/model fields as a conservative UI hint, since a long-lived in-flight mode
+(e.g. an active control session that cached a client) may not pick a change up until
+the next idle→mode transition.
+
+### How to verify
+
+```bash
+# settings_store validation + persistence (overrides only)
+uv run python -c "from vox.web import settings_store as s; \
+print(len(s.all())); print(s.set('escalation_mode','keywords')); \
+import json,pathlib; print(json.loads(pathlib.Path('data/settings.json').read_text()))"
+
+# HTTP: valid 200, bad enum / unknown key -> 400
+uv run python -c "from fastapi.testclient import TestClient; from vox.web import server; \
+c=TestClient(server.create_app()); \
+print(c.post('/api/settings',json={'key':'tts_enabled','value':False}).status_code); \
+print(c.post('/api/settings',json={'key':'escalation_mode','value':'bogus'}).status_code); \
+print(c.post('/api/settings',json={'key':'nope','value':1}).status_code)"
+# expect: 200 400 400
+
+# daemon guarded fallback (no store needed)
+uv run python -c "from vox.core import loop; from vox import executor; \
+print(loop._setting('escalation_mode','auto'), executor._setting('llm_executor_enabled',True))"
+```
+
+> Remove the test `data/settings.json` afterwards — it is gitignored runtime data.
