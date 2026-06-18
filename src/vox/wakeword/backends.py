@@ -48,7 +48,9 @@ class WhisperWakeBackend:
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
             label = self.match(text)
             cmd = None if label is not None else self._oneshot(text)
-            if self._cfg.debug and self._out is not None:
+            if self._cfg.debug and self._out is not None and text.strip():
+                # Skip silence captures (empty transcription) — they're pure noise. Real
+                # transcriptions (incl. no-match mishears) still log.
                 tag = label or (f"do:{cmd}" if cmd else "(no match — stayed idle)")
                 self._out.emit(f"  [debug] idle heard: {text!r} → {tag}")
             if label is not None:
@@ -97,6 +99,8 @@ def make_backend(cfg, transcriber, out=None):
         [("control", cfg.control_phrases),
          ("assistant", cfg.assistant_phrases),
          ("dictation", dictate_from_idle),
+         ("dashboard", cfg.open_dashboard_phrases),
+         ("close_dashboard", cfg.close_dashboard_phrases),
          ("quit", cfg.quit_phrases),
          ("restart", cfg.restart_phrases)],
         transcriber, cfg,

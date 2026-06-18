@@ -172,7 +172,7 @@ sessions; the *patterns* worth importing are trimming and summarization, not the
 | Concern | Adopt LangGraph/LangChain | Borrow the patterns |
 |---|---|---|
 | **Dependency weight** | Pulls `langgraph` + `langgraph-checkpoint`, `-sdk`, `-prebuilt`, `langchain-core`, `pydantic`, `xxhash`; LangChain adds more. Many MB across many packages. | Zero new deps. |
-| **Disk budget** | Real cost — the dev Mac mini is ~97% full (MEMORY). | None. |
+| **Disk budget** | Disk space can be a real constraint — favour lightweight deps. | None. |
 | **Lock-in** | v1 just deprecated the v0 agent/memory APIs; churn is real. Vox's provider-agnostic layer (`assistant.py`) would partly invert to LangChain's model abstraction. | Patterns are timeless; no API to track. |
 | **Complexity** | A graph engine + middleware to learn for a 3-mode loop. Conflicts with CLAUDE.md "minimum code… no speculative abstractions." | Stays in plain Python you already own. |
 | **What you gain** | Free checkpointing, time-travel, HITL, multi-thread, a maintained tool loop. | You reimplement only the slivers you need. |

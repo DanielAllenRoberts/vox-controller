@@ -10,6 +10,20 @@ LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 from vox import actions, assistant
 from vox.config import CONFIG
 
+
+def _setting(key: str, fallback):
+    """Read a runtime override from the dashboard's settings_store, else fall back to Config.
+    Fully guarded (mirrors assistant._setting): if vox.web.settings_store is missing or errors,
+    return the fallback so the executor behaves exactly as before. None from the store means
+    'unset' → fallback. Lets the LLM-executor / screen-vision toggles take effect on the next
+    command without a restart."""
+    try:
+        from vox.web import settings_store
+        val = settings_store.get(key)
+        return fallback if val is None else val
+    except Exception:
+        return fallback
+
 _SYSTEM = (
     "You are the action layer of Vox, a hands-free Mac voice controller. Vox's deterministic "
     "parser couldn't handle what the user just said. Turn it into ONE Vox command, or a short reply.\n"
@@ -64,7 +78,7 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     follow-up answer has context. Returns (acted, message): acted=True means a Vox action ran
     (message is its result); acted=False means it replied conversationally (the spoken reply).
     """
-    if not CONFIG.llm_executor_enabled:
+    if not _setting("llm_executor_enabled", CONFIG.llm_executor_enabled):
         return False, assistant.respond(text, history)
 
     ctx = actions.environment_context()
@@ -83,7 +97,7 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         instruction = raw.split(":", 1)[1].strip()
         return True, actions.edit_selection(lambda sel: _rewrite(sel, instruction))
     if upper.startswith("LOOK:"):
-        if not CONFIG.screen_vision_enabled:
+        if not _setting("screen_vision_enabled", CONFIG.screen_vision_enabled):
             return False, "Screen vision is turned off."
         question = raw.split(":", 1)[1].strip() or "What is on the screen?"
         path = actions.capture_screen()

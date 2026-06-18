@@ -10,16 +10,31 @@ import os
 import subprocess
 import sys
 import threading
+import webbrowser
 
 from dotenv import load_dotenv
 
 from vox import actions, assistant, executor, sounds, tts
-from vox.audio import MicStream, capture_utterance
+from vox.audio import capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
 from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.backends import make_backend, normalize, phrase_match
+
+
+def _setting(key: str, fallback):
+    """Read a runtime override from the dashboard's settings_store, else fall back to Config.
+    Fully guarded (mirrors assistant._setting): if vox.web.settings_store is missing or errors,
+    return the fallback so the daemon behaves exactly as before. None from the store means
+    'unset' → fallback. This is what lets dashboard toggles take effect on the NEXT relevant
+    action without a restart."""
+    try:
+        from vox.web import settings_store
+        val = settings_store.get(key)
+        return fallback if val is None else val
+    except Exception:
+        return fallback
 
 
 class _Quit(Exception):
@@ -30,12 +45,55 @@ class _Restart(Exception):
     """Raised to re-exec the program (pick up code changes) by voice."""
 
 
+def _start_dashboard(cfg, out) -> None:
+    """Launch the embedded dashboard web server in a background daemon thread. Fully guarded:
+    a missing or broken vox.web package must NEVER stop the voice daemon (the dashboard is an
+    additive convenience). Only runs when cfg.dashboard_enabled."""
+    if not getattr(cfg, "dashboard_enabled", False):
+        return
+    try:
+        from vox.web import server
+        server.start_in_background(cfg)
+        out.emit(f"  [dashboard] http://{cfg.dashboard_host}:{cfg.dashboard_port}  (say \"open dashboard\")")
+    except Exception as exc:  # web package missing/broken → log and carry on
+        if cfg.debug:
+            out.emit(f"  [dashboard] not started: {exc}")
+
+
+def _open_dashboard(cfg, out) -> None:
+    """Open the dashboard in its own window (Arc opens external localhost links as a standalone
+    'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
+    stacks. Closing is non-disruptive — actions.close_dashboard presses the window's close button
+    via accessibility (no Space-switch). Guarded so a failure can't break the wake loop."""
+    url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
+    try:
+        if actions._focus_dashboard(url):  # reuse the existing dashboard window/tab
+            out.emit("🖥  Dashboard already open — focused it.")
+            return
+        subprocess.run(["open", url], capture_output=True, text=True)  # own window (Arc → Little Arc)
+        out.emit(f"🖥  Opening dashboard → {url}")
+    except Exception:
+        try:  # last-resort fallback to the system default browser
+            webbrowser.open(url)
+            out.emit(f"🖥  Opening dashboard → {url}")
+        except Exception as exc:
+            out.emit(f"  [dashboard] couldn't open browser: {exc}")
+
+
 def _is_quit(text: str, cfg) -> bool:
     return phrase_match(normalize(text), cfg.quit_phrases)
 
 
 def _is_restart(text: str, cfg) -> bool:
     return phrase_match(normalize(text), cfg.restart_phrases)
+
+
+def _is_open_dashboard(text: str, cfg) -> bool:
+    return phrase_match(normalize(text), cfg.open_dashboard_phrases)
+
+
+def _is_close_dashboard(text: str, cfg) -> bool:
+    return phrase_match(normalize(text), getattr(cfg, "close_dashboard_phrases", ()))
 
 
 def _is_sleep(text: str, cfg) -> bool:
@@ -79,7 +137,7 @@ def _wants_escalation(text: str, cfg) -> bool:
     In "auto" mode (default) everything does. In "keywords" mode it must contain an escalation
     keyword — you opt the brain in by phrasing ("Vox, write me…"), so ambient audio stops tripping
     the LLM (issues.md O7). A pending clarification bypasses this (handled by the caller)."""
-    if cfg.escalation_mode != "keywords":
+    if _setting("escalation_mode", cfg.escalation_mode) != "keywords":
         return True
     t = normalize(text)
     return any(k in t for k in cfg.escalation_keywords)
@@ -97,13 +155,36 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     return text
 
 
-def _run_interruptible(work, frames, cfg, transcriber):
+def _passes_interrupt_gate(audio, text, cfg) -> bool:
+    """A mid-call barge-in must be REAL speech, not a blip (loop 1, O7/O8). Require the captured
+    audio to be sustained ≥ interrupt_min_seconds AND carry ≥ interrupt_min_words transcribed
+    words — mirrors livekit min_interruption_duration/min_interruption_words + pipecat's
+    MinWords strategy. Ambient TV/chatter that leaks one short word no longer cancels the call.
+    Read via the guarded _setting path so defaults are pure wins and dashboard toggles apply live."""
+    min_secs = _setting("interrupt_min_seconds", cfg.interrupt_min_seconds)
+    if min_secs and len(audio) / cfg.sample_rate < min_secs:
+        return False
+    min_words = _setting("interrupt_min_words", cfg.interrupt_min_words)
+    if min_words and len(normalize(text).split()) < min_words:
+        return False
+    return True
+
+
+def _run_interruptible(work, frames, cfg, transcriber, slow=True):
     """Run work() (a blocking LLM call) on a thread while still listening, so the user can cancel
     it by speaking a stop/sleep/quit/restart phrase (barge-in, idea #19). No echo worries — Vox
     isn't speaking during the call. Returns (result, interrupt): interrupt is None if work
     finished, else 'sleep' | 'quit' | 'restart'. An abandoned call finishes in the background and
-    its result is dropped (Python can't kill a thread)."""
-    if not cfg.barge_in_enabled:
+    its result is dropped (Python can't kill a thread).
+
+    `slow` marks calls expected to outrun the poll loop (big-brain / vision / compose). When
+    interrupt_slow_calls_only is on (default), barge-in is NOT armed for fast calls — those finish
+    before the poll fires anyway, so arming there only wastes a capture window and risks a spurious
+    cancel (loop 1, part of O8)."""
+    arm = _setting("barge_in_enabled", cfg.barge_in_enabled)
+    if arm and _setting("interrupt_slow_calls_only", cfg.interrupt_slow_calls_only) and not slow:
+        arm = False
+    if not arm:
         return work(), None
     box: dict = {}
 
@@ -122,6 +203,8 @@ def _run_interruptible(work, frames, cfg, transcriber):
         text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
         if not text:
             continue
+        if not _passes_interrupt_gate(audio, text, cfg):
+            continue  # too short / too few words → a blip, not a barge-in; keep waiting for work()
         if _is_abort(text, cfg) or _is_sleep(text, cfg):
             return None, "sleep"
         if _is_quit(text, cfg):
@@ -135,6 +218,55 @@ def _run_interruptible(work, frames, cfg, transcriber):
     if "error" in box:
         raise box["error"]
     return box.get("result"), None
+
+
+def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
+    """Speak `spoken` while still listening, so the user can talk over the reply (loop 3 / R5).
+
+    Returns (interrupt, text):
+      • (None, None)            — the reply finished uninterrupted (the normal case).
+      • ("sleep", None)         — a stop/sleep/abort phrase cut the reply → caller goes idle.
+      • ("quit"|"restart", None)— those phrases cut the reply → caller raises.
+      • ("redirect", text)      — a real new utterance cut the reply → caller handles `text` next.
+
+    tts.speak() runs on a worker thread (it BLOCKS until the phrase finishes). Meanwhile we capture
+    utterances and apply the loop-1 _passes_interrupt_gate, so ambient blips don't cut the voice.
+    On a gated barge-in we call tts.stop_speaking() to halt Kokoro's streaming player immediately
+    and drop the unplayed audio, then return the decision.
+
+    IMPORTANT — HEADPHONES ONLY: Vox has no echo cancellation yet (loop 5 / AEC). On SPEAKERS the
+    mic hears the TTS and will interrupt Vox with its own voice. This whole path is gated OFF by
+    default (cfg.tts_interruptible) and is only armed for tts_engine=="kokoro" (the only engine
+    stop_speaking() can actually halt) — so the default speak path stays byte-for-byte unchanged."""
+    done = threading.Event()
+
+    def speaker():
+        try:
+            tts.speak(spoken)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=speaker, daemon=True)
+    t.start()
+    try:
+        while not done.is_set():
+            audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
+            if audio is None:
+                continue  # silence — keep speaking
+            text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
+            if not text or not _passes_interrupt_gate(audio, text, cfg):
+                continue  # blip / too short → not a real barge-in; let the reply continue
+            tts.stop_speaking()  # gated, real speech over the reply → cut the voice now
+            if _is_abort(text, cfg) or _is_sleep(text, cfg):
+                return "sleep", None
+            if _is_quit(text, cfg):
+                return "quit", None
+            if _is_restart(text, cfg):
+                return "restart", None
+            return "redirect", text  # anything else → handle it as the next turn
+        return None, None
+    finally:
+        done.wait()  # the speak thread BLOCKS to completion; if we cut it, stop_speaking already fired
 
 
 def _control_mode(frames, cfg, transcriber, out, mic) -> None:
@@ -169,6 +301,18 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
         if _is_dictate(text, cfg):
             out.emit("→ entering dictation…")
             return "dictation"
+        # Dashboard open/close also work from CONTROL mode (not just idle) — caught before the
+        # generic "open <app>" parser, which would otherwise try to open an app called "dashboard".
+        if _is_open_dashboard(text, cfg):
+            sounds.play(cfg.sound_dashboard_open)
+            _open_dashboard(cfg, out)
+            pending = []
+            continue
+        if _is_close_dashboard(text, cfg):
+            sounds.play(cfg.sound_dashboard_close)
+            out.emit(f"🖥  {actions.close_dashboard()}")
+            pending = []
+            continue
         out.emit(f"  you: {text!r}")
         result = actions.handle(text) if actions.parse(text) is not None else None
         if result is not None and not actions.failed(result):
@@ -182,8 +326,11 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             pending = []
         else:  # unparsed, or the deterministic attempt found no target → let the brain try
             sounds.play(cfg.sound_thinking)  # "thinking…" cue — the LLM can take a moment
+            # Control-mode executor is small-brain-first (a quick command translation) — it
+            # usually finishes before the poll loop ever captures an utterance, so arm barge-in
+            # only when interrupt_slow_calls_only is off (loop 1, O8).
             result, interrupt = _run_interruptible(
-                lambda: executor.execute(text, pending), frames, cfg, transcriber)
+                lambda: executor.execute(text, pending), frames, cfg, transcriber, slow=False)
             if interrupt == "quit":
                 raise _Quit
             if interrupt == "restart":
@@ -248,10 +395,35 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         if _is_control(text, cfg):
             out.emit("→ switching to control…")
             return "control"
+        if _is_open_dashboard(text, cfg):  # a control command said mid-chat → do it, keep chatting
+            sounds.play(cfg.sound_dashboard_open)
+            _open_dashboard(cfg, out)
+            mic.flush()
+            continue
+        if _is_close_dashboard(text, cfg):
+            sounds.play(cfg.sound_dashboard_close)
+            out.emit(f"🖥  {actions.close_dashboard()}")
+            mic.flush()
+            continue
+        # Command watcher: a genuine deterministic command mid-chat runs as an ACTION
+        # (you're done talking and you want it done) instead of going to the brain. Mirrors
+        # control mode's deterministic layer — conversational text doesn't parse, so it
+        # still reaches the LLM exactly as before. Only a cleanly-parsed, successful command
+        # short-circuits; a parsed-but-no-target attempt falls through to chat as it did.
+        if actions.parse(text) is not None:
+            cmd_result = actions.handle(text)
+            if cmd_result is not None and not actions.failed(cmd_result):
+                sounds.play(cfg.sound_oneshot)
+                out.emit(f"  ⚡ {cmd_result}")
+                mic.flush()
+                expecting_answer = False
+                continue
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
+        # Assistant chat is the slow path (full conversational reply, may escalate to the big
+        # brain) — worth arming barge-in so a long answer can be cut off (loop 1).
         result, interrupt = _run_interruptible(
-            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber)
+            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber, slow=True)
         if interrupt == "quit":
             raise _Quit
         if interrupt == "restart":
@@ -268,17 +440,45 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         shown, spoken = assistant.split_say(reply)  # brain may pick a shorter spoken version
         history += [("user", text), ("assistant", shown)]
         out.emit(f"  🔊 {shown}" + ("  (…your turn)" if expecting_answer else ""))
+        # Interruptible speaking (loop 3): only when tts_interruptible is ON *and* the engine is
+        # kokoro (the streaming player stop_speaking() can actually halt). HEADPHONES-only — no AEC
+        # yet, so on speakers the mic would hear the TTS. OFF by default → the original blocking
+        # speak + mic.flush path below, byte-for-byte unchanged.
+        if _setting("tts_interruptible", cfg.tts_interruptible) \
+                and _setting("tts_engine", cfg.tts_engine) == "kokoro":
+            interrupt, spoke_text = _speak_interruptible(spoken, frames, cfg, transcriber, mic)
+            mic.flush()  # drop any residual audio captured during/after the reply
+            if interrupt == "quit":
+                raise _Quit
+            if interrupt == "restart":
+                raise _Restart
+            if interrupt == "sleep":  # talked "stop"/"sleep" over the reply → cancel, go idle
+                sounds.play(cfg.sound_sleep)
+                out.emit("○ Sleeping.")
+                return None
+            if interrupt == "redirect":  # talked a new utterance over the reply → handle it next
+                out.emit(f"  ⤳ you cut in — handling {spoke_text!r}")
+                redirect = spoke_text
+                continue
+            if not expecting_answer:  # [DONE] → spoke through, exchange is over → back to idle
+                out.emit("  ✓ done — back to idle (say \"Hey Vox\" to chat again)")
+                return return_to
+            continue
         tts.speak(spoken)
         mic.flush()  # drop our own TTS audio so we don't hear ourselves
+        if not expecting_answer:  # [DONE] → the exchange reached a stopping point → back to idle
+            out.emit("  ✓ done — back to idle (say \"Hey Vox\" to chat again)")
+            return return_to
 
 
 def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
     sounds.play(cfg.sound_dictate_start)
     out.emit('✎ DICTATION — click where you want text, then speak. Say "stop typing" to stop.')
+    actions.reset_dictation()  # fresh spacing/capitalization state for this session
     while True:
         audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
         if audio is None:  # long pause
-            if not cfg.dictation_exit_on_silence:
+            if not _setting("dictation_exit_on_silence", cfg.dictation_exit_on_silence):
                 continue  # setting: stay in dictation until an explicit "stop typing"
             sounds.play(cfg.sound_dictate_stop)
             out.emit("✎ Stopped typing.")
@@ -313,10 +513,12 @@ def main() -> None:
         wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
 
+    _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
+
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
     try:
-        with MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device) as mic:
+        with open_mic_stream(cfg) as mic:
             frames = mic.frames()
             # _Quit/_Restart are handled INSIDE the `with` (not propagated out) so we never run
             # MicStream.__exit__: PortAudio's Pa_StopStream → CoreAudio DeviceStop can deadlock and
@@ -329,10 +531,34 @@ def main() -> None:
                         raise _Quit
                     if label == "restart":
                         raise _Restart
-                    if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
+                    if label == "dashboard":  # "open dashboard" → open the web UI, stay idle
+                        sounds.play(cfg.sound_dashboard_open)
+                        _open_dashboard(cfg, out)
+                        out.emit(idle_msg)
+                        continue
+                    if label == "close_dashboard":  # "close dashboard" → close its tab in place
+                        sounds.play(cfg.sound_dashboard_close)
+                        out.emit(f"🖥  {actions.close_dashboard()}")
+                        out.emit(idle_msg)
+                        continue
+                    if label.startswith("do:"):  # one-shot from idle ("Vox, open Safari" / "Vox, write me…")
                         cmd = label[3:]
                         sounds.play(cfg.sound_oneshot)  # quick "got it" cue
-                        out.emit(f"⚡ {cmd!r} → {actions.handle(cmd)}")
+                        # Deterministic first; if it isn't a clean parser command, escalate to the
+                        # brain so one-shots also cover LLM actions (write / make this pretty / vision).
+                        res = actions.handle(cmd) if actions.parse(cmd) is not None else None
+                        if res is not None and not actions.failed(res):
+                            out.emit(f"⚡ {cmd!r} → {res}")
+                        else:
+                            sounds.play(cfg.sound_thinking)
+                            acted, msg = executor.execute(cmd)
+                            if acted:
+                                out.emit(f"⚡ {msg}")
+                            elif msg:
+                                shown, spoken = assistant.split_say(msg)
+                                out.emit(f"  🔊 {shown}")
+                                tts.speak(spoken)
+                                mic.flush()
                         out.emit(idle_msg)
                         continue
                     # A mode may return a follow-on label to chain into the other mode

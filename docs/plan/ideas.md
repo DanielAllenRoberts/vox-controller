@@ -54,6 +54,8 @@
 
 ## 6. "open UI" — jump to the web UI by voice
 
+> **Status:** ✅ BUILT — "open dashboard" / "close dashboard" work from idle, control *and* assistant modes; opens in its own window (Arc Little-Arc), non-disruptive close, with open/close sound cues.
+
 **Vision:** once the terminal-first **web UI** exists (see `overview.md`), a quick command — "open UI" / "show dashboard" — opens it instantly.
 
 **Notes:** trivial once the UI is up — just open its local URL / focus its window. Natural pairing with the web-UI work.
@@ -92,6 +94,8 @@
 
 ## 10. LLM text commands ("write this" / "make this pretty")
 
+> **Status:** ✅ BUILT — voice compose ("write me…") and rewrite ("make this pretty") via the executor; types the result.
+
 In dictation or on selected text: **"write an email excusing me from X"** → the LLM composes it and types it; **"make this pretty"** → the LLM fixes spelling/punctuation of what you just typed *without changing the words*. Builds directly on M4 (LLM now wired) + dictation (typing) — the natural next step once chat is solid.
 
 ## 11. Cycle same-site tabs ("next YouTube tab")
@@ -99,6 +103,8 @@ In dictation or on selected text: **"write an email excusing me from X"** → th
 Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs). "tab up/down" already works since they're adjacent in the sidebar; a dedicated cycler that jumps between matches would be a touch nicer. Low priority — not a current pain point.
 
 ## 12. LLM-as-executor — escalation that *does* the task (gated tool-calling)
+
+> **Status:** ✅ BUILT — `executor.execute` translates an unrecognised/mis-worded command into a real action via the small brain (tiered small/big), instead of explaining. The deterministic parser still owns the fast path.
 
 **Vision:** when a command isn't recognised or is mis-worded ("close the tabs"; "switch cursor" → "search cursor"), the assistant LLM shouldn't *explain* how to do it — it should **just do it**. Give the LLM gated access to Vox's existing actions (open app, switch tab, close tab, profile…) as callable tools, so escalation bridges the wording gap. Phrasing stops mattering as long as the intent is clear.
 
@@ -112,6 +118,8 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 **Connects to:** the escalation hook (built), the tiered cascade (`overview.md`), #2 (intent classification), and the `claude-agents.md` / `coding-agents.md` research (dedicated gated tools, permission models).
 
 ## 13. Action-first / silent success — don't always talk back
+
+> **Status:** ✅ BUILT (largely) — control commands execute with just a sound cue, no spoken reply; the assistant-mode command-watcher runs a genuine command silently mid-chat too. Full intent-classified speak/stay-quiet split keeps maturing.
 
 **Vision:** when an utterance resolves to an **action**, Vox should just **do it** (with the existing sound cue) and stay quiet — no spoken reply. It should only speak when it's **genuinely ambiguous / confused** or the user **asked a question**. Most control scenarios ("close the tabs") need no verbal response; a spoken "Done!" every time breaks the seamless feel.
 
@@ -163,6 +171,8 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 ## 18. Screen visibility — screenshot vs. accessibility tree
 
+> **Status:** ✅ partial — the **screenshot → vision-model** path is BUILT ("what does this say?" / "what's on my screen" → captures the screen, asks a vision model, speaks the answer). The cheaper **AX-tree → text** path (the better long-term one — was #35) is not yet wired as a brain vision source, though the AX-tree reader exists for the dashboard.
+
 **Vision:** when the brain needs to know what's actually on screen (not just running apps/tabs), give it a way to "see" — so it can answer "what does this say?" or act on what's in front of you.
 
 **Two approaches (the second is the better long-term one):**
@@ -189,7 +199,7 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Connects to:** the emergency-stop phrases (built — `abort_phrases`), the executor (#12), and `research/voice-turn-taking.md` (barge-in / interruption).
 
-**Status:** ✅ BUILT for LLM calls — say "go to sleep" / "stop" / "quit" / "restart" *while the brain is thinking* and it cancels immediately (the call runs on a thread; a stop phrase abandons it). Toggle `barge_in_enabled`. Caveat: the abandoned call finishes in the background, so a quick *action* it was about to run may still complete (slow calls are usually chat/compose/vision, where abandoning is clean). Still pending: interrupting Vox's own *spoken* reply (TTS), which needs AEC (#21) so it doesn't hear itself.
+**Status:** ✅ BUILT for LLM calls — say "go to sleep" / "stop" / "quit" / "restart" *while the brain is thinking* and it cancels immediately (the call runs on a thread; a stop phrase abandons it). Toggle `barge_in_enabled`. Caveat: the abandoned call finishes in the background, so a quick *action* it was about to run may still complete (slow calls are usually chat/compose/vision, where abandoning is clean). **Spoken-reply interruption (talking over Vox) is now BUILT too** — killable streaming Kokoro TTS (`tts_interruptible`) stops mid-sentence when you speak over it (clean on headphones); native macOS AEC (`audio_aec`, #21) is wired but flagged-off for speaker use.
 
 ## 20. Cross-platform (Windows / Linux)
 
@@ -204,6 +214,8 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 **Connects to:** `tts.py` (the swap point), the modular-components goal in `overview.md`.
 
 ## 22. Personalities (swappable + self-tweaking)
+
+> **Status:** ✅ BUILT — choosable presets (Posh Butler, Batman, J.A.R.V.I.S., Surfer, …) + a Default (no-persona) option, picked from the dashboard or by config. Each persona now carries a **fitting voice** (macOS `say` *and* a Kokoro voice). In-dashboard editing is #41 (in progress); LLM self-tweaking is #42 (queued).
 
 **Vision:** give Vox a **personality** you can choose — concise-professional, warm-friendly, witty, deadpan butler — with a setting to swap presets, and (the fun part) let Vox **tweak or invent its own** on request ("be more sarcastic", "talk like a pirate"), persisting it.
 
@@ -229,6 +241,102 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 **Status:** ✅ BUILT (2026-06-17). `escalation_mode` + `escalation_keywords` in config; gated in `_control_mode` so non-keyword utterances are ignored in keyword mode (auto mode unchanged). Default stays `"auto"` so nothing changes unless you opt in.
 
+## 24. Self-heal on error → a learned fix (extends #14–15)
+
+When a control command fails the deterministic parser, instead of escalating to *answer* you, a **background** LLM resolves what you meant, **runs it** (so it works that time too), and **saves a learned phrase→action mapping** so the same phrasing fires **instantly and free** afterwards — the "patch". A **"worth patching?"** judgment decides whether the phrase is a durable command (save it) or a one-off (don't pollute the rules). Later — **task 3** — the LLM can edit actual code/config for cases an action-mapping can't fix (guarded + reviewed). The concrete shape of #14–15. **Confirmation:** when it's unsure whether a fix is worth keeping, it can *ask* — "Would you like me to save this as a skill?" — before writing the rule, so the skill set stays clean and you stay in control.
+
+## 25. Scoped task-prompts — a different prompt per command/agent (separation of concerns)
+
+Don't give every task the full system prompt. Each task type gets a **minimal, scoped** prompt with only the rules and powers it needs: "make this pretty" → only the rewrite rules + permission to rewrite; "write me X" → the compose prompt; the self-heal agent → "you are this agent, your job is X, here are your commands, save output here." Cuts context/cost, sharpens behaviour, and **limits each sub-agent's blast radius** to its one job. The top-level agent still does everything; sub-tasks are narrowed. Connects to #10, #12, #17, #24.
+
+## 26. Full control access for the executor + intent recovery (extends #12)
+
+Let the executor also issue the **control verbs** — sleep, restart, quit, stop, switch mode — so the LLM can recover garbled commands and fix its own mistakes (e.g. "gotta go to sleep" mis-heard → it infers *sleep*). Acts when confident; when **uncertain**, asks a spoken yes/no ("Would you like to put Vox to sleep?") and acts on the answer. Pairs with #24 (learning) and #25 (scoped prompts).
+
+## 27. Storage backends — SQLite + human-readable Markdown (transparency)
+
+> **Status:** ✅ partial — **memory is now human-readable Markdown** (tiered: core + dated daily files, readable/navigable in the dashboard). SQLite for the structured stores (rules/usage) is still pending.
+
+Stores are JSON/JSONL under `data/` today. For an open-source **download** (users get the program, not the repo), consider **SQLite** (single file, ships with Python's `sqlite3`, robust + queryable) for structured stores, and **Markdown** for memory so the user can *read and navigate everything the AI saves* — transparency is a first-class goal. Add a configurable data location + optional encryption for sensitive memory; the Memory dashboard tab becomes a browser/editor over it. (OpenClaw leans on SQLite + Markdown — worth studying.)
+
+## 28. Tiered memory + a "dream" consolidation job + a navigable second brain
+
+> **Status:** ✅ partial — **tiered memory is BUILT** (quick-recall core facts always injected + dated daily logs, recalled by relevance). The scheduled big-brain **"dream" consolidation** job (dedupe/roll-up into weekly/monthly) and the navigable second-brain RAG are still to build.
+
+Stop putting all memory into the prompt. Layer it: **quick-recall** (a few always-injected, high-importance facts) · **daily logs** (the agent documents what it did) · a scheduled **"dream"** job (big-brain) that consolidates the logs, dedupes, resolves inconsistencies, and rolls them up into weekly/monthly/total memories · and a **second brain** — index everything into folders the agent *navigates on demand* ("the user is at work — let me check the work folder for their progress") instead of stuffing it all in context. Agentic RAG over a structured, human-readable tree. Builds on #14/#24/#27; the dream job rides the scheduler (#16) on the big brain.
+
+## 29. Memory auto-capture — remember on its own
+
+> **Status:** ✅ BUILT — the assistant decides to save salient facts itself via a gated `MEMORY[...]` directive (and on "remember that…"), feeding the tiered store; toggle in Settings.
+
+Today memories are added only via the dashboard; the assistant *recalls* (keyword-matched, injected) but never *stores*. Let it **decide to save** salient facts itself (or on "remember that…"), feeding the tiered store (#28). Ties to #14/#24.
+
+## 30. Voice → dashboard control (close the loop)
+
+> **Status:** ✅ partial — the **"close dashboard"** phrase is BUILT (matches "open dashboard"). The broader voice→settings control ("switch to Batman", "set my budget to ten dollars", "turn on debug") is still to wire.
+
+Today it's one-way: dashboard → voice (UI changes affect the daemon on the next call). Add the reverse — change settings/personality/rules/budget **by voice**: "switch to Batman", "add a rule: keep replies short", "set my budget to ten dollars", "turn on debug". Voice commands write to the bridge/stores. Plus a **"close dashboard"** phrase to match "open dashboard" (#6).
+
+## 31. Pluggable voice-model / TTS API
+
+> **Status:** ✅ BUILT — `tts_engine` flag swaps macOS `say` ↔ local **Kokoro** (neural, 54 voices), lazy-loaded with fallback to `say`. `tts.py` is the clean swap point; more engines (Piper, a cloud voice) drop in here.
+
+Abstract TTS behind a small provider API so the voice can be swapped — macOS `say` now, a neural local model (Piper) or a cloud voice API later — without touching the rest (`tts.py` is already the swap point). Pairs with **M2**.
+
+## 32. Barge-in from phone-call agents — borrow the open-source playbook
+
+Open-source phone-call / sales voice agents have already solved real-time interruption + talk-over (they go silent the instant you speak over them). Mine those repos for their VAD / turn-taking / barge-in handling and fold the approach into Vox's barge-in (#19) + AEC (#21). See `research/voice-turn-taking.md`.
+
+## 33. Dashboard "Phrasebook / Help" tab
+
+> **Status:** ✅ BUILT — the **Handbook** tab, generated from the live phrase config so it never drifts (document layout, accordions, variant popovers).
+
+A reference tab in the dashboard listing every wake phrase, command, mode, and feature — a living help book generated from the actual phrase config so it never drifts.
+
+## 34. "Speak when done" MCP for the coding agent (the concrete #3)
+
+An MCP server that lets the coding agent (Claude Code) speak through the system TTS, so while you work it can announce "workflow finished" / "tests passed" out loud — "give me a shout when you're done." The concrete form of #3.
+
+## 35. Vision as structure-as-text — the AX/DOM-tree path (of #18)
+
+> **⚠️ Duplicate → merged into #18.** Same idea: prefer the **accessibility/DOM tree as text** (cheap, structured, token-light) over screenshots, reusing the **AX-tree reader already built for the dashboard** as the brain's vision source — screenshot stays the fallback. Tracked under #18; this entry is kept only so existing "#35" references resolve.
+
+## 36. Context-aware command profiles — commands that change with the active app/site
+
+The same phrase should mean different things depending on what's focused. "Search for X" → searches **YouTube** when it's open, the web otherwise; with **Cursor** focused, unlock Cursor-specific verbs ("new terminal", "type in the terminal", "open file"). Per-app / per-site command sets let you **reuse phrases for different purposes** and cut ambiguity — the router picks the profile from the focused app/tab (already surfaced by `actions.environment_context()`). Near-term win on the same theme: tab-switching by name is unreliable when a tab's *title* is generic (a Google Doc shows as "Untitled" / "unknown doc"), so neither the fuzzy matcher nor the brain can tie "open Google Docs" to it — enrich the context with each tab's **URL/domain** (`docs.google.com`) and the match (deterministic, or learned via #24) becomes solid. Pairs with scoped prompts (#25), the learning layer (#24), and AX-tree handles (#35).
+
+## 37. Real website control — simplified DOM + expand-on-demand + screenshot grid
+
+Interacting with web pages needs more than the macOS a11y tree. The mature web-agent stack: (1) **simplify the DOM** to a compact list of interactive/labelled elements (or HTML→Markdown for reading) — raw HTML is far too much context; (2) a **progressive-disclosure tool** so the model can *expand* a specific region only when it needs the detail; (3) **screenshot + numbered marks** ("set-of-marks": overlay numbered boxes on clickable elements, the model picks a number) as visual grounding / fallback. Combine: simplified-DOM/a11y as the cheap primary, the expand-tool for depth, the screenshot-grid for visual cases. Needs browser automation (CDP / the browser's own a11y / an extension) beyond System Events. Builds on #35; connects to in-browser tab/profile control (#4) and the learned-click macros of #24/#35.
+
+## 38. A third "coding" brain — hand coding tasks off to a code model
+
+Beyond **small** (fast/cheap) and **big** (deep) brains, add a **coding** brain: when a request is a coding task, hand it to a code-specialised model/agent (e.g. Claude Code or a local code model) instead of the general brain. Extends the brains layer (#17); pairs with the coding/handoff mode (#2).
+
+## 39. Multiple named agents (late-stage)
+
+Call different agents by **name** — "Hey Atlas" for a coding work-session agent, "Hey Vox" for the general one — each with its **own voice, persona, brain, and command set**, so the *name itself routes* to a different agent. Builds on the wake phrases, personalities (#22), scoped prompts (#25), and the coding brain (#38). A fun, late-stage feature.
+
+## 40. Learn your name (setup / personalization)
+
+Give Vox your name — via a first-run **setup/onboarding** flow, or on the fly ("my name is Dan") — so it addresses you naturally and stores it as a core memory. Small but high-warmth; connects to memory auto-capture (#29), the second brain (#28), and personalising recognition (#8).
+
+## 41. Expand & edit personalities (in the dashboard)
+
+> **Status:** ✅ BUILT — `update_custom` + `PATCH /api/personalities/custom/{id}` (presets read-only) + a dashboard **edit** dialog (all fields incl. both voices) and a read-only **full-text view** (eye icon) for any persona. LLM self-editing is still #42.
+
+View a persona's full text and edit it in place — expand each card to read the whole prompt, then tweak name/emoji/voice/persona and save. Needs an `update_custom` in `personalities.py` + a `PATCH /api/personalities/{id}` route + an expand/edit UI on the Personalities page. Pairs with the new Default (no-persona) option and #42. **Queued to build right after the in-flight Handbook/Default-persona workflow** (shares those files).
+
+## 42. Let the LLM edit its own persona on request
+
+When you tell Vox "I don't like that you do X in this character — do Y instead," it updates the **active** persona going forward (not just this turn). Mirrors the memory auto-capture pattern: a gated `PERSONA[update]: <change>` directive the model appends, which is parsed, applied to the active personality (append/merge the instruction), and stripped from the reply. Gated by a toggle; only edits **custom** personas (presets stay pristine — fork-on-edit). Builds on #22/#41 + the `MEMORY[...]` directive (#29). **Queued next.**
+
+## 43. Live conversation viewer (dashboard tab)
+
+A dashboard tab that shows the running conversation like a chat — what you said, what each brain replied, and which commands ran — so you can watch what's happening. **Ephemeral by design:** the daemon publishes each turn to the bridge (the same way it already streams usage events over the WS), the page renders them live, and **nothing is written to disk** — it's just the in-RAM session buffer mirrored to the UI. Pairs with the prompt/response debug logging (#just-built); the persistent layer stays the tiered memory (#28/#29).
+
 ## Sequencing note
+
+> **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation.
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.
