@@ -106,3 +106,39 @@ Goal: make it genuinely look professional and cool — confirmed by eye, then im
 
 **Next (Iteration 4 — Personalities)**
 - Build the Personalities page: presets + custom editor wired to the live `personality` setting, with persona previews.
+
+### Iteration 4 — Personalities (2026-06-18)
+
+**Built**
+- Backend store `src/vox/web/personalities.py` (NEW): 8 code-defined presets + custom CRUD; `all() → {active, presets, custom}`, `set_active(id)`, `add_custom(...)`, `remove_custom(id)`, `get_active()`/`get_active_personality()`. Persists only `{active, custom}` to `data/personalities.json` (presets live in code, never written); fully guarded so a missing/corrupt store reverts to today's behaviour (no active persona).
+- Validated routes in `web/server.py`: personalities routes now return HTTP 400 `{ok,error}` on bad id / missing name|persona (previously 500); added guarded `_apply_suggested_voice` that matches `tts_voice` on activate (no-op until `settings_store.SCHEMA` exposes that key).
+- Live persona in `src/vox/assistant.py`: guarded `_active_persona()` resolves store → `CONFIG.personality` → `""`; `respond_turn` builds the system prompt from it instead of reading `CONFIG.personality` directly.
+- Personalities page `dashboard/src/pages/Personalities.tsx` (full rewrite, replaced ComingSoon): two responsive galleries (Presets / Your personas) of glass persona cards — emoji avatar, name, tagline, 3-line persona preview, suggestedVoice chip. Whole card activates the persona (optimistic POST `/api/personalities/active`, rollback + toast on error). Active state = violet→cyan glow halo + accent ring + corner wash + Active badge (also in header). Create dialog (emoji/name/persona/optional macOS-say voice → POST `/personalities/custom`); hover-trash + confirm → DELETE `/personalities/custom/{id}`; premium empty state when no custom personas.
+- New primitive `dashboard/src/components/ui/textarea.tsx` (shadcn-style, matches `<Input>` tokens). Reused only existing primitives + toast variants; no new deps, daemon untouched.
+- Docs: appended Personalities sections to `docs/dashboard/backend.md` and `docs/dashboard/frontend.md`.
+
+**The 8 presets** (id → emoji, suggested `say` voice)
+- Posh Butler 🤵 (Daniel) — impeccable, discreet English butler.
+- Batman 🦇 (Lee) — gravelly, terse, relentlessly competent.
+- J.A.R.V.I.S. 🤖 (Oliver) — crisp, dry-witted AI majordomo.
+- The Philosopher 🧠 (Daniel) — Socratic, reflective, lands on a concrete answer.
+- Film-Noir Detective 🕵️ (Lee) — hard-boiled first-person, always cracks the case.
+- Surfer 🏄 (Aaron) — chill and stoked but actually knows its stuff.
+- Shakespearean Bard 🎭 (Daniel) — playful early-modern flourish, kept actionable.
+- Sherlock Holmes 🔍 (Oliver) — deductive, precise, never pads.
+
+**Decisions**
+- Personas are tight 2–4 sentence system prompts that always insist on staying genuinely helpful, so character never trumps accuracy. `active` default is `""` (none); `set_active("")` deactivates; custom ids are deduped slugs vs presets+custom; removing the active custom persona clears `active`; presets can't be removed.
+- API client + `Personality` types already existed in `lib/api.ts` from iter 1 — frontend-only, no contract change. Radix Select can't hold empty values, so "no voice" uses a `__none__` sentinel mapped back to `undefined`. Delete affordance on custom cards only, with `stopPropagation` so it never activates the card.
+- `suggestedVoice` → `tts_voice` is applied only if the settings schema exposes `tts_voice` (it currently does not — `settings_store.SCHEMA` is owned by the settings agent), so it's a guarded no-op that lights up automatically if that key is added later, avoiding a `SettingError` and avoiding editing a file this agent doesn't own.
+
+**Verify**
+- `cd dashboard && npx tsc -b --noEmit` clean; `npm run build` succeeds. Page verified live: clicking a card moves the active ring/glow/badge instantly; "Create custom" → new card under "Your personas" persists to `data/personalities.json`; hover-trash → confirm → removed; bridge-down shows offline notice and rolls back failed activations.
+- Backend: 8 presets served, GET 200, valid activate 200, unknown id 400, blank custom 400; daemon modules still import cleanly. Runtime `data/personalities.json` is gitignored — delete after testing. No git run; additive-only, daemon untouched.
+
+**Known gaps / TODOs**
+- No inline edit / PATCH of existing custom personas (create + delete only — no PATCH route in `CONTRACT.md`); emoji is a plain text input (no picker).
+- Suggested-voice activation is dormant until a future iteration adds `tts_voice` to `settings_store.SCHEMA`.
+
+**Next (Iteration 5 — AX-tree visualization)**
+- Build the read-only macOS AX tree reader + AX Tree page: searchable, collapsible tree with refresh / auto-refresh.

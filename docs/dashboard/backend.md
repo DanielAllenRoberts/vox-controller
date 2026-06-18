@@ -16,8 +16,9 @@ server always boots and the voice daemon never breaks. Follows
 | `axtree.py` | `snapshot()` — read-only macOS AX tree (already present). |
 | `memory.py` (top-level) | `add/recall/all/remove` — used by the memory routes (already present). |
 
-`personalities.py` and `rules.py` do **not** exist yet (later iterations). Their
-routes are guarded and return safe empty/placeholder data until they land.
+`personalities.py` landed in iteration 4 (8 presets + custom CRUD; see the
+Personalities section below). `rules.py` does **not** exist yet (later iteration); its
+routes are guarded and return safe empty/placeholder data until it lands.
 
 ## REST API (all under `/api`, JSON, camelCase)
 
@@ -29,8 +30,8 @@ routes are guarded and return safe empty/placeholder data until they land.
 | GET | `/api/usage/recent?limit=100` | `UsageEvent[]` (newest first) |
 | GET | `/api/usage/summary` | `{totals, byModel, byDay}` |
 | WS | `/api/usage/stream` | one `UsageEvent` per call as it happens |
-| GET/POST | `/api/personalities`, `/api/personalities/active`, `/api/personalities/custom` | guarded (empty until impl) |
-| DELETE | `/api/personalities/custom/{id}` | guarded |
+| GET/POST | `/api/personalities`, `/api/personalities/active`, `/api/personalities/custom` | live (8 presets + custom; 400 on bad id / blank name|persona) |
+| DELETE | `/api/personalities/custom/{id}` | live (`{ok}`) |
 | GET/POST | `/api/rules` · PATCH/DELETE `/api/rules/{id}` | guarded (empty until impl) |
 | GET/POST | `/api/memory?query=&limit=` · DELETE `/api/memory/{id}` | wired to `vox.memory` |
 | GET | `/api/axtree` | `{app, capturedAt, tree}` or `{error}` |
@@ -270,3 +271,89 @@ print(loop._setting('escalation_mode','auto'), executor._setting('llm_executor_e
 ```
 
 > Remove the test `data/settings.json` afterwards — it is gitignored runtime data.
+
+---
+
+## Personalities (iteration 4) — `src/vox/web/personalities.py`
+
+The assistant's *persona*: the in-character flavour layered on top of the base
+`_SYSTEM` prompt. Eight fun-but-helpful presets are code-defined; the user can add
+custom personas and pick which one is **active**. The active persona drives the live
+system prompt in `assistant.respond_turn`.
+
+### Data shape (CONTRACT)
+
+`Personality` = `{id, name, emoji, tagline, persona, suggestedVoice?, preset: bool}`.
+`persona` is a tight 2–4 sentence system-prompt instruction that sets a distinctive
+voice/character while keeping the assistant genuinely helpful.
+
+### Presets (preset=true, never persisted)
+
+Posh Butler 🤵 (Daniel) · Batman 🦇 (Lee) · J.A.R.V.I.S. 🤖 (Oliver) · The Philosopher 🧠
+(Daniel) · Film-Noir Detective 🕵️ (Lee) · Surfer 🏄 (Aaron) · Shakespearean Bard 🎭
+(Daniel) · Sherlock Holmes 🔍 (Oliver).
+
+### Public API
+
+- `PRESETS` — the 8 code-defined preset dicts.
+- `all() -> {active, presets, custom}` — active is the id string (`""` = none).
+- `get_active() -> str` — the active persona **text** (presets+custom resolved), `""`
+  if none/unknown. Guarded; never raises. Used by `assistant._active_persona()`.
+- `get_active_personality() -> dict|None` — the full active Personality (for
+  `suggestedVoice`).
+- `set_active(id) -> str` — validates id ∈ presets+custom or `""`; raises `ValueError`
+  (→ 400) on unknown id.
+- `add_custom(name, persona, emoji?, suggestedVoice?, tagline?) -> Personality` — slug
+  id (deduped vs presets+custom), `preset=false`; raises `ValueError` (→ 400) if name
+  or persona is blank.
+- `remove_custom(id) -> bool` — removes a custom persona; clears active if it was the
+  one removed; presets can't be removed (returns False).
+
+### Persistence
+
+Only `{active, custom}` → `data/personalities.json` (gitignored). Presets live in code.
+Atomic write (tmp + replace); corrupt/missing file degrades to `{active:"", custom:[]}`.
+
+### Routes (`server.py`)
+
+- `GET /api/personalities` → `all()`
+- `POST /api/personalities/active` `{id}` → `{ok, active}`; unknown id → 400 `{ok,error}`.
+  On success, if the active persona has a `suggestedVoice` **and** the settings schema
+  exposes `tts_voice`, the TTS voice is matched via `settings_store.set` (additive,
+  fully guarded no-op otherwise — see `_apply_suggested_voice`).
+- `POST /api/personalities/custom` `{name,persona,emoji?,suggestedVoice?}` → Personality;
+  missing name/persona → 400 `{ok,error}`.
+- `DELETE /api/personalities/custom/{id}` → `{ok}`.
+
+### Live wiring (`assistant.py`)
+
+`_active_persona()` returns the live active persona text: personalities store →
+`CONFIG.personality` → `""`. Fully guarded (try/import) so a missing or broken store
+reverts to exactly today's behaviour. `respond_turn` builds the system prompt from
+`_active_persona()` instead of reading `CONFIG.personality` directly, so flipping the
+active persona in the dashboard changes the next reply's character with no restart.
+
+### Verify
+
+```bash
+# store: presets + active + custom + validation
+uv run python -c "from vox.web import personalities as p; \
+print(len(p.all()['presets'])); print(p.set_active('batman')); \
+print(p.get_active()[:30]); c=p.add_custom(name='Pirate',persona='Arr, be helpful.'); \
+print(c['id'], p.remove_custom(c['id']))"
+
+# HTTP: 200 + 400s
+uv run python -c "from fastapi.testclient import TestClient; from vox.web import server; \
+c=TestClient(server.create_app()); \
+print(c.post('/api/personalities/active',json={'id':'sherlock'}).status_code); \
+print(c.post('/api/personalities/active',json={'id':'zzz'}).status_code); \
+print(c.post('/api/personalities/custom',json={'name':'','persona':''}).status_code)"
+# expect: 200 400 400
+
+# live wiring (guarded fallback)
+uv run python -c "from vox import assistant; from vox.web import personalities as p; \
+p.set_active('jarvis'); print(assistant._active_persona()[:20]); \
+p.set_active(''); print(repr(assistant._active_persona()))"
+```
+
+> Remove the test `data/personalities.json` afterwards — it is gitignored runtime data.

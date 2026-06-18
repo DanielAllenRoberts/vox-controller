@@ -268,3 +268,72 @@ all files using the `React.` namespace import React.
    Verified live at 1440px: all four groups render cohesively (dark glass +
    backdrop-blur, violet accent toggles, hairline borders), a Debug toggle POSTed
    and persisted `{"debug": false}` to `data/settings.json`, 0 console errors.
+
+## Iteration 4 — Personalities page (preset gallery + custom editor)
+
+Replaced the `Personalities` ComingSoon stub with a real, data-driven page.
+Frontend-only: the `api.personalities*` methods and `Personality` types already
+existed in `lib/api.ts` (added by iter 1 to mirror CONTRACT.md), so no client or
+type changes were needed.
+
+### New files
+- `dashboard/src/components/ui/textarea.tsx` — shadcn-style `<Textarea>` matching
+  `<Input>` (same border/ring/glass tokens). Used by the custom-persona editor.
+
+### Changed files
+- `dashboard/src/pages/Personalities.tsx` — full rewrite. Drives off
+  `GET /api/personalities` (`{active, presets[], custom[]}`) via React Query.
+  Two galleries (Presets, Your personas) of rich persona cards: big emoji avatar,
+  name, tagline, 3-line clamped persona preview, and a `suggestedVoice` chip
+  (audio-lines icon). Responsive grid: 1 col → 2 (sm) → 3 (lg) → 4 (xl), staggered
+  fade-in.
+
+### Decisions
+- **Whole card is the activate control.** Clicking any card POSTs
+  `/api/personalities/active {id}` with an **optimistic** cache update (writes
+  `active` immediately) + the existing toast; on error it rolls back and warns.
+  No-ops when the card is already active. The active card gets an unmistakable
+  state: violet→cyan **glow halo** behind it, an `accent` ring, a corner gradient
+  wash, and an **Active** badge. The header also shows the active persona as an
+  accent badge.
+- **Delete on custom cards only.** A trash affordance (revealed on hover/focus)
+  lives inside the card; it `stopPropagation`s so it never activates the card, and
+  opens a confirm `<Dialog>` ("Delete persona?") before
+  `DELETE /api/personalities/custom/{id}`. Success prunes the cache + info toast.
+- **Create flow = `<Dialog>`** (header "Create custom" button + the empty-state
+  CTA both open it). Fields: emoji (short text input, centered), name, persona
+  (`<Textarea>`), and an optional suggested-voice `<Select>` limited to the macOS
+  `say` voices Daniel/Karen/Moira/Rishi/Samantha/Tessa. Submit (name + persona
+  required) POSTs `/api/personalities/custom`; success appends the returned
+  persona to the cache, toasts, resets, and closes. Radix Select can't hold an
+  empty value, so "no voice" uses a `__none__` sentinel mapped back to
+  `undefined` on submit.
+- **Empty state.** When `custom` is empty, the second section shows a centered
+  glass card (gradient blur, user-plus icon, copy, gradient CTA) instead of a
+  grid — reuses the iter-1/3 premium look.
+- Reused existing primitives only (`Card glass`, `Badge`, `Button` gradient/
+  destructive/ghost, `Dialog`, `Select`, `Input`, `Skeleton`, `FadeIn`,
+  `Stagger`). Toast variants are the system's `success|error|info`. No new deps,
+  no client/contract changes, daemon untouched.
+
+### TODOs / future
+- No inline **edit** of an existing custom persona (create + delete only — matches
+  the contract's API surface). An edit flow would need a PATCH route not in
+  CONTRACT.md.
+- Emoji input is a plain text field (no picker) per the "simple emoji input" ask.
+- Presets aren't deletable (no delete affordance rendered) — correct per contract.
+
+### How to verify
+1. `cd dashboard && npm install && npx tsc -b --noEmit` — clean (no errors).
+2. `npm run build` → succeeds; `dashboard/dist` rebuilt.
+3. With the bridge up on `127.0.0.1:8765`: `/personalities` shows a Presets
+   gallery (Posh Butler, Batman, J.A.R.V.I.S., …) of glass cards with emoji,
+   name, tagline, persona preview, and a voice chip. Clicking a card **instantly**
+   moves the Active ring + glow + badge to it, POSTs `/api/personalities/active`,
+   and pops a success toast; the header badge updates. "Create custom" opens the
+   editor — filling name + persona (+ optional emoji/voice) and submitting POSTs
+   `/api/personalities/custom`, the new card appears under "Your personas", and it
+   persists to `data/personalities.json`. The custom card's hover trash → confirm
+   dialog → DELETE removes it. With no custom personas the section shows the empty
+   state. With the bridge down: offline notice; a failed activate rolls back +
+   error toast (daemon unaffected — `vox.web` stays lazy).

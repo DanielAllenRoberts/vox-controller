@@ -67,6 +67,24 @@ def _try_import(name: str):
         return None
 
 
+def _apply_suggested_voice(mod) -> None:
+    """If the now-active persona declares a ``suggestedVoice``, persist it as the TTS
+    voice via settings_store so spoken output matches the character. Fully guarded and
+    additive: any failure (no active persona, no voice, store error) is a silent no-op."""
+    try:
+        active = mod.get_active_personality()
+        voice = (active or {}).get("suggestedVoice")
+        if not voice:
+            return
+        # Only set tts_voice if the settings schema exposes it (avoids a SettingError
+        # for an unknown key). If a future iteration adds the key, this lights up
+        # automatically; until then it's a silent no-op.
+        if any(s.get("key") == "tts_voice" for s in settings_store.SCHEMA):
+            settings_store.set("tts_voice", voice)
+    except Exception:
+        pass
+
+
 def create_app() -> FastAPI:
     """Build and return the FastAPI app with all routes mounted."""
     app = FastAPI(title="Vox Control Center", version="0.1.0")
@@ -150,25 +168,35 @@ def create_app() -> FastAPI:
         return mod.all()
 
     @app.post("/api/personalities/active")
-    async def set_personality_active(request: Request) -> dict:
+    async def set_personality_active(request: Request):
         mod = _try_import("personalities")
         if mod is None:
-            return {"ok": False}
+            return {"ok": False, "error": "personalities module not available"}
         body = await request.json()
-        return {"ok": True, "active": mod.set_active(body.get("id"))}
+        try:
+            active = mod.set_active(body.get("id"))
+        except ValueError as exc:  # unknown id
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        # Optional, additive: when the active persona suggests a voice, match the TTS
+        # voice so the spoken output fits the character. Fully guarded — best effort.
+        _apply_suggested_voice(mod)
+        return {"ok": True, "active": active}
 
     @app.post("/api/personalities/custom")
-    async def add_personality(request: Request) -> dict:
+    async def add_personality(request: Request):
         mod = _try_import("personalities")
         if mod is None:
-            return {"ok": False}
+            return {"ok": False, "error": "personalities module not available"}
         body = await request.json()
-        return mod.add_custom(
-            name=body.get("name"),
-            persona=body.get("persona"),
-            emoji=body.get("emoji"),
-            suggestedVoice=body.get("suggestedVoice"),
-        )
+        try:
+            return mod.add_custom(
+                name=body.get("name"),
+                persona=body.get("persona"),
+                emoji=body.get("emoji"),
+                suggestedVoice=body.get("suggestedVoice"),
+            )
+        except ValueError as exc:  # missing name/persona
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
     @app.delete("/api/personalities/custom/{pid}")
     def remove_personality(pid: str) -> dict:
