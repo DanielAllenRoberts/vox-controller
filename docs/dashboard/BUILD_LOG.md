@@ -4,6 +4,9 @@
 
 **Branch:** `staging` (never pushed to `main`). **Started:** 2026-06-18.
 
+## ✅ BUILD COMPLETE (2026-06-18)
+The dashboard is finished and committed to `staging` across 8 iterations: foundation → token usage & cost → settings → personalities → AX-tree/rules/memory/command-palette blitz → audit & refine → creative features (budgets, theme, shortcuts, diagnostics) → finalize (README + typed-client tidy + final QA). Final visual QA passed in both dark and light themes; build + daemon-import + bridge smoke all clean; `main` untouched. README at `docs/dashboard/README.md`. **The build loop is STOPPED — if a scheduled wakeup fires after this, confirm no workflow is in-flight and do nothing (do not re-arm, do not launch more work).** Open TODOs are minor and listed in the iteration entries below (rules unknown-id 400-vs-404; vite >500 kB chunk; AX-tree depth/breadth query params; memory auto-capture).
+
 ## How the loop runs
 1. Run the iteration's workflow (agents write files per `CONTRACT.md`, never commit).
 2. When it finishes: quick verify, append an entry under "Progress" below, then commit `dashboard iteration N/10: <focus>`.
