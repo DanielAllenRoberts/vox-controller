@@ -242,6 +242,27 @@ def create_app() -> FastAPI:
         except ValueError as exc:  # missing name/persona
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
+    @app.patch("/api/personalities/custom/{pid}")
+    async def edit_personality(pid: str, request: Request):
+        mod = _try_import("personalities")
+        if mod is None:
+            return {"ok": False, "error": "personalities module not available"}
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        try:
+            return mod.update_custom(
+                pid,
+                name=body.get("name"),
+                persona=body.get("persona"),
+                emoji=body.get("emoji"),
+                suggestedVoice=body.get("suggestedVoice"),
+                kokoroVoice=body.get("kokoroVoice"),
+                tagline=body.get("tagline"),
+            )
+        except ValueError as exc:  # preset / unknown id / blank required field
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
     @app.delete("/api/personalities/custom/{pid}")
     def remove_personality(pid: str) -> dict:
         mod = _try_import("personalities")
@@ -979,16 +1000,24 @@ def _mount_static(app: FastAPI) -> None:
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
+        # index.html must NEVER be browser-cached — it references the content-hashed JS bundle, so a
+        # stale index.html keeps loading an old bundle after a rebuild (the "I rebuilt but the
+        # dashboard didn't change until a hard-refresh" gremlin). The hashed /assets are immutable
+        # and cache freely.
+        _NO_CACHE = {"Cache-Control": "no-cache, max-age=0"}
+
         @app.get("/{full_path:path}")
         def spa(full_path: str):
             # Serve a real file if it exists, else fall back to index.html so the
             # client-side router handles the route.
             candidate = _DIST_DIR / full_path
             if full_path and candidate.is_file():
+                if candidate.name == "index.html":
+                    return FileResponse(candidate, headers=_NO_CACHE)
                 return FileResponse(candidate)
             index = _DIST_DIR / "index.html"
             if index.is_file():
-                return FileResponse(index)
+                return FileResponse(index, headers=_NO_CACHE)
             return JSONResponse({"error": "dashboard not built"}, status_code=404)
     else:
         @app.get("/")

@@ -395,6 +395,16 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         if _is_control(text, cfg):
             out.emit("→ switching to control…")
             return "control"
+        if _is_open_dashboard(text, cfg):  # a control command said mid-chat → do it, keep chatting
+            sounds.play(cfg.sound_dashboard_open)
+            _open_dashboard(cfg, out)
+            mic.flush()
+            continue
+        if _is_close_dashboard(text, cfg):
+            sounds.play(cfg.sound_dashboard_close)
+            out.emit(f"🖥  {actions.close_dashboard()}")
+            mic.flush()
+            continue
         # Command watcher: a genuine deterministic command mid-chat runs as an ACTION
         # (you're done talking and you want it done) instead of going to the brain. Mirrors
         # control mode's deterministic layer — conversational text doesn't parse, so it
