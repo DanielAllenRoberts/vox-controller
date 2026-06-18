@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import webbrowser
 
 from dotenv import load_dotenv
 
@@ -28,6 +29,32 @@ class _Quit(Exception):
 
 class _Restart(Exception):
     """Raised to re-exec the program (pick up code changes) by voice."""
+
+
+def _start_dashboard(cfg, out) -> None:
+    """Launch the embedded dashboard web server in a background daemon thread. Fully guarded:
+    a missing or broken vox.web package must NEVER stop the voice daemon (the dashboard is an
+    additive convenience). Only runs when cfg.dashboard_enabled."""
+    if not getattr(cfg, "dashboard_enabled", False):
+        return
+    try:
+        from vox.web import server
+        server.start_in_background(cfg)
+        out.emit(f"  [dashboard] http://{cfg.dashboard_host}:{cfg.dashboard_port}  (say \"open dashboard\")")
+    except Exception as exc:  # web package missing/broken → log and carry on
+        if cfg.debug:
+            out.emit(f"  [dashboard] not started: {exc}")
+
+
+def _open_dashboard(cfg, out) -> None:
+    """Open the dashboard URL in the default browser (hands-free 'open dashboard'). Guarded so a
+    failure can't break the wake loop."""
+    url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
+    try:
+        webbrowser.open(url)
+        out.emit(f"🖥  Opening dashboard → {url}")
+    except Exception as exc:
+        out.emit(f"  [dashboard] couldn't open browser: {exc}")
 
 
 def _is_quit(text: str, cfg) -> bool:
@@ -313,6 +340,8 @@ def main() -> None:
         wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
 
+    _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
+
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
     try:
@@ -329,6 +358,10 @@ def main() -> None:
                         raise _Quit
                     if label == "restart":
                         raise _Restart
+                    if label == "dashboard":  # "open dashboard" → open the web UI, stay idle
+                        _open_dashboard(cfg, out)
+                        out.emit(idle_msg)
+                        continue
                     if label.startswith("do:"):  # one-shot command from idle ("Vox, open Safari")
                         cmd = label[3:]
                         sounds.play(cfg.sound_oneshot)  # quick "got it" cue

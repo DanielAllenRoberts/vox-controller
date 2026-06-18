@@ -1,0 +1,183 @@
+"""Read-only macOS Accessibility (AX) tree snapshot of the focused app.
+
+Foundation skeleton (dashboard iteration 1). Walks the frontmost app's front
+window via AppleScript / System Events UI-element traversal — NO interaction,
+read-only — and returns it as a nested ``AxNode`` per ``docs/dashboard/CONTRACT.md``.
+
+Design (see ``docs/dashboard/research/axtree.md`` for the full rationale):
+- AppleScript over pyobjc: zero new deps (the package already shells ``osascript``;
+  pyobjc is not installed), one subprocess round-trip, same failure model as
+  ``actions.py``.
+- A recursive AppleScript handler emits ONE tab-delimited line per node
+  ``depth<TAB>role<TAB>title<TAB>value`` with bounded depth/breadth so we never
+  walk a pathological tree. Python rebuilds the nesting from the depth column.
+- Off-mac / no-permission / no-window / timeout all degrade to ``{"error": ...}``;
+  the voice daemon must keep working even when this fails.
+
+Public API (CONTRACT): ``snapshot() -> dict`` →
+``{"app", "capturedAt", "tree": AxNode}`` or ``{"error": str}``.
+``AxNode`` = ``{"role", "title?", "value?", "enabled?", "children": [AxNode]}``.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+# Bounds to keep snapshots small and fast. Deep Electron apps chain single-child
+# AXGroups; native apps fan out — so we cap both dimensions. Tunable later.
+MAX_DEPTH = 12
+MAX_BREADTH = 20
+VALUE_MAXLEN = 120  # truncate long text values inside AppleScript before transfer
+OSA_TIMEOUT = 8  # seconds; a wedged System Events call must never freeze the loop
+
+# Recursive bounded traversal. Each property read is wrapped in its own
+# ``tell application "System Events"`` so the handlers parse outside the tell
+# block (UI-element terms are only defined inside it). Emits one line per node.
+_SCRIPT = """
+on roleOf(e)
+\ttry
+\t\ttell application "System Events" to return role of e
+\ton error
+\t\treturn "?"
+\tend try
+end roleOf
+on titleOf(e)
+\ttry
+\t\ttell application "System Events" to set t to title of e
+\t\tif t is missing value then return ""
+\t\treturn t as text
+\ton error
+\t\treturn ""
+\tend try
+end titleOf
+on valueOf(e)
+\ttry
+\t\ttell application "System Events" to set v to value of e
+\t\tif v is missing value then return ""
+\t\tset vs to v as text
+\t\tif (length of vs) > %(vmax)d then set vs to (text 1 thru %(vmax)d of vs)
+\t\treturn vs
+\ton error
+\t\treturn ""
+\tend try
+end valueOf
+on walk(e, depth, acc)
+\tset end of acc to (depth as text) & tab & my roleOf(e) & tab & my titleOf(e) & tab & my valueOf(e)
+\tif depth >= %(maxd)d then return acc
+\ttry
+\t\ttell application "System Events" to set kids to UI elements of e
+\ton error
+\t\treturn acc
+\tend try
+\tset n to count of kids
+\tif n > %(maxb)d then set n to %(maxb)d
+\trepeat with i from 1 to n
+\t\tmy walk(item i of kids, depth + 1, acc)
+\tend repeat
+\treturn acc
+end walk
+tell application "System Events"
+\tset p to first process whose frontmost is true
+\tset appName to name of p
+\ttry
+\t\tset w to front window of p
+\ton error errMsg
+\t\treturn "ERROR" & tab & "no front window: " & errMsg
+\tend try
+end tell
+my walk(w, 0, {})
+set theLines to result
+set AppleScript's text item delimiters to linefeed
+return appName & linefeed & (theLines as text)
+"""
+
+
+def _is_mac() -> bool:
+    return sys.platform == "darwin"
+
+
+def _run_osa(script: str) -> tuple[bool, str]:
+    """Shell osascript once. Mirrors ``actions._osa`` failure handling."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=OSA_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+    except FileNotFoundError:
+        return False, "osascript not found"
+    return r.returncode == 0, (r.stdout or r.stderr).strip()
+
+
+def _parse(lines: list[str]) -> dict:
+    """Rebuild nested AxNodes from ``depth<TAB>role<TAB>title<TAB>value`` lines.
+
+    A stack indexed by depth: each node attaches to the last-seen node one level
+    up. Robust to AppleScript's pre-order emission order.
+    """
+    root: dict | None = None
+    stack: list[dict] = []  # stack[d] is the most recent node at depth d
+    for line in lines:
+        if not line:
+            continue
+        parts = line.split("\t")
+        depth = int(parts[0])
+        role = parts[1] if len(parts) > 1 else "?"
+        title = parts[2] if len(parts) > 2 else ""
+        value = parts[3] if len(parts) > 3 else ""
+        node: dict = {"role": role, "children": []}
+        if title:
+            node["title"] = title
+        if value:
+            node["value"] = value
+        if depth == 0:
+            root = node
+            stack = [node]
+        else:
+            if depth <= len(stack):
+                stack[depth - 1]["children"].append(node)
+            if depth < len(stack):
+                stack[depth] = node
+            else:
+                stack.append(node)
+    return root or {"role": "?", "children": []}
+
+
+def snapshot() -> dict:
+    """Read-only snapshot of the focused app's AX tree.
+
+    Returns ``{"app", "capturedAt", "tree": AxNode}`` on success, or
+    ``{"error": str}`` off-mac / on any failure. Never raises.
+    """
+    if not _is_mac():
+        return {"error": "AX tree is only available on macOS"}
+    script = _SCRIPT % {
+        "vmax": VALUE_MAXLEN,
+        "maxd": MAX_DEPTH,
+        "maxb": MAX_BREADTH,
+    }
+    ok, out = _run_osa(script)
+    if not ok:
+        return {"error": f"accessibility read failed: {out or 'unknown error'}"}
+    lines = out.split("\n")
+    if not lines or lines[0].startswith("ERROR"):
+        detail = lines[0].split("\t", 1)[-1] if lines else "empty result"
+        return {"error": detail}
+    app = lines[0].strip()
+    tree = _parse(lines[1:])
+    return {
+        "app": app,
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "tree": tree,
+    }
+
+
+if __name__ == "__main__":  # python -m vox.web.axtree — quick manual check
+    import json
+
+    print(json.dumps(snapshot(), indent=2)[:4000])

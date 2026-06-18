@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Vox Control Center — theme tokens (dark-first).
+ * Palette per docs/dashboard/research/ui.md §3: zinc surfaces, violet→cyan
+ * accent. Values are HSL triplets ("H S% L%") so shadcn components can use
+ * hsl(var(--token)) and Tailwind can map them in tailwind.config.ts.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces (zinc) */
+  --background: 240 10% 4%;            /* #09090b zinc-950 */
+  --bg-elevated: 240 6% 5%;           /* #0c0c0e */
+  --foreground: 0 0% 98%;             /* #fafafa zinc-50 */
+  --foreground-secondary: 240 5% 65%; /* #a1a1aa zinc-400 */
+  --foreground-muted: 240 4% 46%;     /* #71717a zinc-500 */
+
+  --card: 240 6% 10%;                 /* #18181b zinc-900 */
+  --card-foreground: 0 0% 98%;
+  --popover: 240 6% 7%;
+  --popover-foreground: 0 0% 98%;
+
+  --muted: 240 4% 16%;                /* #27272a zinc-800 */
+  --muted-foreground: 240 5% 65%;
+
+  --secondary: 240 4% 16%;
+  --secondary-foreground: 0 0% 98%;
+
+  --border: 240 4% 16%;               /* #27272a zinc-800 */
+  --border-strong: 240 5% 26%;        /* #3f3f46 zinc-700 */
+  --input: 240 5% 26%;
+
+  /* Accent (violet → cyan) */
+  --accent: 258 90% 66%;              /* #8b5cf6 violet-500 */
+  --accent-foreground: 0 0% 100%;
+  --accent-2: 187 85% 53%;            /* #22d3ee cyan-400 */
+  --primary: 258 90% 66%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 258 90% 66%;
+
+  /* Semantic (-400, dark-tuned) */
+  --success: 160 64% 52%;             /* #34d399 emerald-400 */
+  --warning: 43 96% 56%;              /* #fbbf24 amber-400 */
+  --danger: 0 91% 71%;                /* #f87171 red-400 */
+  --destructive: 0 91% 71%;
+  --destructive-foreground: 0 0% 98%;
+  --info: 213 94% 68%;                /* #60a5fa blue-400 */
+
+  --radius: 0.625rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  /* Tabular numerals on metrics so animated counters don't jitter. */
+  .tnum {
+    font-feature-settings: "tnum" 1, "cv01" 1;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Signature accent gradient (nav indicator, hero, primary CTA). */
+  .bg-brand-gradient {
+    background-image: linear-gradient(135deg, #8b5cf6 0%, #22d3ee 100%);
+  }
+  .text-brand-gradient {
+    background-image: linear-gradient(135deg, #8b5cf6 0%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* Glass card recipe (ui.md §3.5). */
+  .glass {
+    background: hsl(var(--card) / 0.55);
+    backdrop-filter: blur(12px) saturate(120%);
+    -webkit-backdrop-filter: blur(12px) saturate(120%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+      0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* Custom scrollbar — quiet, control-room feel. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border-strong));
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--foreground-muted));
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

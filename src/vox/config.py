@@ -57,6 +57,18 @@ class Config:
     # True: a long pause auto-exits dictation (can't get stuck). False: stay until "stop typing".
     dictation_exit_on_silence: bool = True
 
+    # --- Dashboard (Vox Control Center) --- a local web UI served by an embedded FastAPI
+    # bridge (vox.web.server), opened hands-free by an "open dashboard" wake phrase. Entirely
+    # additive: if the web package is missing or errors, the voice daemon keeps running.
+    dashboard_enabled: bool = True
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8765
+    # Idle wake phrases (substring-matched) that open the dashboard in the browser.
+    open_dashboard_phrases: tuple[str, ...] = (
+        "open dashboard", "open the dashboard", "show dashboard",
+        "launch dashboard", "open vox dashboard",
+    )
+
     # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
     log_file: str = "vox.log"
 
