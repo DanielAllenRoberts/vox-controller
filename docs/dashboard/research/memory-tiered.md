@@ -135,8 +135,7 @@ All optional; none change the v1 API surface in a breaking way. Ordered by value
 
 - **No embeddings / vector DB yet.** Keyword scan over Markdown is sufficient at single-user scale; the
   literature only needs vectors at large archive sizes. Keep the interface pluggable (already in v1).
-- **No SQLite yet.** Adds a dependency and a sync-with-Markdown burden for no v1 benefit. (Note: the dev
-  Mac mini is ~97% full — favor zero new heavy deps.)
+- **No SQLite yet.** Adds a dependency and a sync-with-Markdown burden for no v1 benefit (favor zero new heavy deps).
 - **No automated dream pass yet.** Correctly deferred to #28. Just leave room (§4).
 - **No multi-context privacy gating** (OpenClaw's group-chat MEMORY.md closing) — Vox is single-user
   local; irrelevant for v1.

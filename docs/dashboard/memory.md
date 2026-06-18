@@ -90,9 +90,9 @@ import importlib.util, tempfile, pathlib, shutil
 spec = importlib.util.spec_from_file_location('vox.memory', 'src/vox/memory.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 d = pathlib.Path(tempfile.mkdtemp()); m._DATA_DIR = d; m._STORE = d / 'memory.jsonl'
-a = m.add('Daniel prefers the Arc browser and dark mode', tags=['preference','browser'])
+a = m.add('Alex prefers the Arc browser and dark mode', tags=['preference','browser'])
 m.add('Remember to calibrate the microphone RMS threshold', tags=['todo'])
-assert m.recall('which browser does Daniel like')[0]['id'] == a['id']  # text overlap
+assert m.recall('which browser does Alex like')[0]['id'] == a['id']  # text overlap
 assert m.recall('todo')[0]['tags'] == ['todo']                         # tag boost
 assert m.recall('')[0]['score'] == 0.0                                 # empty -> recent
 assert m.recall('xyzzy nonexistent') == []                             # no match dropped
