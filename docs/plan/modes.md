@@ -27,6 +27,44 @@ IDLE
  └─ "assistant phrase"  → ASSISTANT MODE ─(LLM handles request)─ done/timeout ─┘
 ```
 
+## Mode capability matrix — what each mode can ACTUALLY do
+
+> **The formal list (keep this current).** There are three entry points: **one-shot** ("Vox, …"
+> from idle, single utterance), **control** (continuous, command-first), **assistant** ("Hey Vox",
+> continuous, chat-first). They should be capable of the *same things* — only their *lifecycle* and
+> *default bias* differ. Today they're NOT, and the gaps are real (verified from `vox.log`, 2026-06-19).
+
+### Status — unified 2026-06-19 (✅ works · ❌ not wired)
+
+| Capability | One-shot ("Vox,…") | Control | Assistant ("Hey Vox") |
+|---|:--:|:--:|:--:|
+| Deterministic commands (open / tab / window / desktop / search / back / sidebar) | ✅ | ✅ | ✅ |
+| Dictation entry ("start typing") | ✅ ("Vox start typing") | ✅ | ❌ (by design) |
+| Fuzzy / misworded command → *executed* (LLM executor) | ✅ | ✅ | ✅ |
+| Compose & type ("write me an email") | ✅ | ✅ | ✅ |
+| Rewrite selection ("make this pretty") | ✅ | ✅ | ✅ |
+| Screen vision ("what's on my screen") | ✅ | ✅ | ✅ |
+| Timers / alarms / reminders (scheduler) | ✅ | ✅ | ✅ |
+| Reminder via the LLM when the deterministic parse misses (`SCHEDULE:`) | ✅ | ✅ | ✅ |
+| Multi-turn conversation | ❌ (single by design) | ✅ | ✅ |
+| "What app is this?" (instant, no LLM) | ✅ | ✅ | ✅ |
+
+### How it's wired now (the one place)
+
+`src/vox/dispatch.py` is the shared core:
+- **`try_deterministic(text)`** = "what app is this?" → scheduler (timers/alarms/reminders: create ·
+  cancel · read-back) → the deterministic command parser. Returns `(acted, message)` or `None`.
+  All three modes call it first; add a deterministic capability here once → all three get it.
+- **`looks_like_action(text, cfg)`** = the cheap action-intent gate assistant mode uses to decide
+  whether a non-command utterance tries the **executor** (compose / rewrite / vision / fuzzy command /
+  `SCHEDULE:`) before falling through to chat — so assistant stays chat-first but gains the do-powers.
+
+Modes differ ONLY in lifecycle (one-shot = single; control/assistant = continuous) and bias
+(control = command-first; assistant = chat-first). The executor (`executor.execute`) is the shared
+LLM action layer; the deterministic command set is `actions.py`. Capabilities in one place; per-mode
+prompting separate — the design the user asked for. Assistant **dictation entry** is intentionally
+left out (you reach dictation from idle with "Vox start typing", or from control).
+
 ## The phrases to train (this is "what we need to train")
 
 Each is one custom openWakeWord model, trained via the runbook in `wake-word-training.md` (synthetic TTS + frozen feature extractors — **not** from scratch).

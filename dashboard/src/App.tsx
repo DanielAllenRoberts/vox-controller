@@ -3,6 +3,8 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ThemeProvider } from "@/components/layout/theme";
 import { PageTransition } from "@/components/animate/PageTransition";
 import { Overview } from "@/pages/Overview";
+import { Conversation } from "@/pages/Conversation";
+import { Scheduler } from "@/pages/Scheduler";
 import { TokenUsage } from "@/pages/TokenUsage";
 import { Settings } from "@/pages/Settings";
 import { Personalities } from "@/pages/Personalities";
@@ -23,6 +25,22 @@ export default function App() {
           element={
             <PageTransition>
               <Overview />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="conversation"
+          element={
+            <PageTransition>
+              <Conversation />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="scheduler"
+          element={
+            <PageTransition>
+              <Scheduler />
             </PageTransition>
           }
         />

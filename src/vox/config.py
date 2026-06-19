@@ -206,6 +206,9 @@ class Config:
     # ("what does this say?"). Sends ONE downscaled frame to the cloud brain — set False to disable.
     # Needs Screen Recording permission (System Settings → Privacy & Security → Screen Recording).
     screen_vision_enabled: bool = True
+    # How the screen is "seen": "auto" = AX tree first, screenshot fallback; "axtree" = tree only
+    # (token-light text, no image); "screenshot" = image only (today's behavior). Master toggle above.
+    screen_vision_mode: str = "auto"
 
     # --- Voice output (TTS) --- macOS `say`: local, instant, no model download. Swap for a
     # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →
@@ -233,6 +236,15 @@ class Config:
     # Stays OFF by default until AEC (VoiceProcessingIO) lands.
     tts_interruptible: bool = False
 
+    # vox-speak MCP voice (idea #34) — the voice the IDE assistant uses to give you an audible
+    # heads-up via the mcp/vox_speak_server, kept SEPARATE from the system voice above so the two
+    # sound different and you can tell who's talking. Settable from the dashboard (Settings → MCP
+    # voice) or env in the MCP server config. mcp_tts_engine "system" = follow tts_engine above;
+    # "say"/"kokoro" pins it. Defaults differ from the system voice on purpose.
+    mcp_tts_engine: str = "system"        # "system" (follow tts_engine) | "say" | "kokoro"
+    mcp_tts_voice: str = "Samantha"       # macOS `say` voice for the MCP (≠ system "Daniel")
+    mcp_kokoro_voice: str = "af_bella"    # Kokoro voice for the MCP when on the kokoro engine (≠ system "af_heart")
+
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
     sound_control: str = "/System/Library/Sounds/Hero.aiff"
@@ -246,6 +258,22 @@ class Config:
     sound_thinking: str = "/System/Library/Sounds/Submarine.aiff"    # escalating to the LLM (it may take a moment)
     sound_dashboard_open: str = "/System/Library/Sounds/Blow.aiff"   # opened the dashboard
     sound_dashboard_close: str = "/System/Library/Sounds/Purr.aiff"  # closed the dashboard
+    sound_reminder: str = "/System/Library/Sounds/Glass.aiff"        # a reminder fired (soft chime before the spoken line)
+    sound_timer: str = "/System/Library/Sounds/Funk.aiff"            # a timer's up (played twice; sound-only by default)
+    sound_alarm: str = "/System/Library/Sounds/Sosumi.aiff"          # an alarm fired — repeated a few times so it's hard to miss
+    sound_alarm_repeat: int = 4                                      # how many times the alarm sound plays in a row
+
+    # --- Scheduler (idea #16) --- Vox OWNS timers / alarms / reminders so the dashboard can show
+    # and cancel them all in one place. A background thread (vox.scheduler) fires due jobs per the
+    # per-kind output policy (reminder→spoken+sound, timer→sound, alarm→both). Jobs persist to
+    # data/reminders.json (gitignored) and survive a restart. Entirely additive + guarded: a
+    # scheduler failure can never take down the voice daemon.
+    scheduler_enabled: bool = True          # run the background scheduler thread on startup
+    scheduler_poll_seconds: float = 5.0     # how often the thread wakes to fire due jobs
+    # OPTIONAL: also add a reminder to Apple Reminders (AppleScript-scriptable + iCloud-synced) so it
+    # ALSO goes off on your phone. Default OFF — turn on to mirror. (Clock isn't used: it's neither
+    # scriptable nor phone-synced.) Guarded: a mirror failure never blocks the local job.
+    apple_reminders_mirror: bool = False
 
 
 CONFIG = Config()

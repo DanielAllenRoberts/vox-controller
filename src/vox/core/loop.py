@@ -14,13 +14,26 @@ import webbrowser
 
 from dotenv import load_dotenv
 
-from vox import actions, assistant, executor, sounds, tts
+from vox import actions, assistant, dispatch, executor, sounds, tts
 from vox.audio import capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
 from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.backends import make_backend, normalize, phrase_match
+
+
+def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
+    """Publish one conversation turn to the live dashboard feed (idea #43). Fully guarded:
+    the web package is an additive convenience, so a missing/broken vox.web.conversation must
+    NEVER break the voice daemon. Ephemeral by design — record_turn writes nothing to disk."""
+    if not text or not str(text).strip():
+        return
+    try:
+        from vox.web import conversation
+        conversation.record_turn(role, text, brain=brain, kind=kind)
+    except Exception:
+        pass
 
 
 def _setting(key: str, fallback):
@@ -58,6 +71,21 @@ def _start_dashboard(cfg, out) -> None:
     except Exception as exc:  # web package missing/broken → log and carry on
         if cfg.debug:
             out.emit(f"  [dashboard] not started: {exc}")
+
+
+def _start_scheduler(cfg, out) -> None:
+    """Start the background scheduler thread (timers / alarms / reminders, idea #16). Fully
+    guarded, like _start_dashboard: a missing/broken vox.scheduler must NEVER stop the voice
+    daemon. Only runs when cfg.scheduler_enabled."""
+    if not getattr(cfg, "scheduler_enabled", True):
+        return
+    try:
+        from vox import scheduler
+        if scheduler.start() is not None:
+            out.emit("  [scheduler] timers / alarms / reminders armed")
+    except Exception as exc:  # scheduler module missing/broken → log and carry on
+        if cfg.debug:
+            out.emit(f"  [scheduler] not started: {exc}")
 
 
 def _open_dashboard(cfg, out) -> None:
@@ -314,10 +342,21 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             pending = []
             continue
         out.emit(f"  you: {text!r}")
-        result = actions.handle(text) if actions.parse(text) is not None else None
-        if result is not None and not actions.failed(result):
-            out.emit(f"  → {result}")
-            pending = []  # a clean command ran → drop any pending clarification
+        _record_turn("user", text)
+        # Shared deterministic layer (vox.dispatch) — ONE place for all three modes: "what app is
+        # this", the scheduler (timers/alarms/reminders), then the command parser. acted → a silent
+        # "did it" cue; else → a spoken answer/confirmation. None → escalate to the brain below.
+        det = dispatch.try_deterministic(text)
+        if det is not None:
+            acted, msg = det
+            if acted:
+                out.emit(f"  → {msg}")
+            else:
+                out.emit(f"  🔊 {msg}")
+                tts.speak(msg)
+                mic.flush()  # drop our own confirmation TTS the mic caught
+            _record_turn("assistant", str(msg), kind="command")
+            pending = []  # handled deterministically → drop any pending clarification
         elif not pending and _looks_like_noise(text):  # 1-word/filler → background; don't bug the LLM
             out.emit("  (ignored — too short / background)")
             pending = []
@@ -347,10 +386,12 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             if acted:
                 sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
                 out.emit(f"  ⚡ {msg}")
+                _record_turn("assistant", msg, brain="small", kind="command")
                 pending = []
             elif msg:
                 shown, spoken = assistant.split_say(msg)
                 out.emit(f"  🔊 {shown}")
+                _record_turn("assistant", shown, brain="small", kind="reply")
                 tts.speak(spoken)
                 mic.flush()  # drop our own voice the mic caught while speaking (no self-feedback)
                 # brain asked something → remember this exchange so the next answer has context
@@ -405,21 +446,50 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
             out.emit(f"🖥  {actions.close_dashboard()}")
             mic.flush()
             continue
-        # Command watcher: a genuine deterministic command mid-chat runs as an ACTION
-        # (you're done talking and you want it done) instead of going to the brain. Mirrors
-        # control mode's deterministic layer — conversational text doesn't parse, so it
-        # still reaches the LLM exactly as before. Only a cleanly-parsed, successful command
-        # short-circuits; a parsed-but-no-target attempt falls through to chat as it did.
-        if actions.parse(text) is not None:
-            cmd_result = actions.handle(text)
-            if cmd_result is not None and not actions.failed(cmd_result):
+        # Shared deterministic layer (vox.dispatch) — the SAME "one place" control & one-shot use:
+        # "what app is this", the scheduler (timers/alarms/reminders), then a deterministic command.
+        # Runs mid-chat so you can act without leaving the conversation.
+        det = dispatch.try_deterministic(text)
+        if det is not None:
+            acted, msg = det
+            sounds.play(cfg.sound_oneshot)
+            if acted:
+                out.emit(f"  ⚡ {msg}")
+            else:
+                out.emit(f"  🔊 {msg}")
+                tts.speak(msg)
+            _record_turn("user", text)
+            _record_turn("assistant", str(msg), kind="command")
+            mic.flush()
+            expecting_answer = False
+            continue
+        # Action intents (write / "make this pretty" / "what's on my screen" / a fuzzy command) →
+        # run the executor, so assistant mode has the SAME do-powers as control. Chat-first:
+        # only clear action requests reach the executor; everything else falls through to chat.
+        if dispatch.looks_like_action(text, cfg):
+            sounds.play(cfg.sound_thinking)
+            acted, msg = executor.execute(text)
+            if acted:
+                _record_turn("user", text)
                 sounds.play(cfg.sound_oneshot)
-                out.emit(f"  ⚡ {cmd_result}")
+                out.emit(f"  ⚡ {msg}")
+                _record_turn("assistant", str(msg), brain="small", kind="command")
                 mic.flush()
                 expecting_answer = False
                 continue
+            if msg:  # a spoken answer (vision / a short reply)
+                _record_turn("user", text)
+                shown, spoken = assistant.split_say(msg)
+                out.emit(f"  🔊 {shown}")
+                _record_turn("assistant", shown, brain="small", kind="reply")
+                tts.speak(spoken)
+                mic.flush()
+                expecting_answer = shown.rstrip().endswith("?")
+                continue
+            # executor judged it chatter / not an action → fall through to conversational chat
         sounds.play(cfg.sound_send)  # captured → "sending to the AI"
         out.emit(f"  you: {text!r}")
+        _record_turn("user", text)
         # Assistant chat is the slow path (full conversational reply, may escalate to the big
         # brain) — worth arming barge-in so a long answer can be cut off (loop 1).
         result, interrupt = _run_interruptible(
@@ -439,6 +509,7 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         reply, expecting_answer = result  # model tags [OPEN]/[DONE]
         shown, spoken = assistant.split_say(reply)  # brain may pick a shorter spoken version
         history += [("user", text), ("assistant", shown)]
+        _record_turn("assistant", shown, brain="small", kind="chat")
         out.emit(f"  🔊 {shown}" + ("  (…your turn)" if expecting_answer else ""))
         # Interruptible speaking (loop 3): only when tts_interruptible is ON *and* the engine is
         # kokoro (the streaming player stop_speaking() can actually halt). HEADPHONES-only — no AEC
@@ -514,6 +585,7 @@ def main() -> None:
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
 
     _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
+    _start_scheduler(cfg, out)  # additive; non-fatal if the scheduler module is missing/broken
 
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
@@ -544,11 +616,18 @@ def main() -> None:
                     if label.startswith("do:"):  # one-shot from idle ("Vox, open Safari" / "Vox, write me…")
                         cmd = label[3:]
                         sounds.play(cfg.sound_oneshot)  # quick "got it" cue
-                        # Deterministic first; if it isn't a clean parser command, escalate to the
-                        # brain so one-shots also cover LLM actions (write / make this pretty / vision).
-                        res = actions.handle(cmd) if actions.parse(cmd) is not None else None
-                        if res is not None and not actions.failed(res):
-                            out.emit(f"⚡ {cmd!r} → {res}")
+                        # Same shared dispatch as control/assistant: deterministic (what-app /
+                        # scheduler / command) first, else the executor (write / make-pretty /
+                        # vision / fuzzy) — so one-shots cover everything the other modes do.
+                        det = dispatch.try_deterministic(cmd)
+                        if det is not None:
+                            acted, msg = det
+                            if acted:
+                                out.emit(f"⚡ {cmd!r} → {msg}")
+                            else:
+                                out.emit(f"  🔊 {msg}")
+                                tts.speak(msg)
+                                mic.flush()
                         else:
                             sounds.play(cfg.sound_thinking)
                             acted, msg = executor.execute(cmd)

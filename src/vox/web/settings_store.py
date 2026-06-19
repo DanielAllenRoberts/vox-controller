@@ -36,6 +36,27 @@ _PROVIDER_OPTIONS = [
     {"value": "claude_cli", "label": "Claude CLI"},
 ]
 
+# Kokoro voice choices — shared by the system voice (kokoro_voice) and the MCP voice
+# (mcp_kokoro_voice). 54 voices exist; this is the common English subset.
+_KOKORO_VOICE_OPTIONS = [
+    {"value": "af_heart", "label": "af_heart — US ♀ (warm, default)"},
+    {"value": "af_bella", "label": "af_bella — US ♀"},
+    {"value": "af_nicole", "label": "af_nicole — US ♀ (soft)"},
+    {"value": "af_sarah", "label": "af_sarah — US ♀"},
+    {"value": "af_sky", "label": "af_sky — US ♀"},
+    {"value": "af_kore", "label": "af_kore — US ♀"},
+    {"value": "am_michael", "label": "am_michael — US ♂"},
+    {"value": "am_adam", "label": "am_adam — US ♂"},
+    {"value": "am_onyx", "label": "am_onyx — US ♂ (deep)"},
+    {"value": "am_puck", "label": "am_puck — US ♂"},
+    {"value": "am_fenrir", "label": "am_fenrir — US ♂"},
+    {"value": "bf_emma", "label": "bf_emma — UK ♀"},
+    {"value": "bf_isabella", "label": "bf_isabella — UK ♀"},
+    {"value": "bm_george", "label": "bm_george — UK ♂"},
+    {"value": "bm_daniel", "label": "bm_daniel — UK ♂"},
+    {"value": "bm_fable", "label": "bm_fable — UK ♂"},
+]
+
 # Schema metadata WITHOUT the live value (value is injected from the effective
 # config by ``all()``). Every key maps to a Config attribute of the same name.
 _SCHEMA_META: list[dict] = [
@@ -152,24 +173,7 @@ _SCHEMA_META: list[dict] = [
         "group": "Voice",
         "type": "select",
         "default": "af_heart",
-        "options": [
-            {"value": "af_heart", "label": "af_heart — US ♀ (warm, default)"},
-            {"value": "af_bella", "label": "af_bella — US ♀"},
-            {"value": "af_nicole", "label": "af_nicole — US ♀ (soft)"},
-            {"value": "af_sarah", "label": "af_sarah — US ♀"},
-            {"value": "af_sky", "label": "af_sky — US ♀"},
-            {"value": "af_kore", "label": "af_kore — US ♀"},
-            {"value": "am_michael", "label": "am_michael — US ♂"},
-            {"value": "am_adam", "label": "am_adam — US ♂"},
-            {"value": "am_onyx", "label": "am_onyx — US ♂ (deep)"},
-            {"value": "am_puck", "label": "am_puck — US ♂"},
-            {"value": "am_fenrir", "label": "am_fenrir — US ♂"},
-            {"value": "bf_emma", "label": "bf_emma — UK ♀"},
-            {"value": "bf_isabella", "label": "bf_isabella — UK ♀"},
-            {"value": "bm_george", "label": "bm_george — UK ♂"},
-            {"value": "bm_daniel", "label": "bm_daniel — UK ♂"},
-            {"value": "bm_fable", "label": "bm_fable — UK ♂"},
-        ],
+        "options": _KOKORO_VOICE_OPTIONS,
         "help": "Kokoro voice (used when TTS engine is Kokoro). Applies live on the next reply. 54 voices exist incl. other languages — set kokoro_voice in config.py for one not listed.",
     },
     {
@@ -218,6 +222,36 @@ _SCHEMA_META: list[dict] = [
         "group": "Voice",
         "type": "text",
         "help": "Decimal seconds: captured audio must be at least this long to count as a barge-in. Applies live.",
+    },
+    # --- MCP voice --- the vox-speak MCP heads-up voice, kept separate from the system voice
+    # above so the IDE assistant sounds different from Vox. Reload the MCP server in your editor
+    # to pick up changes (it reads these at speak-time).
+    {
+        "key": "mcp_tts_engine",
+        "label": "MCP TTS engine",
+        "group": "MCP voice",
+        "type": "select",
+        "options": [
+            {"value": "system", "label": "Follow system engine"},
+            {"value": "say", "label": "macOS say (zero-install)"},
+            {"value": "kokoro", "label": "Kokoro (local neural)"},
+        ],
+        "help": "Engine for the vox-speak MCP's voice. 'Follow system' matches the TTS engine above; 'Kokoro' lazy-downloads on first use and falls back to say on any error. Reload the MCP server to apply.",
+    },
+    {
+        "key": "mcp_tts_voice",
+        "label": "MCP say voice",
+        "group": "MCP voice",
+        "type": "text",
+        "help": "macOS `say` voice for the MCP heads-up (e.g. Samantha, Karen, Daniel, Alex). Kept distinct from the system voice. Reload the MCP server to apply.",
+    },
+    {
+        "key": "mcp_kokoro_voice",
+        "label": "MCP Kokoro voice",
+        "group": "MCP voice",
+        "type": "select",
+        "options": _KOKORO_VOICE_OPTIONS,
+        "help": "Kokoro voice for the MCP when its engine is Kokoro (or 'Follow system' resolves to Kokoro). Reload the MCP server to apply.",
     },
     # --- Cost ---
     {

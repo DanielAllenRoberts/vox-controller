@@ -209,6 +209,49 @@ def snapshot() -> dict:
     }
 
 
+# Max characters of flattened tree text handed to the brain. Keeps the vision
+# prompt token-light vs an image; a clipped tree ends with a "… (clipped)" marker.
+TEXT_MAXLEN = 6000
+
+
+def _flatten(node: dict, depth: int, out: list[str]) -> None:
+    """Append one compact ``  role: title = value`` line per node, indented by depth."""
+    role = node.get("role", "?")
+    title = node.get("title", "")
+    value = node.get("value", "")
+    line = "  " * depth + role
+    if title:
+        line += f": {title}"
+    if value:
+        line += f" = {value}"
+    out.append(line)
+    for child in node.get("children", []):
+        _flatten(child, depth + 1, out)
+
+
+def snapshot_text() -> dict:
+    """Compact indented-text view of the focused app's AX tree for the brain's vision path.
+
+    Returns ``{"app", "text"}`` on success or ``{"error": str}`` (off-mac / failure /
+    empty tree) so the caller can fall back to a screenshot. Never raises. ``text`` is
+    capped at ``TEXT_MAXLEN`` chars to stay token-light vs sending an image.
+    """
+    snap = snapshot()
+    if "error" in snap:
+        return {"error": snap["error"]}
+    tree = snap.get("tree") or {}
+    lines: list[str] = []
+    _flatten(tree, 0, lines)
+    text = "\n".join(lines).strip()
+    # A genuinely empty read can rebuild to a lone placeholder root ("?") with no
+    # content — treat that as empty too so "auto" mode falls back to a screenshot.
+    if not text or text == "?":
+        return {"error": "empty AX tree"}
+    if len(text) > TEXT_MAXLEN:
+        text = text[:TEXT_MAXLEN].rstrip() + "\n… (clipped)"
+    return {"app": snap.get("app", ""), "text": text}
+
+
 if __name__ == "__main__":  # python -m vox.web.axtree — quick manual check
     import json
 

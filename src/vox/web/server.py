@@ -197,6 +197,38 @@ def create_app() -> FastAPI:
         finally:
             usage.unsubscribe(queue)
 
+    # --- Conversation (live, ephemeral RAM feed; idea #43) ---
+    @app.get("/api/conversation/recent")
+    def get_conversation_recent(limit: int = 100) -> list:
+        mod = _try_import("conversation")
+        if mod is None:
+            return []
+        try:
+            return mod.recent(limit)
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.websocket("/api/conversation/stream")
+    async def conversation_stream(ws: WebSocket) -> None:
+        await ws.accept()
+        mod = _try_import("conversation")
+        if mod is None:  # feed module absent → accept then close cleanly
+            await ws.close()
+            return
+        queue = mod.subscribe()
+        # Bind the queue to this event loop so cross-thread publish() can deliver.
+        queue._vox_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        try:
+            while True:
+                turn = await queue.get()
+                await ws.send_json(turn)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            mod.unsubscribe(queue)
+
     # --- Personalities (guarded) ---
     @app.get("/api/personalities")
     def get_personalities() -> dict:
@@ -343,6 +375,60 @@ def create_app() -> FastAPI:
             return _bad_request(f"could not remove rule: {exc}")
         if not removed:
             return _not_found("rule")
+        return {"ok": True}
+
+    # --- Reminders / timers / alarms (guarded; src/vox/scheduler.py, idea #16) ---
+    @app.get("/api/reminders")
+    def get_reminders() -> list:
+        mod = _try_import_scheduler()
+        if mod is None:
+            return []
+        try:
+            return [_job_to_api(j) for j in mod.list_jobs()]
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.post("/api/reminders")
+    async def add_reminder(request: Request):
+        mod = _try_import_scheduler()
+        if mod is None:
+            return _service_unavailable("scheduler")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        kind = body.get("kind")
+        if kind not in ("timer", "alarm", "reminder"):
+            return _bad_request("'kind' must be one of timer|alarm|reminder")
+        fire_at = body.get("fireAt")
+        if not isinstance(fire_at, str) or not fire_at.strip():
+            return _bad_request("'fireAt' (ISO local datetime) is required")
+        recurrence = body.get("recurrence")
+        if recurrence not in (None, "", "daily", "weekdays", "weekly"):
+            return _bad_request("'recurrence' must be null|daily|weekdays|weekly")
+        try:
+            job = mod.create_job(
+                kind,
+                str(body.get("text") or ""),
+                fire_at=fire_at.strip(),
+                recurrence=recurrence or None,
+            )
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not create reminder: {exc}")
+        return _job_to_api(job)
+
+    @app.delete("/api/reminders/{the_id}")
+    def remove_reminder(the_id: str):
+        mod = _try_import_scheduler()
+        if mod is None:
+            return _not_found("reminder")
+        try:
+            removed = bool(mod.cancel_job(the_id))
+        except Exception as exc:
+            return _bad_request(f"could not cancel reminder: {exc}")
+        if not removed:
+            return _not_found("reminder")
         return {"ok": True}
 
     # --- Memory (guarded; src/vox/memory.py) ---
@@ -588,6 +674,29 @@ def _try_import_memory():
         return memory
     except Exception:
         return None
+
+
+def _try_import_scheduler():
+    """Guarded import of the top-level scheduler module (src/vox/scheduler.py)."""
+    try:
+        from .. import scheduler
+
+        return scheduler
+    except Exception:
+        return None
+
+
+def _job_to_api(job: dict) -> dict:
+    """Map a scheduler Job (snake_case on disk) to the dashboard's camelCase shape."""
+    return {
+        "id": job.get("id"),
+        "kind": job.get("kind"),
+        "text": job.get("text") or "",
+        "fireAt": job.get("fire_at"),
+        "recurrence": job.get("recurrence"),
+        "createdAt": job.get("created_at"),
+        "enabled": bool(job.get("enabled", True)),
+    }
 
 
 def _memory_supports_tier(mod) -> bool:
@@ -868,8 +977,45 @@ def _handbook_static() -> list:
                     "description": "Rewrite the current selection in place (brain).",
                 },
                 {
-                    "phrase": "what does this say? / read this",
-                    "description": "Screen vision — the brain screenshots and reads what's on screen.",
+                    "phrase": "what does this say? / read this / what's on my screen",
+                    "description": "Screen vision — reads what's on screen (accessibility tree first, "
+                    "screenshot fallback).",
+                },
+                {
+                    "phrase": "what app is this? / what am I looking at?",
+                    "description": "Instantly speaks the name of the app you're focused on — no brain call.",
+                },
+            ],
+        },
+        {
+            "title": "Timers, Alarms & Reminders",
+            "blurb": "Vox owns these — they show on the Scheduler page and you can cancel them by "
+            "voice. Reminders are spoken (with your name); timers chime; alarms do both. Spoken "
+            "numbers work (“in two minutes”), and the task can come before or after the time.",
+            "items": [
+                {
+                    "phrase": "set a timer for 5 minutes",
+                    "description": "A countdown that chimes when it's up (seconds / minutes / hours).",
+                },
+                {
+                    "phrase": "remind me to call Sam in 10 minutes",
+                    "description": "A spoken reminder after a delay.",
+                },
+                {
+                    "phrase": "remind me at 5pm to leave / remind me every day at 9 to stretch",
+                    "description": "Reminders at a clock time, optionally repeating (daily / weekdays / weekly).",
+                },
+                {
+                    "phrase": "set an alarm for 7am",
+                    "description": "An alarm at a clock time — repeats its sound and speaks.",
+                },
+                {
+                    "phrase": "what are my reminders? / what timers do I have?",
+                    "description": "Speaks a summary of everything scheduled.",
+                },
+                {
+                    "phrase": "cancel my timer / cancel my reminders",
+                    "description": "Cancels matching scheduled items.",
                 },
             ],
         },
@@ -900,17 +1046,25 @@ def _handbook_static() -> list:
         },
         {
             "title": "Modes",
-            "blurb": "Vox has three working modes plus idle. Wake into the one you want.",
+            "blurb": "The entry points share the SAME capabilities (commands, scheduler, "
+            "compose/rewrite/vision) — they differ only in how long they stay active and their "
+            "default bias.",
             "items": [
                 {
+                    "phrase": "One-shot — “Vox, …”",
+                    "description": "From idle, do a single thing then return to idle — any command, "
+                    "reminder, “write me…”, or “what can you see?”. Same powers as control.",
+                },
+                {
                     "phrase": "Control",
-                    "description": "Deterministic, hands-free app/tab/window/space control. "
-                    "Fast and keyword-driven; uncertain commands can defer to the brain.",
+                    "description": "Stays on for continuous, command-first control — app/tab/window/"
+                    "space, plus compose/rewrite/vision and the scheduler. Uncertain commands defer "
+                    "to the brain.",
                 },
                 {
                     "phrase": "Assistant",
-                    "description": "Conversational mode — ask questions, get spoken answers, "
-                    "follow-ups stay in context until you stand down.",
+                    "description": "Stays on, chat-first — conversation with spoken answers. Now also "
+                    "writes, rewrites, reads the screen and runs commands/timers mid-chat.",
                 },
                 {
                     "phrase": "Dictation",

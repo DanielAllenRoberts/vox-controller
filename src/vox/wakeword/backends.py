@@ -59,13 +59,16 @@ class WhisperWakeBackend:
                 return "do:" + cmd
 
     def _oneshot(self, text: str) -> str | None:
-        # "Vox, <command>" from idle → run it once (no "hey" = command, not chat).
-        from vox import actions
+        # "Vox, <anything>" from idle → run it once, routed through the FULL shared dispatch
+        # (deterministic command / scheduler / what-app, else the executor for compose / rewrite /
+        # vision / fuzzy). We no longer require it to be a deterministic command — that gate is what
+        # blocked "vox what can you see" / "vox set a timer" / "vox write me…"; stray "vox …" mishears
+        # are caught downstream by the executor's IGNORE.
         t = normalize(text)
         if not t.startswith("vox "):
             return None
         rest = t[4:].strip()
-        return rest if actions.parse(rest) else None
+        return rest or None
 
 
 class OpenWakeWordBackend:

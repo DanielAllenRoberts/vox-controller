@@ -227,16 +227,72 @@ def running_apps() -> list[str]:
     return [a.strip() for a in out.split(",") if a.strip()] if ok else []
 
 
+def frontmost_app() -> str:
+    """Name of the focused (frontmost) app — tells the brain which app you're on. "" on failure."""
+    ok, out = _osa('tell application "System Events" to get name of '
+                   '(first process whose frontmost is true)')
+    return out.strip() if ok else ""
+
+
+def _active_tab(browser: str) -> tuple[str, str]:
+    """(title, url) of the active tab of the front window. ("", "") on failure / unsupported."""
+    if browser in _CHROMIUM:
+        tab = "active tab of front window"
+    elif browser == "Safari":
+        tab = "current tab of front window"
+    else:
+        return "", ""
+    ok, out = _osa(f'tell application "{browser}"\n'
+                   f'    set AppleScript\'s text item delimiters to linefeed\n'
+                   f'    return (name of {tab}) & linefeed & (URL of {tab})\nend tell')
+    if not ok:
+        return "", ""
+    title, _, url = out.partition("\n")
+    return title.strip(), url.strip()
+
+
+def _domain(url: str) -> str:
+    """Bare host of a URL (no scheme/www), for matching generic-titled tabs by site. "" if none."""
+    host = urllib.parse.urlparse(url.strip()).netloc
+    return host[4:] if host.startswith("www.") else host
+
+
+def _now_line() -> str:
+    """'Now: <Weekday YYYY-MM-DD HH:MM> (<tz>)' in the machine's local timezone — the brain's clock."""
+    from datetime import datetime
+    now = datetime.now().astimezone()
+    return f"Now: {now.strftime('%A %Y-%m-%d %H:%M')} ({now.tzname()})"
+
+
 def environment_context() -> str:
-    """A short snapshot of the current Mac state for the executor's brain (running apps + open
-    browser tabs) so fuzzy references resolve to the right target. Best-effort; "" if unavailable."""
+    """A short snapshot of the current Mac state for the executor's brain (focused app, active tab,
+    running apps, open browser tabs + domains, and the time) so fuzzy references resolve to the right
+    target. Best-effort; each part is included only if it succeeds, "" if nothing does."""
     parts = []
+    app = frontmost_app()
+    if app:
+        parts.append(f"Focused app: {app}")
+    # Browser tab detail (active tab + the open-tabs list) is only included when the browser is the
+    # FOCUSED app — otherwise we were dumping every Arc tab on every turn, off-browser, wasting the
+    # brain's context/tokens. When you're actually on the browser it's exactly what helps tab nav.
+    on_browser = bool(app) and app.lower() == CONFIG.browser.lower()
+    if on_browser:
+        title, url = _active_tab(CONFIG.browser)
+        if title or url:
+            parts.append(f"Active tab: {title} — {url}".rstrip(" —"))
     apps = running_apps()
     if apps:
         parts.append("Running apps: " + ", ".join(apps[:40]))
-    ok, titles = _tab_titles(CONFIG.browser)
-    if ok and titles:
-        parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(t[:60] for t in titles[:25]))
+    if on_browser:
+        ok, titles = _tab_titles(CONFIG.browser)
+        if ok and titles:
+            _, urls = _tab_urls(CONFIG.browser)  # parallel to titles; surface the domain for matching
+            entries = []
+            for i, t in enumerate(titles[:25]):
+                dom = _domain(urls[i]) if i < len(urls) else ""
+                entries.append(f"{t[:60]} ({dom})" if dom else t[:60])
+            parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(entries))
+    parts.append(_now_line())
     return "\n".join(parts)
 
 

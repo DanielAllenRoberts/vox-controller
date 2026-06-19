@@ -99,7 +99,6 @@ class VPIOMicStream:
         # Lazy import — only on the AEC path. Any ImportError propagates to the caller's fallback.
         import AVFoundation as AV
 
-        self._AV = AV
         self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
         # Carries leftover int16 samples between tap callbacks so we can emit exact frame_samples frames.
         self._residual = np.empty(0, dtype=np.int16)
@@ -112,56 +111,79 @@ class VPIOMicStream:
         if not ok:
             raise RuntimeError(f"setVoiceProcessingEnabled failed: {err}")
 
+        # Voice processing DUCKS other audio output (it treats the session like a call) — that's why
+        # the speakers go quiet while AEC is on ("loud then softer"). Set ducking to its MINIMUM level
+        # so AEC keeps cancelling echo WITHOUT noticeably dimming playback. Guarded: older macOS lacks
+        # this API (macOS 14+), and a failure just means the (louder) default ducking stays.
+        try:
+            duck = AV.AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                False, AV.AVAudioVoiceProcessingOtherAudioDuckingLevelMin)
+            self._input.setVoiceProcessingOtherAudioDuckingConfiguration_(duck)
+        except Exception as exc:
+            print(f"⚠️  couldn't lower AEC audio ducking ({exc}); speakers may dim while AEC is on")
+
         self._in_fmt = self._input.outputFormatForBus_(0)
         if self._in_fmt is None or self._in_fmt.sampleRate() == 0:
             raise RuntimeError("VPIO input node has no valid format (mic unavailable?)")
         self._in_sr = float(self._in_fmt.sampleRate())
+        self._in_ch = max(1, int(self._in_fmt.channelCount()))
+        self._in_interleaved = bool(self._in_fmt.isInterleaved())
 
-        # Target: 16 kHz mono float32 (non-interleaved). We convert float32 -> int16 ourselves so the
-        # frames are byte-identical to sounddevice's dtype="int16" output.
-        self._target_fmt = AV.AVAudioFormat.alloc().initWithCommonFormat_sampleRate_channels_interleaved_(
-            AV.AVAudioPCMFormatFloat32, float(sample_rate), 1, False
-        )
-        self._converter = AV.AVAudioConverter.alloc().initFromFormat_toFormat_(self._in_fmt, self._target_fmt)
-        if self._converter is None:
-            raise RuntimeError("could not create AVAudioConverter for VPIO -> 16k mono")
-
+        # The input node delivers float32 at the hardware rate, and this device exposes it as MULTIPLE
+        # channels (e.g. 6ch @ 48 kHz). We take channel 0 (the primary, echo-cancelled mic) and
+        # down-sample to 16 kHz ourselves in numpy (see _resample_to_16k). The previous AVAudioConverter
+        # asked it to do 6→1 channels AND 48k→16k in ONE step, which it refused (returned status=Error →
+        # all-zero frames: the "AEC captures nothing" bug); doing it directly is simpler and robust.
         self._install_tap()
 
     def _install_tap(self) -> None:
-        AV = self._AV
-        ratio = self._sample_rate / self._in_sr
-
         def tap_block(buffer, when):
             try:
                 frames_in = buffer.frameLength()
                 if frames_in == 0:
                     return
-                cap = int(frames_in * ratio) + 16
-                out_buf = AV.AVAudioPCMBuffer.alloc().initWithPCMFormat_frameCapacity_(self._target_fmt, cap)
-                consumed = {"done": False}
-
-                def input_block(packet_count, status_ptr):
-                    if consumed["done"]:
-                        status_ptr[0] = AV.AVAudioConverterInputStatus_NoDataNow
-                        return None
-                    consumed["done"] = True
-                    status_ptr[0] = AV.AVAudioConverterInputStatus_HaveData
-                    return buffer
-
-                self._converter.convertToBuffer_error_withInputFromBlock_(out_buf, None, input_block)
-                n = out_buf.frameLength()
-                if n == 0:
+                channels = buffer.floatChannelData()
+                if channels is None:
                     return
-                ptr = out_buf.floatChannelData()[0]
-                samples = np.frombuffer(ptr.as_buffer(n * 4), dtype=np.float32, count=n)
+                # Take channel 0 (the primary, echo-cancelled mic). Non-interleaved → channel 0 is a
+                # contiguous block of `frames_in` floats; interleaved → stride by the channel count.
+                if self._in_interleaved and self._in_ch > 1:
+                    inter = np.frombuffer(channels[0].as_buffer(frames_in * self._in_ch * 4),
+                                          dtype=np.float32, count=frames_in * self._in_ch)
+                    mono = inter[0::self._in_ch].astype(np.float32)
+                else:
+                    mono = np.frombuffer(channels[0].as_buffer(frames_in * 4),
+                                         dtype=np.float32, count=frames_in).astype(np.float32)
+                mono = self._resample_to_16k(mono)
+                if mono.size == 0:
+                    return
                 # float32 [-1,1] -> int16, matching sounddevice's int16 capture.
-                i16 = np.clip(samples * 32768.0, -32768, 32767).astype(np.int16)
+                i16 = np.clip(mono * 32768.0, -32768, 32767).astype(np.int16)
                 self._emit(i16)
             except Exception as exc:  # never let an exception escape into the CoreAudio render thread
                 print(f"⚠️  VPIO tap error ({exc}); continuing…")
 
         self._input.installTapOnBus_bufferSize_format_block_(0, 4096, self._in_fmt, tap_block)
+
+    def _resample_to_16k(self, mono: np.ndarray) -> np.ndarray:
+        """Down-sample channel-0 float32 audio from the input node's rate to the target 16 kHz. For an
+        integer ratio (typically 48k→16k = 3) this box-averages each group of `factor` samples — a
+        cheap anti-aliasing decimation that's ample for speech — otherwise it linearly resamples."""
+        in_sr, target = self._in_sr, float(self._sample_rate)
+        if in_sr == target or mono.size == 0:
+            return mono
+        factor = in_sr / target
+        nearest = int(round(factor))
+        if nearest >= 1 and abs(factor - nearest) < 1e-6:  # exact integer ratio (e.g. 48k→16k = 3)
+            m = (mono.size // nearest) * nearest
+            if m == 0:
+                return np.empty(0, dtype=np.float32)
+            return mono[:m].reshape(-1, nearest).mean(axis=1).astype(np.float32)
+        n = int(round(mono.size * target / in_sr))  # non-integer ratio → linear resample
+        if n <= 0:
+            return np.empty(0, dtype=np.float32)
+        return np.interp(np.linspace(0, mono.size, n, endpoint=False),
+                         np.arange(mono.size), mono).astype(np.float32)
 
     def _emit(self, i16: np.ndarray) -> None:
         """Buffer incoming samples and slice them into exact frame_samples int16 frames."""

@@ -66,17 +66,46 @@ def speak(text: str) -> None:
     if not _setting("tts_enabled", CONFIG.tts_enabled) or not text.strip():
         return
     if _setting("tts_engine", CONFIG.tts_engine) == "kokoro":
-        try:
-            if _speak_kokoro_streaming(text):
-                return  # spoke via the streaming/killable Kokoro player (or returned early on stop)
-        except Exception:
-            pass  # streaming path failed → try the simple blocking kokoro synth next
+        # The streaming/killable player (sounddevice OutputStream) exists ONLY for interruptible
+        # speaking (talk-over). It's heavier and its stream-finish detection has hung in the field
+        # (freezing the loop for up to its backstop). So engage it ONLY when tts_interruptible is on;
+        # otherwise take the robust synth→afplay path (a separate afplay process with its own timeout).
+        if _setting("tts_interruptible", CONFIG.tts_interruptible):
+            try:
+                if _speak_kokoro_streaming(text):
+                    return  # spoke via the streaming/killable Kokoro player (or returned early on stop)
+            except Exception:
+                pass  # streaming path failed → try the simple blocking kokoro synth next
         try:
             if _speak_kokoro(text):
-                return  # spoke via the original synth-whole-then-afplay Kokoro path
+                return  # synth-whole-then-afplay Kokoro path (robust; can't be cut mid-utterance)
         except Exception:
             pass  # any Kokoro failure → fall through to the always-available `say` path
     _speak_say(text)
+
+
+def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
+               rate=None, speed=None) -> None:
+    """Speak `text` with EXPLICIT engine/voice overrides, bypassing the active persona's voice and
+    the global tts_enabled gate. Used by the vox-speak MCP so the assistant's heads-up voice can be
+    DIFFERENT from the system's (and can independently use the neural Kokoro engine). `engine` "" =
+    follow the live system setting; a say/kokoro value pins it. Any Kokoro failure falls back to
+    `say`, exactly like speak(). Always speaks when asked (it's a deliberate tool call)."""
+    if not text.strip():
+        return
+    eng = engine or _setting("tts_engine", CONFIG.tts_engine)
+    if eng == "kokoro":
+        try:
+            if _speak_kokoro_streaming(text, voice=kokoro_voice, speed=speed):
+                return
+        except Exception:
+            pass
+        try:
+            if _speak_kokoro(text, voice=kokoro_voice, speed=speed):
+                return
+        except Exception:
+            pass
+    _speak_say(text, voice=say_voice, rate=rate)
 
 
 def stop_speaking() -> None:
@@ -93,11 +122,15 @@ def stop_speaking() -> None:
             pass
 
 
-def _speak_say(text: str) -> None:
-    """macOS `say` — the default, zero-dependency engine. Unchanged from before."""
+def _speak_say(text: str, voice=None, rate=None) -> None:
+    """macOS `say` — the default, zero-dependency engine. `voice`/`rate` None → resolve from the
+    active persona / settings (the daemon's behavior, unchanged); a provided value overrides (used
+    by speak_with for the MCP — pass "" for the system-default voice)."""
     cmd = ["say"]
-    voice = _persona_voice("suggestedVoice") or _setting("tts_voice", CONFIG.tts_voice)
-    rate = _setting("tts_rate", CONFIG.tts_rate)
+    if voice is None:
+        voice = _persona_voice("suggestedVoice") or _setting("tts_voice", CONFIG.tts_voice)
+    if rate is None:
+        rate = _setting("tts_rate", CONFIG.tts_rate)
     if voice:
         cmd += ["-v", voice]
     if rate:
@@ -150,14 +183,19 @@ def _get_kokoro():
     return _KOKORO
 
 
-def _speak_kokoro(text: str) -> bool:
+def _speak_kokoro(text: str, voice=None, speed=None) -> bool:
     """Synthesize `text` with Kokoro, write a temp wav, and play it (blocking) via afplay.
-    Returns True on success; raises on any failure so speak() can fall back to `say`."""
+    `voice`/`speed` None → resolve from the active persona / settings; a provided value overrides
+    (used by speak_with for the MCP). Returns True on success; raises on any failure so the caller
+    can fall back to `say`."""
     import numpy as np
 
     kokoro = _get_kokoro()
-    voice = _persona_voice("kokoroVoice") or _setting("kokoro_voice", CONFIG.kokoro_voice)
-    speed = float(_setting("kokoro_speed", CONFIG.kokoro_speed))
+    if voice is None:
+        voice = _persona_voice("kokoroVoice") or _setting("kokoro_voice", CONFIG.kokoro_voice)
+    if speed is None:
+        speed = float(_setting("kokoro_speed", CONFIG.kokoro_speed))
+    speed = float(speed)
     samples, sample_rate = kokoro.create(text, voice=voice, speed=speed)
 
     pcm16 = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
@@ -289,7 +327,7 @@ class _StreamingPlayer:
                 raise sd.CallbackStop()
 
         try:
-            deadline = time.monotonic() + 180.0  # absolute backstop: never hang the daemon
+            deadline = time.monotonic() + 60.0  # absolute backstop: never hang the daemon (spoken replies are short)
             with sd.OutputStream(samplerate=self._sr, channels=1, dtype="float32",
                                  blocksize=1024, callback=callback,
                                  finished_callback=self._done.set):
@@ -325,18 +363,22 @@ class _StreamingPlayer:
                 pass
 
 
-def _speak_kokoro_streaming(text: str) -> bool:
+def _speak_kokoro_streaming(text: str, voice=None, speed=None) -> bool:
     """Streaming, killable Kokoro playback (loop 3). Synthesizes the reply sentence-by-sentence and
     plays through a sounddevice OutputStream so audio starts after the first sentence and
-    stop_speaking() can cut it mid-reply. Blocks until the reply finishes or is stopped. Returns
-    True if it handled playback (including an early stop); raises on any failure so speak() can fall
-    back to the simple blocking kokoro path, then to `say`."""
+    stop_speaking() can cut it mid-reply. Blocks until the reply finishes or is stopped. `voice`/
+    `speed` None → resolve from the active persona / settings; a provided value overrides (used by
+    speak_with for the MCP). Returns True if it handled playback (including an early stop); raises
+    on any failure so the caller can fall back to the simple blocking kokoro path, then to `say`."""
     global _ACTIVE_PLAYER
     import numpy as np
 
     kokoro = _get_kokoro()
-    voice = _persona_voice("kokoroVoice") or _setting("kokoro_voice", CONFIG.kokoro_voice)
-    speed = float(_setting("kokoro_speed", CONFIG.kokoro_speed))
+    if voice is None:
+        voice = _persona_voice("kokoroVoice") or _setting("kokoro_voice", CONFIG.kokoro_voice)
+    if speed is None:
+        speed = float(_setting("kokoro_speed", CONFIG.kokoro_speed))
+    speed = float(speed)
 
     chunks = _split_chunks(text)
     if not chunks:

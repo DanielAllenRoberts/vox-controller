@@ -65,6 +65,24 @@ export interface UsageSummary {
   byDay: UsageByDay[];
 }
 
+// Conversation turn — mirrors a turn from the live, EPHEMERAL feed
+// (src/vox/web/conversation.py `record_turn`). `role`: "user" (you) or
+// "assistant" (Vox). `brain` is the replying brain on assistant turns (else
+// null); `kind` tags it ("chat"|"command"|"reply") so a command can render
+// inline. `session` distinguishes concurrent sessions. Nothing is persisted —
+// this is the running session in RAM, gone on daemon restart.
+export type TurnRole = "user" | "assistant";
+
+export interface Turn {
+  id: string;
+  session: string;
+  ts: string;
+  role: TurnRole;
+  text: string;
+  brain: Brain | null;
+  kind: string | null;
+}
+
 export type SettingType = "toggle" | "select" | "text";
 
 export interface SettingOption {
@@ -101,6 +119,22 @@ export interface Personalities {
 export interface Rule {
   id: string;
   text: string;
+  enabled: boolean;
+}
+
+// Scheduled job (timer / alarm / reminder) — mirrors a Job from the Vox-owned
+// scheduler (src/vox/scheduler.py), serialised camelCase by the bridge. `fireAt`
+// is an ISO LOCAL datetime (naive). `recurrence` is null for a one-shot.
+export type ReminderKind = "timer" | "alarm" | "reminder";
+export type Recurrence = "daily" | "weekdays" | "weekly" | null;
+
+export interface Reminder {
+  id: string;
+  kind: ReminderKind;
+  text: string;
+  fireAt: string;
+  recurrence: Recurrence;
+  createdAt: string;
   enabled: boolean;
 }
 
@@ -280,6 +314,10 @@ export const api = {
     request<UsageEvent[]>(`/usage/recent?limit=${limit}`),
   usageSummary: () => request<UsageSummary>("/usage/summary"),
 
+  // Live, ephemeral conversation feed (the running session in RAM).
+  conversationRecent: (limit = 100) =>
+    request<Turn[]>(`/conversation/recent?limit=${limit}`),
+
   settings: () => request<Setting[]>("/settings"),
   setSetting: (key: string, value: string | boolean) =>
     request<{ ok: boolean; value: string | boolean }>("/settings", {
@@ -337,6 +375,21 @@ export const api = {
     }),
   removeRule: (id: string) =>
     request<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
+
+  // --- Reminders / timers / alarms (Vox-owned scheduler, idea #16) ---------
+  reminders: () => request<Reminder[]>("/reminders"),
+  addReminder: (body: {
+    kind: ReminderKind;
+    text?: string;
+    fireAt: string;
+    recurrence?: Recurrence;
+  }) =>
+    request<Reminder>("/reminders", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  removeReminder: (id: string) =>
+    request<{ ok: boolean }>(`/reminders/${id}`, { method: "DELETE" }),
 
   // --- Memory (back-compat flat search; recalls across tiers) --------------
   memory: (query = "", limit = 50) =>
@@ -399,4 +452,13 @@ export function usageStreamUrl(): string {
   }
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/api/usage/stream`;
+}
+
+// WebSocket URL for the live conversation feed (WS /api/conversation/stream).
+export function conversationStreamUrl(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/^http/, "ws") + "/api/conversation/stream";
+  }
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}/api/conversation/stream`;
 }

@@ -156,6 +156,12 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 
 ## 16. Timers, alarms & reminders (Echo-style, native macOS)
 
+> **Status:** 🚧 QUEUED for this session — see `session-2026-06-19.md`. Decision shift:
+> build a **Vox-owned unified scheduler** (one job model for timers/alarms/reminders, with
+> recurrence + cancel, fired by a background thread, surfaced/cancellable on a dashboard
+> page) rather than leaning on Apple Reminders — that's the only shape where "see all the
+> crons in the dashboard" works. Native Apple integration stays a later add-on.
+
 **Vision:** "set a timer for 10 minutes", "remind me to call Sam at 3pm", "set an alarm for 7am" — like an Amazon Echo, but wired into **native Apple apps** so the reminders/alarms live where you already see them. Reminders should also be **spoken back** once Vox has a voice (TTS).
 
 **How it might work (per type):**
@@ -168,6 +174,14 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 **Depends on / connects to:** TTS (M2) for spoken reminders; the brains/executor (#12, #17) for parsing + dispatch; could surface in the on-screen pet (#7) as a visible countdown.
 
 **Notes:** Reminders is the quick win (scriptable today). Timers via Shortcuts is the cleanest native path; the in-Vox timer is the simplest fallback.
+
+**Cross-device reality (researched 2026-06-19):** for "it also goes off on **my phone**",
+macOS **Clock alarms/timers do NOT sync** to iPhone (device-local) and Clock isn't
+scriptable — so the phone path is **Apple Reminders** (scriptable *and* iCloud-synced) or
+Calendar, NOT Clock. Hence the session-plan decision: build the **Vox-owned scheduler core**
+(dashboard-visible, cancellable, fires sound/voice per kind), with an **optional Apple
+*Reminders* mirror** for cross-device. **Output policy:** reminders speak (personalised with
+your name), timers chime, alarms do both.
 
 ## 18. Screen visibility — screenshot vs. accessibility tree
 
@@ -184,6 +198,11 @@ Cycle between multiple open tabs of the *same* site (e.g. several YouTube tabs).
 **Recommendation:** AX-tree is the direction that matches the "see through text/structure" idea and stays cheap. Add the screenshot as a small opt-in skill (Anthropic API + a vision model) for the rare "just look at it" case. Both gated behind a config flag; watch token cost on the screenshot path.
 
 **Connects to:** the executor/brains (#12, #17), `environment_context` (built), and the coding-agents research note on per-turn `environment_details`.
+
+> **Update (2026-06-19):** 🚧 QUEUED this session — wire `axtree.snapshot()` (already built
+> for the dashboard) as the brain's vision source behind a `screen_vision_mode`
+> (`axtree`|`screenshot`|`auto`) flag; test the tree by disabling the screenshot path. See
+> `session-2026-06-19.md`.
 
 ## 19. Barge-in — interrupt mid-task ("stop it NOW")
 
@@ -303,6 +322,12 @@ An MCP server that lets the coding agent (Claude Code) speak through the system 
 
 ## 36. Context-aware command profiles — commands that change with the active app/site
 
+> **Status:** 🚧 QUEUED this session (`session-2026-06-19.md`). Two slices: (a) the cheap
+> unlock — add the **focused app + active tab (title *and* URL/domain)** to
+> `environment_context()` (today it lists running apps only, never the focused one), which
+> also fixes Arc tab matching; (b) the deeper **per-app command profiles** (scoped through
+> the rules store), likely a later session.
+
 The same phrase should mean different things depending on what's focused. "Search for X" → searches **YouTube** when it's open, the web otherwise; with **Cursor** focused, unlock Cursor-specific verbs ("new terminal", "type in the terminal", "open file"). Per-app / per-site command sets let you **reuse phrases for different purposes** and cut ambiguity — the router picks the profile from the focused app/tab (already surfaced by `actions.environment_context()`). Near-term win on the same theme: tab-switching by name is unreliable when a tab's *title* is generic (a Google Doc shows as "Untitled" / "unknown doc"), so neither the fuzzy matcher nor the brain can tie "open Google Docs" to it — enrich the context with each tab's **URL/domain** (`docs.google.com`) and the match (deterministic, or learned via #24) becomes solid. Pairs with scoped prompts (#25), the learning layer (#24), and AX-tree handles (#35).
 
 ## 37. Real website control — simplified DOM + expand-on-demand + screenshot grid
@@ -333,7 +358,112 @@ When you tell Vox "I don't like that you do X in this character — do Y instead
 
 ## 43. Live conversation viewer (dashboard tab)
 
+> **Status:** 🚧 QUEUED this session (`session-2026-06-19.md`) — mirror the `usage.py`
+> WS pub/sub: an in-RAM ring buffer + `/api/conversation/stream`, rendered on a new
+> Conversation page. Ephemeral, nothing to disk.
+
 A dashboard tab that shows the running conversation like a chat — what you said, what each brain replied, and which commands ran — so you can watch what's happening. **Ephemeral by design:** the daemon publishes each turn to the bridge (the same way it already streams usage events over the WS), the page renders them live, and **nothing is written to disk** — it's just the in-RAM session buffer mirrored to the UI. Pairs with the prompt/response debug logging (#just-built); the persistent layer stays the tiered memory (#28/#29).
+
+## 44. Mishear-frequency counter → context-inferred self-heal (extends #24)
+
+A lightweight **failure counter** that watches for phrases which keep *failing to match*. When the same unrecognised / misheard utterance trips the parser **more than N times** (say 3), it fires the self-heal — but instead of guessing from the bad transcript alone, it looks at the **commands and phrases said around those failures** to infer what was actually meant. Example: "go to sleep" keeps coming through as "going to go to sleep" and never matches; the surrounding context (what you tried next, what finally worked) makes it clear you were trying to sleep, so it **patches the mapping** (mishear → intended command) and the phrase fires correctly from then on.
+
+**Why it's nice:**
+- **No permanent storage required** — an **ephemeral, in-RAM tally** is enough to *detect* a recurring mishear; only the resolved patch (if judged worth keeping, per #24's "worth patching?" check) needs to persist.
+- **Threshold-gated** (> N occurrences) so a one-off slip never pollutes the rules.
+- **Context-window inference** — examining the *neighbouring* utterances (the retries, the eventual success) is cheaper and more reliable than recovering intent from a single garbled transcript.
+
+**Connects to:** #24 (self-heal → learned fix — this is the *trigger* that decides when to invoke it), #8 (learned-corrections table, "casa → cursor"), #14–15 (self-wiring learning / background wiring), and #9 (command-vs-conversation). Best built **after** the self-heal system (#24) lands.
+
+## 45. Learn the user's writing style → compose "in your voice" (extends #10)
+
+While dictation/typing is active (between **"start typing"** and **"stop typing"**), **capture what's typed** as a rolling corpus of the user's own writing. Once it crosses a size threshold, hand it to the **big brain** to analyse — extract the user's **style patterns** (tone, sentence length, vocabulary, punctuation/formatting habits, greetings & sign-offs, formality) and distil them into a compact **style profile** (a few injectable rules). Then whenever the user says **"write this"** (#10 compose), inject that profile so the generated email / message / summary reads like *they* wrote it.
+
+**Key points:**
+- **Prose only, not code.** Code is right-or-wrong and its style is largely objective; this is for *natural-language* writing. Gate by task type (compose-prose vs code) so it never skews generated code.
+- **Grounded, not guessed** — the corpus is the user's *actual* writing, so the learned voice is real, and it sharpens as more accumulates (periodic re-analysis).
+- Keep the **distilled profile** (small, injected into the compose prompt) separate from the **raw corpus** (bulkier, just the training material) — and it needn't be heavyweight: even an ephemeral rolling buffer that's analysed and discarded works.
+
+**Connects to:** #10 (compose — the consumer of the style profile), #8 (personalisation over time), #2 (literal-dictation vs AI-compose handoff), #25 (scoped prompts — the compose prompt carries the style rules), and #27/#28 (where the corpus/profile would live).
+
+## 46. Teaching / demonstration mode — show Vox the exact steps (high-stakes tasks)
+
+**Vision:** for software where a wrong click is **costly** (a financial accountant's
+ledger, a trading tool, a deploy console), don't let the AX-tree + LLM *infer* the steps and
+risk a mistake. Instead, let the user **demonstrate** the task once and have Vox replay it
+**deterministically**. *"Start the training"* → Vox **watches and records what you click**
+(and type) → *"this is what you do whenever I ask you to do `<task>`"* → it saves the captured
+sequence as a **named, replayable macro** bound to that trigger phrase. Next time you ask, it
+runs the **recorded steps**, not a guess.
+
+**The in-between (human-in-the-loop) variant:** for steps that are risky but not fully
+scripted, say *"be careful when you do this"* → before each action Vox shows a **confirmation
+overlay** — a glowing circle/highlight over the element it's about to click: *"click here?"* —
+and only acts on your **yes**. Demonstration removes the guesswork; the overlay keeps a human
+in the loop where it matters.
+
+**How it might work:**
+- **Record:** capture each interaction as a **stable element handle** (AX role + title +
+  identifier + app/window, with bounds as a fallback) rather than raw screen coordinates, so
+  replay survives window moves/resizes. The AX-tree reader (#18/#35) already produces these
+  handles for the dashboard — reuse it as the recorder's source of truth.
+- **Store:** the macro = an ordered list of `(action, element-handle, value?)` steps under a
+  trigger phrase, persisted as a learned skill (ties to the rules/learning store #14/#24).
+- **Replay:** resolve each handle in the *current* AX tree and act (AX press / set value /
+  keystroke); if a handle can't be resolved, **stop and ask** rather than clicking blind.
+- **Overlay:** a small always-on-top highlight window over the target element's bounds (the
+  same overlay surface as the status pet #7) with a yes/no (voice or click) gate.
+
+**Why it matters:** it's **deterministic, demonstrated automation** — the trustworthy path
+for tasks where "the AI figured it out" isn't good enough. The recorded macro is also a
+perfect training signal for the learning layer.
+
+**Connects to:** #18/#35/#37 (AX/DOM element handles — the recorder & replayer), #14/#24/#25
+(learned skills, scoped prompts, "worth keeping?"), #36 (per-app — macros are naturally
+app-scoped), #7 (the overlay/glowing-circle surface), #19 (barge-in to abort a replay).
+
+## 47. Give the AI time awareness — current date, time, day & timezone
+
+**Vision:** inject the **current date, time, day-of-week, and timezone** into the brain's
+context so it can reason about *now* — answer "what's today?", handle "remind me **tomorrow**
+at 9", and time-aware phrasing ("good evening") — instead of being time-blind.
+
+**How it might work:** a tiny addition to the system prompt / `environment_context()` —
+`Now: Thu 2026-06-19 14:32 (Europe/London, BST)` — refreshed per turn. Trivial and cheap.
+
+**Why it's more than cosmetic:** the **scheduler (#16)** needs a concrete "now" to turn "in
+20 minutes" / "tomorrow at 9" / "every weekday" into real fire-times — so this is a
+near-term **prerequisite** for natural reminder/alarm parsing, not just a nicety. Small enough
+to fold in alongside the active-app context work (session-2026-06-19 slice 2a).
+
+**Connects to:** #16 (scheduler time-parsing — the main consumer), `environment_context`
+(where it rides), #40 (greet you by name + time).
+
+## 48. Meeting recording & notes
+
+**Vision:** "start recording the meeting" / "take notes" → Vox records the conversation, then
+produces a **transcript + summary + action items** you can read back, search, and act on. The
+hands-free, local-first take on Otter/Granola.
+
+**How it might work (mostly built blocks already):**
+- **Capture:** record mic (+ ideally system/other-party audio) to a wav while a session runs.
+  The **AEC/VoiceProcessingIO** path (now working) gives a cleaner mic; capturing the *other*
+  side (Zoom/Meet output) needs system-audio capture (an aggregate device / ScreenCaptureKit
+  audio) — the one new piece.
+- **Transcribe:** local **Whisper** (already in-house, no API) over the recording, chunked.
+- **Notes:** hand the transcript to the **big brain** → structured summary, decisions, and
+  **action items** — action items can auto-create **reminders** (#16) ("follow up with Sam
+  Friday").
+- **Store & view:** save transcript + notes as **Markdown** in the tiered memory (#27/#28),
+  browsable in a dashboard **Meetings** tab; nothing leaves the machine unless asked.
+
+**Why it fits Vox:** local STT + brains + TTS + memory + scheduler already exist — this mostly
+*composes* them. Voice-triggered start/stop, spoken summary on request ("what were the action
+items?").
+
+**Connects to:** Whisper STT, the brains (#17), memory (#27/#28/#29), scheduler (#16, action
+items → reminders), AEC (#21, clean capture), and the conversation viewer (#43, same "show a
+session" surface). The genuinely new work is **system-audio capture** of the far end.
 
 ## Sequencing note
 
