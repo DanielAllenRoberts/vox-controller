@@ -91,8 +91,8 @@ class Config:
     # --- Utterance capture (energy-based) ---
     speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
     silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
-    assistant_silence_seconds: float = 1.2  # pause allowed in ASSISTANT mode before it sends
-    max_utterance_seconds: float = 8.0
+    assistant_silence_seconds: float = 1.6  # pause allowed in ASSISTANT mode before it sends (give room to think mid-sentence)
+    max_utterance_seconds: float = 15.0  # hard cap on one utterance — long enough not to cut off a full request/reminder
     listen_timeout_seconds: float = 6.0  # wake/dictation re-arm interval (control mode keeps listening)
     assistant_idle_timeout_seconds: float = 4.0   # assistant chat: drop to control/idle after this silence
     # Patient wait while the model tagged its reply [OPEN] (it expects you to respond) — a safety
@@ -126,8 +126,12 @@ class Config:
     # (missing huggingface_hub, download/model/inference error) falls back to the fixed-silence path,
     # so the daemon always runs. Model (~8MB) downloads once to ~/.cache/vox/smart-turn/.
     turn_detection: str = "vad"
-    min_endpointing_delay: float = 0.5   # pause (s) before smart-turn is consulted (mirrors livekit min_delay)
-    max_endpointing_delay: float = 3.0   # hard cap (s): end the turn even if smart-turn keeps saying INCOMPLETE
+    min_endpointing_delay: float = 0.9   # pause (s) before smart-turn is consulted — longer = more room to think mid-sentence
+    max_endpointing_delay: float = 4.0   # hard cap (s): end the turn even if smart-turn keeps saying INCOMPLETE
+    # How confident smart-turn must be that you're DONE before it ends the turn (sigmoid prob in [0,1]).
+    # Higher = MORE PATIENT (waits for a clearer end-of-turn) — the fix for "it ends before I finish".
+    # The model leans toward "complete" on this setup, so the default is high.
+    smart_turn_threshold: float = 0.85
 
     # Acoustic echo cancellation (voice-upgrade loop 5 / R7): how the mic is captured.
     #   false = DEFAULT — capture via the sounddevice/PortAudio MicStream (today's behavior,

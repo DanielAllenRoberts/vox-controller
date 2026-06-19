@@ -286,7 +286,8 @@ def _smart_turn_complete(collected, cfg) -> bool | None:
     try:
         from vox import turn_detector
         audio = np.concatenate(collected)
-        return turn_detector.is_complete(audio, cfg.sample_rate)
+        threshold = float(_setting("smart_turn_threshold", getattr(cfg, "smart_turn_threshold", 0.5)))
+        return turn_detector.is_complete(audio, cfg.sample_rate, threshold)
     except Exception:
         return None  # SmartTurnUnavailable or anything else → fall back to fixed silence
 

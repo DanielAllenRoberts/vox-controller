@@ -145,7 +145,7 @@ def _user_name() -> str:
         from vox import memory
         for entry in memory.core():
             t = (entry.get("text") or "").lower()
-            m = re.search(r"(?:my name is|i am|i'm|call me)\s+([a-z][a-z'\-]+)", t)
+            m = re.search(r"(?:name is|i am|i'm|call me|named)\s+([a-z][a-z'\-]+)", t)
             if m:
                 return m.group(1).capitalize()
     except Exception:
@@ -323,10 +323,17 @@ _RE_REMIND_IN = re.compile(
     r"(?:\s+to\s+(.+))?")
 _RE_REMIND_AT = re.compile(
     r"\bremind\s+me\s+(?:to\s+(.+?)\s+)?at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?(?:\s+to\s+(.+?))?$")
+# `(?:for|at)+` (not just one) tolerates "alarm for at 8am" left behind after a day word like
+# "tomorrow" is stripped from "set an alarm for tomorrow at 8am".
 _RE_ALARM_AT = re.compile(
-    r"\b(?:set\s+(?:an|a)\s+)?alarm\s+(?:for|at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?(?:\s+to\s+(.+?))?$")
+    r"\b(?:set\s+(?:an|a)\s+)?alarm\s+(?:(?:for|at)\s+)+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?(?:\s+to\s+(.+?))?$")
 _RE_EVERY = re.compile(
     r"\bevery\s+(day|weekday|weekdays|week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b")
+# A day qualifier ("tomorrow", "tonight", "this evening", "on Monday") that shifts the at-time to
+# another day. Captured + stripped so the at-time regexes see a clean "... at 8am".
+_RE_DAY = re.compile(
+    r"\b(tomorrow|tonight|today|this\s+(?:morning|afternoon|evening|night)|"
+    r"(?:on\s+|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b")
 
 
 def _unit_base(unit: str) -> str:
@@ -334,10 +341,15 @@ def _unit_base(unit: str) -> str:
     return {"sec": "second", "min": "minute", "hr": "hour"}.get(u, u)
 
 
-def _next_clock(hour: int, minute: int, ampm: str | None) -> datetime | None:
-    """The next datetime matching H:MM (am/pm optional). If today's time has passed,
-    roll to tomorrow. Returns None on an invalid clock value."""
+def _next_clock(hour: int, minute: int, ampm: str | None, *,
+                offset_days: int | None = None, evening: bool = False) -> datetime | None:
+    """The datetime matching H:MM (am/pm optional). With ``offset_days`` set (from a day word like
+    "tomorrow"), it's that many days from today; otherwise the NEXT occurrence (today if still
+    ahead, else tomorrow). ``evening`` (from "tonight"/"this evening") defaults a bare 1–11 to pm.
+    Returns None on an invalid clock value."""
     ap = (ampm or "").replace(".", "").lower()
+    if not ap and evening and 1 <= hour <= 11:
+        ap = "pm"  # "tonight at 8" → 8pm
     if ap == "pm" and hour < 12:
         hour += 12
     elif ap == "am" and hour == 12:
@@ -345,10 +357,30 @@ def _next_clock(hour: int, minute: int, ampm: str | None) -> datetime | None:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
     now = _now()
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= now:
+    base = now + timedelta(days=offset_days) if offset_days is not None else now
+    target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:  # already past (e.g. "today at 8" said at noon) → roll a day
         target += timedelta(days=1)
     return target
+
+
+def _day_offset(t: str) -> tuple[int | None, bool, str]:
+    """Find a day qualifier ("tomorrow", "tonight", "this evening", "on Monday") and return
+    ``(offset_days, is_evening, text_without_that_phrase)``; ``(None, False, t)`` if there's none."""
+    m = _RE_DAY.search(t)
+    if not m:
+        return None, False, t
+    phrase = m.group(1)
+    stripped = " ".join((t[:m.start()] + " " + t[m.end():]).split())
+    evening = ("evening" in phrase) or ("night" in phrase) or (phrase == "tonight")
+    if phrase == "tomorrow":
+        return 1, evening, stripped
+    if phrase in ("today", "tonight") or phrase.startswith("this"):
+        return 0, evening, stripped
+    for name, idx in _WEEKDAYS.items():
+        if name in phrase:
+            return ((idx - _now().weekday()) % 7 or 7), evening, stripped  # next such weekday
+    return None, False, t
 
 
 def _recurrence_from(text: str) -> str | None:
@@ -384,6 +416,11 @@ def parse_and_create(text: str) -> str | None:
     # ("remind me every day at 9 am" → "remind me at 9 am"); recurrence is already captured.
     if recurrence:
         t = " ".join(_RE_EVERY.sub(" ", t).split())
+    # A day word ("tomorrow", "tonight", "on Friday") shifts the at-time; strip it so the at-time
+    # regexes see a clean phrase. (Recurring jobs already say "every …", so skip the day word there.)
+    offset_days, evening = (None, False)
+    if not recurrence:
+        offset_days, evening, t = _day_offset(t)
 
     # timer for N <unit> — sound-only countdown.
     m = _RE_TIMER.search(t)
@@ -406,7 +443,8 @@ def parse_and_create(text: str) -> str | None:
     # remind me (to X) at H:MM (am/pm) (to X) — absolute reminder.
     m = _RE_REMIND_AT.search(t)
     if m:
-        fire = _next_clock(int(m.group(2)), int(m.group(3) or 0), m.group(4))
+        fire = _next_clock(int(m.group(2)), int(m.group(3) or 0), m.group(4),
+                           offset_days=offset_days, evening=evening)
         if fire is not None:
             body = (m.group(1) or m.group(5) or "").strip()
             create_job("reminder", body, fire_at=fire, recurrence=recurrence)
@@ -415,7 +453,8 @@ def parse_and_create(text: str) -> str | None:
     # (set an) alarm for|at H:MM (am/pm) (to X) — absolute alarm.
     m = _RE_ALARM_AT.search(t)
     if m:
-        fire = _next_clock(int(m.group(1)), int(m.group(2) or 0), m.group(3))
+        fire = _next_clock(int(m.group(1)), int(m.group(2) or 0), m.group(3),
+                           offset_days=offset_days, evening=evening)
         if fire is not None:
             body = (m.group(4) or "").strip()
             create_job("alarm", body, fire_at=fire, recurrence=recurrence)
@@ -427,11 +466,18 @@ def parse_and_create(text: str) -> str | None:
 def _confirm(kind: str, body: str, fire: datetime, recurrence: str | None) -> str:
     """Human confirmation line for an at-time job."""
     when = fire.strftime("%-I:%M %p").lower() if hasattr(fire, "strftime") else _iso(fire)
+    day = ""
+    if not recurrence and hasattr(fire, "date"):
+        delta = (fire.date() - _now().date()).days
+        if delta == 1:
+            day = " tomorrow"
+        elif delta > 1:
+            day = fire.strftime(" on %A")
     every = {"daily": " every day", "weekdays": " every weekday", "weekly": " every week"}.get(
         recurrence or "", "")
     label = "reminder" if kind == "reminder" else "alarm"
     tail = f" to {body}" if body else ""
-    return f"{label.capitalize()} set for {when}{every}{tail}."
+    return f"{label.capitalize()} set for {when}{day}{every}{tail}."
 
 
 def summary() -> str:

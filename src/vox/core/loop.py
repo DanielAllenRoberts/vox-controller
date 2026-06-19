@@ -573,10 +573,37 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
         out.emit(f"  typed: {text!r}")
 
 
+def _another_instance_running(cfg) -> bool:
+    """True if a Vox daemon is already running — detected by its dashboard port being held.
+    Two daemons fight over the mic + duck the audio (the recurring duplicate-instance bug), so
+    main() refuses to start a second one. Cheap TCP connect, guarded → False on any error so we
+    never wrongly block startup. Only meaningful when the dashboard is enabled (the port is our
+    liveness marker); a stray second daemon with the dashboard off is the rare case we don't catch."""
+    if not getattr(cfg, "dashboard_enabled", True):
+        return False
+    import socket
+    try:
+        with socket.create_connection((cfg.dashboard_host, cfg.dashboard_port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     cfg = CONFIG
     load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
     out = ConsoleOutput(cfg.log_file)
+
+    # Single-instance guard: a second daemon fights the first over the mic + ducks the audio (and
+    # leaves the dashboard served by a stale process). Refuse to start a second copy.
+    if _another_instance_running(cfg):
+        out.emit(
+            f"⚠️  {cfg.assistant_name} is already running (port {cfg.dashboard_port} is in use). "
+            f"NOT starting a second copy — two daemons fight over the mic and duck the audio. "
+            f"Quit the other one first (say \"quit {cfg.assistant_name}\", or Ctrl+C its terminal), "
+            f"then start again."
+        )
+        return
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:

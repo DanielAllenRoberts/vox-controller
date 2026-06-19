@@ -359,7 +359,7 @@ function EntryCard({
                 type="button"
                 aria-label="Edit memory"
                 onClick={() => setEditing(true)}
-                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-60 transition-all hover:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
               >
                 <Pencil className="h-3.5 w-3.5" />
               </button>
@@ -367,7 +367,7 @@ function EntryCard({
                 type="button"
                 aria-label="Delete memory"
                 onClick={onDelete}
-                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-0 transition-all hover:bg-danger/15 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-foreground-muted opacity-60 transition-all hover:opacity-100 hover:bg-danger/15 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 group-hover:opacity-100"
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>

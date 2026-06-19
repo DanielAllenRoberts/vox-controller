@@ -46,10 +46,16 @@ _SYSTEM = (
     "keeping, append a capture directive on its own line at the very end of your reply — "
     "'MEMORY[core]: <fact>' for durable, always-relevant facts (their name, standing "
     "preferences, long-term projects, standing instructions) or 'MEMORY[daily]: <note>' for "
-    "passing, session-specific things (what you did today, one-off requests). It's stripped before "
-    "the reply is shown or spoken; never mention it. Use it sparingly and only for genuinely useful "
-    "facts — core is rare and high-signal, daily is contextual. Don't repeat things you already "
-    "remember."
+    "passing, session-specific things (what you did today, one-off requests). "
+    "Write each fact as a COMPLETE, SELF-CONTAINED sentence that a FUTURE session with NO context "
+    "could understand on its own — always state WHAT the fact is about, never just the bare answer. "
+    "After asking the user's name and hearing 'Daniel', store \"MEMORY[core]: The user's name is "
+    "Daniel\" — NEVER \"MEMORY[core]: Daniel\". Likewise \"The user prefers concise replies\", not "
+    "\"concise\"; \"The user works at Acme as a designer\", not \"Acme\". If it can't stand alone "
+    "and be understood months later, rewrite it so it can. "
+    "It's stripped before the reply is shown or spoken; never mention it. Use it sparingly and only "
+    "for genuinely useful facts — core is rare and high-signal, daily is contextual. Don't repeat "
+    "things you already remember."
 )
 
 _anthropic_client = None
