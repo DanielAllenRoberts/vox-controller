@@ -357,8 +357,12 @@ class _StreamingPlayer:
                         return
                     self._q.put(pcm[i:i + 2048])
         finally:
+            # End-of-stream sentinel — BLOCKING put (with a timeout) so it's never dropped when the
+            # queue is full. (put_nowait could drop it on a full queue, losing the sentinel → play()
+            # would hang until the backstop deadline on long replies.) The player drains continuously,
+            # so a slot frees in ~one audio block; the timeout is only a safety net.
             try:
-                self._q.put_nowait(None)  # end-of-stream sentinel (best-effort; queue may be full)
+                self._q.put(None, timeout=5.0)
             except queue.Full:
                 pass
 

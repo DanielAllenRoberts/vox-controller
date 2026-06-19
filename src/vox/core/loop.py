@@ -595,8 +595,10 @@ def main() -> None:
     out = ConsoleOutput(cfg.log_file)
 
     # Single-instance guard: a second daemon fights the first over the mic + ducks the audio (and
-    # leaves the dashboard served by a stale process). Refuse to start a second copy.
-    if _another_instance_running(cfg):
+    # leaves the dashboard served by a stale process). Refuse to start a second copy — EXCEPT on a
+    # restart, where the process we're replacing is exiting and may still briefly hold the port
+    # (restart spawns us with VOX_RESTART=1; pop it so our own child processes don't inherit it).
+    if os.environ.pop("VOX_RESTART", "") != "1" and _another_instance_running(cfg):
         out.emit(
             f"⚠️  {cfg.assistant_name} is already running (port {cfg.dashboard_port} is in use). "
             f"NOT starting a second copy — two daemons fight over the mic and duck the audio. "
@@ -691,7 +693,8 @@ def main() -> None:
                 # Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,
                 # so the deadlock there meant restart never fired). start_new_session detaches it so
                 # it survives this process exiting; stdout still goes to the terminal.
-                subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True)
+                subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True,
+                                 env={**os.environ, "VOX_RESTART": "1"})
                 os._exit(0)
             except (KeyboardInterrupt, _Quit):
                 sounds.play(cfg.sound_sleep)

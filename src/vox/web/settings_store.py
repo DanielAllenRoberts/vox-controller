@@ -122,7 +122,21 @@ _SCHEMA_META: list[dict] = [
         "label": "Screen vision",
         "group": "Behavior",
         "type": "toggle",
-        "help": "Let the brain screenshot and read the screen on request.",
+        "help": "Let the brain read the screen on request ('what's on my screen?').",
+    },
+    {
+        "key": "screen_vision_mode",
+        "label": "Screen vision source",
+        "group": "Behavior",
+        "type": "select",
+        "options": [
+            {"value": "auto", "label": "Auto — AX tree first, screenshot fallback"},
+            {"value": "axtree", "label": "AX tree only (no screenshot)"},
+            {"value": "screenshot", "label": "Screenshot only"},
+        ],
+        "help": "How Vox reads the screen. The AX tree is token-light structured text; a screenshot "
+                "is a vision-model image. 'AX tree only' tests the tree in isolation. Applies on the "
+                "next request.",
     },
     {
         "key": "dictation_exit_on_silence",

@@ -76,6 +76,7 @@ def _run(text: str) -> str:
         "desktop_move": _desktop_move, "desktop_index": _desktop_index,
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
+        "click": click_element,
     }
     return dispatch.get(name, lambda _: _handoff(text))(arg)
 
@@ -83,6 +84,16 @@ def _run(text: str) -> str:
 def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None."""
     t = text.lower().strip().rstrip(".!?")
+
+    # Click a labelled button / link / control by name, via the accessibility tree ("click Submit",
+    # "click the Log in button"). Checked first — "click" is distinctive. Trailing role words are
+    # stripped so "click the submit button" looks for a control labelled "submit".
+    m = re.search(r"\bclick\s+(?:on\s+)?(?:the\s+)?(.+)", t)
+    if m:
+        tgt = re.sub(r"\s+(?:button|link|icon|tab|menu|option|item|checkbox|control|toggle)$", "",
+                     m.group(1).strip())
+        if tgt:
+            return ("click", tgt)
 
     # Open a NEW tab (force fresh) — first, so "open a new youtube tab" isn't read as a switch.
     m = re.search(r"\b(?:open|go\s*to)\s+(?:a\s+)?new\s+(.+)", t)
@@ -308,6 +319,81 @@ def capture_screen() -> str | None:
         os.remove(raw)
         return small
     return raw  # downscale failed — fall back to the full-res capture
+
+
+# Recursively search the focused app's accessibility tree for a clickable control whose label
+# CONTAINS the target (case-insensitive — AppleScript `contains` ignores case), and AXPress it.
+# Bounded depth/breadth so a pathological tree can't hang. Works well for native apps + standard
+# UI; deep web pages expose huge trees (the browser-DOM path is ideas.md #37).
+_CLICK_SCRIPT = '''
+on matchClick(el, target, depth)
+    if depth > %(maxd)d then return ""
+    set r to "?"
+    try
+        tell application "System Events" to set r to role of el
+    end try
+    set label to ""
+    try
+        tell application "System Events" to set label to (name of el) as text
+    end try
+    if label is missing value then set label to ""
+    if label is "" then
+        try
+            tell application "System Events" to set label to (description of el) as text
+        end try
+        if label is missing value then set label to ""
+    end if
+    if r is in {"AXButton", "AXLink", "AXMenuButton", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXTabButton", "AXDisclosureTriangle"} then
+        if label contains target then
+            try
+                tell application "System Events" to perform action "AXPress" of el
+                return "ok" & tab & label
+            on error
+                try
+                    tell application "System Events" to click el
+                    return "ok" & tab & label
+                end try
+            end try
+        end if
+    end if
+    set kids to {}
+    try
+        tell application "System Events" to set kids to UI elements of el
+    end try
+    set total to count of kids
+    set n to total
+    if n > %(maxb)d then set n to %(maxb)d
+    repeat with i from 1 to n
+        set res to my matchClick(item i of kids, target, depth + 1)
+        if res is not "" then return res
+    end repeat
+    return ""
+end matchClick
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        set w to front window of p
+    on error
+        return "err" & tab & "no front window"
+    end try
+end tell
+set out to my matchClick(w, "%(target)s", 0)
+if out is "" then return "err" & tab & "not found"
+return out
+'''
+
+
+def click_element(target: str) -> str:
+    """Find a button/link/control labelled `target` in the focused app's accessibility tree and
+    click it (AXPress). Needs Accessibility permission. Returns a result string (never raises)."""
+    t = (target or "").strip().replace("\\", " ").replace('"', " ")
+    if not t:
+        return "Click what? Try 'click Submit'."
+    ok, out = _osa(_CLICK_SCRIPT % {"target": t, "maxd": 14, "maxb": 60})
+    label = out.split("\t", 1)[-1].strip() if out else ""
+    if ok and out.startswith("ok"):
+        return f"Clicked {label or target}."
+    return f"I couldn't find a '{target}' to click."
 
 
 def _browser_tab_script(browser: str, url: str) -> str | None:
@@ -764,6 +850,48 @@ def dictate(text: str) -> None:
     global _dictation_active, _dictation_new_sentence
     raw = text.strip()
     low = raw.lower().rstrip(".!?")
+
+    # Literal escape: "literally <words>" types the rest VERBATIM, so you can dictate a phrase that
+    # would otherwise be a command (e.g. "literally delete line" types the words "delete line").
+    m = re.match(r"(?i)^literally\s+(.+)$", raw)
+    if m:
+        lit = m.group(1).strip()
+        if _dictation_new_sentence and lit[:1].islower():
+            lit = lit[0].upper() + lit[1:]
+        _paste((" " if _dictation_active else "") + lit)
+        _dictation_active = True
+        _dictation_new_sentence = lit.rstrip()[-1:] in ".!?"
+        return
+
+    # Bigger deletions + undo. These match the WHOLE utterance only (like the edit keys below), so
+    # they never fire mid-sentence — say them on their own to use them, dictate them in a sentence
+    # to type them. delete word / delete N words / delete the last five words → ⌥⌫ (per word).
+    m = re.fullmatch(r"(?:delete|remove|scratch|erase)\s+(?:the\s+)?(?:last\s+)?(?:(\w+)\s+)?words?", low)
+    if m:
+        n = (_to_index(m.group(1)) if m.group(1) else 1) or 1
+        n = max(1, min(n, 50))  # cap so a mis-hear can't wipe the doc
+        _osa('tell application "System Events"\n'
+             f'repeat {n} times\nkey code 51 using {{option down}}\nend repeat\nend tell')
+        return
+    if low in ("delete line", "delete the line", "delete this line", "delete the current line",
+               "delete current line", "delete a line"):
+        _osa('tell application "System Events" to key code 51 using {command down}')  # ⌘⌫ to line start
+        _dictation_active = False
+        return
+    if low in ("delete paragraph", "delete the paragraph", "delete this paragraph", "delete a paragraph"):
+        # Select to the start of the paragraph (⌥⇧↑) then delete the selection.
+        _osa('tell application "System Events"\n'
+             'key code 126 using {option down, shift down}\nkey code 51\nend tell')
+        _dictation_active = False
+        return
+    if low in ("undo", "undo that", "undo it"):
+        _osa('tell application "System Events" to keystroke "z" using {command down}')  # ⌘Z
+        _dictation_active = False
+        return
+    if low in ("redo", "redo that", "redo it"):
+        _osa('tell application "System Events" to keystroke "z" using {command down, shift down}')  # ⌘⇧Z
+        return
+
     # spoken edit words -> (key code, modifier). "new/next line" is a SOFT newline
     # (Shift+Return) so it doesn't *send* in chat apps; "enter"/"send" is a plain Return.
     specials = {

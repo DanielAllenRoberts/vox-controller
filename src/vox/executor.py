@@ -78,7 +78,10 @@ def _rewrite(selected: str, instruction: str) -> str:
 _LOOK_AXTREE_SYSTEM = (
     "You answer questions about what's on the user's Mac screen. Instead of an image you're given "
     "the focused app's accessibility (AX) tree as indented text — each line is a UI element "
-    "(role, title, value). Read it and answer concisely for text-to-speech (1-2 sentences)."
+    "(role, title, value). Read it and answer concisely for text-to-speech (1-2 sentences). "
+    "If the tree genuinely can't answer the question and it needs deeper visual reasoning (e.g. the "
+    "content is in an image/canvas the tree doesn't expose, or the layout is too complex to infer), "
+    "reply with EXACTLY '[BIG]' and nothing else to hand off to a more capable model."
 )
 
 
@@ -96,8 +99,13 @@ def _look_axtree(question: str) -> str | None:
         return None
     prompt = (f"Focused app: {snap.get('app', '?')}\n\nAX tree:\n{snap['text']}\n\n"
               f"Question: {question}")
-    # kind="vision_axtree" tags this on the Token Usage page so its cost/effectiveness is tracked.
-    return assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="big", kind="vision_axtree")
+    # The AX tree is structured TEXT, so the cheap/small brain reads it fine — no need for the
+    # vision-grade big brain. It can defer with '[BIG]' for a genuinely hard screen, which we then
+    # retry on the big brain. kind="vision_axtree" tags both on the Token Usage page.
+    answer = assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="small", kind="vision_axtree")
+    if answer.strip() == "[BIG]":
+        answer = assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="big", kind="vision_axtree")
+    return answer
 
 
 def execute(text: str, history=None) -> tuple[bool, str]:

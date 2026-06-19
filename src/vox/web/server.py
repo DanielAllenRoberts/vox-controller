@@ -750,7 +750,7 @@ def _mcp_config() -> dict:
     # server resolves the package regardless of where the editor invokes it.
     server_entry = {
         "command": "uv",
-        "args": ["run", "python", "-m", "vox.mcp.speak"],
+        "args": ["run", "python", "mcp/vox_speak_server.py"],
         "cwd": repo_root,
     }
 
@@ -775,7 +775,7 @@ def _mcp_config() -> dict:
     claude_add = (
         "claude mcp add vox-speak "
         f"--cwd {repo_root} "
-        "-- uv run python -m vox.mcp.speak"
+        "-- uv run python mcp/vox_speak_server.py"
     )
 
     return {
@@ -985,6 +985,11 @@ def _handbook_static() -> list:
                     "phrase": "what app is this? / what am I looking at?",
                     "description": "Instantly speaks the name of the app you're focused on — no brain call.",
                 },
+                {
+                    "phrase": "click Submit / click the Log in button",
+                    "description": "Press a button, link, tab or control by its label — found in the "
+                    "accessibility tree (works best in native apps & standard UI).",
+                },
             ],
         },
         {
@@ -1037,6 +1042,23 @@ def _handbook_static() -> list:
                 {
                     "phrase": "backspace  /  delete  /  delete that",
                     "description": "Delete the character before the cursor.",
+                },
+                {
+                    "phrase": "delete word  /  delete the last five words",
+                    "description": "Delete whole words (⌥⌫) — one, or a count you name (up to 50).",
+                },
+                {
+                    "phrase": "delete line  /  delete paragraph",
+                    "description": "Delete back to the start of the line, or the whole paragraph.",
+                },
+                {
+                    "phrase": "undo  /  redo",
+                    "description": "Undo (⌘Z) or redo (⌘⇧Z) your last edit — e.g. after an accidental delete.",
+                },
+                {
+                    "phrase": "literally <words>",
+                    "description": "Type a phrase verbatim even when it's a command — 'literally delete line' "
+                    "types those words instead of deleting.",
                 },
                 {
                     "phrase": "tab key",
