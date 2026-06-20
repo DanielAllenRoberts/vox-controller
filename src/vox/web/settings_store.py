@@ -33,7 +33,20 @@ _PROVIDER_OPTIONS = [
     {"value": "claude_sdk", "label": "Claude (subscription / SDK)"},
     {"value": "anthropic", "label": "Anthropic API"},
     {"value": "openai", "label": "OpenAI-compatible (DeepSeek / Ollama / LM Studio)"},
+    {"value": "local_ai", "label": "Local AI (your own GPU / endpoint)"},
     {"value": "claude_cli", "label": "Claude CLI"},
+]
+
+# Common model ids per provider — shared by the small + big brain model dropdowns. Pick the one
+# that matches the brain's provider. (For provider "local_ai" the model comes from local_ai_model
+# in config; the Gemma entry here is just so the value displays.) Set an exotic model in config.py.
+_MODEL_OPTIONS = [
+    {"value": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5 — fast (Claude / Anthropic)"},
+    {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (Claude / Anthropic)"},
+    {"value": "claude-opus-4-8", "label": "Claude Opus 4.8 — deep (Claude / Anthropic)"},
+    {"value": "deepseek-v4-flash", "label": "DeepSeek V4 Flash — fast (OpenAI-compatible API)"},
+    {"value": "deepseek-v4-pro", "label": "DeepSeek V4 Pro — capable (OpenAI-compatible API)"},
+    {"value": "google/gemma-4-e4b", "label": "Gemma E4B — your local model (Local AI)"},
 ]
 
 # Kokoro voice choices — shared by the system voice (kokoro_voice) and the MCP voice
@@ -73,8 +86,10 @@ _SCHEMA_META: list[dict] = [
         "key": "small_brain_model",
         "label": "Small brain model",
         "group": "Brains",
-        "type": "text",
-        "help": "Model id for the small brain (e.g. deepseek-chat). Restart to apply.",
+        "type": "select",
+        "options": _MODEL_OPTIONS,
+        "help": "Model for the small brain — pick one that matches the provider above. Applies on "
+                "the next reply. (Need a model not listed? Set small_brain_model in config.py.)",
     },
     {
         "key": "big_brain_provider",
@@ -88,8 +103,10 @@ _SCHEMA_META: list[dict] = [
         "key": "big_brain_model",
         "label": "Big brain model",
         "group": "Brains",
-        "type": "text",
-        "help": "Model id for the big brain (e.g. claude-opus-4-8). Restart to apply.",
+        "type": "select",
+        "options": _MODEL_OPTIONS,
+        "help": "Model for the big brain — pick one that matches the provider above. Applies on the "
+                "next reply. (Need a model not listed? Set big_brain_model in config.py.)",
     },
     {
         "key": "escalate_to_big_brain",

@@ -32,8 +32,13 @@ class Config:
 
     # Sleep / deactivate — matched in transcribed text (no model needed; we're
     # already transcribing once a mode is active).
+    # Exit the current mode → back to idle. Includes farewells ("bye Vox", "goodbye") so they ALWAYS
+    # leave assistant mode, even when the model tagged its last reply [OPEN] (waiting for you) — a
+    # farewell is caught here, before the chat path, so it never gets sent to the brain as a turn.
     sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep", "go ahead and sleep", "going to sleep",
-                                      "nevermind", "never mind", "cancel that", "forget it")
+                                      "nevermind", "never mind", "cancel that", "forget it",
+                                      "bye vox", "bye fox", "bye box", "goodbye", "good bye",
+                                      "bye bye", "see you later", "okay bye", "ok bye", "alright bye")
     sleep_spoken: str = "stand down"
 
     # Emergency stop — drop straight to idle from any mode (more forceful than "stand down").
@@ -173,7 +178,7 @@ class Config:
     #   Local Ollama  : provider="openai", model="llama3.1",       llm_base_url="http://localhost:11434/v1", llm_api_key_env=<any dummy>
     #   Local LM Studio: provider="openai", model="<loaded model>", llm_base_url="http://localhost:1234/v1",  llm_api_key_env=<any dummy>
     small_brain_provider: str = "openai"       # DeepSeek via its OpenAI-compatible API (trying it as the small brain)
-    small_brain_model: str = "deepseek-chat"   # back to Haiku: provider="anthropic", model="claude-haiku-4-5-20251001"
+    small_brain_model: str = "deepseek-v4-flash"   # DeepSeek's fast tier (the old "deepseek-chat" now aliases here). Haiku: provider="anthropic", model="claude-haiku-4-5-20251001"
     big_brain_provider: str = "claude_sdk"     # big/vision stays on the Claude subscription (no per-token cost)
     big_brain_model: str = "claude-opus-4-8"
     escalate_to_big_brain: bool = True   # let the small brain defer complex turns to the big brain
@@ -183,7 +188,16 @@ class Config:
     personality: str = ""
 
     llm_base_url: str = "https://api.deepseek.com"  # openai-compatible providers (DeepSeek, Ollama, LM Studio); "" for none
-    llm_api_key_env: str = "DEEPSEEK_API_KEY"   # env var holding the API key (openai/anthropic providers). "ANTHROPIC_API_KEY" for the Anthropic API
+    llm_api_key_env: str = "DEEPSEEK_API_KEY"   # env var holding the API key for the "openai" provider (DeepSeek etc.)
+    anthropic_key_env: str = "ANTHROPIC_API_KEY"  # the "anthropic" provider's OWN key env — separate from llm_api_key_env so a DeepSeek (openai) brain + a Claude/Haiku (anthropic) brain can run at once
+
+    # Local AI — a self-hosted OpenAI-compatible /v1 endpoint (LM Studio / Ollama / vLLM, e.g. a home
+    # GPU box over a Cloudflare tunnel). Point ANY brain at it by setting that brain's provider to
+    # "local_ai" (Settings dashboard or config) — it uses local_ai_model and reads the URL + key from
+    # .env by the var NAMES below (kept OUT of this public repo). Cheap, private, your own hardware.
+    local_ai_base_url_env: str = "LOCAL_AI1_URL"   # .env var holding the base URL (…/v1)
+    local_ai_key_env: str = "LOCAL_AI1"            # .env var holding the API key
+    local_ai_model: str = "google/gemma-4-e4b"     # model id the local server exposes
     llm_max_tokens: int = 800   # headroom for composing text ("write me…"); chat stays short via the prompt
 
     # LLM-as-executor (idea #12): on an uncertain command, the small brain runs Vox's own

@@ -61,14 +61,17 @@ class WhisperWakeBackend:
     def _oneshot(self, text: str) -> str | None:
         # "Vox, <anything>" from idle → run it once, routed through the FULL shared dispatch
         # (deterministic command / scheduler / what-app, else the executor for compose / rewrite /
-        # vision / fuzzy). We no longer require it to be a deterministic command — that gate is what
-        # blocked "vox what can you see" / "vox set a timer" / "vox write me…"; stray "vox …" mishears
-        # are caught downstream by the executor's IGNORE.
-        t = normalize(text)
-        if not t.startswith("vox "):
+        # vision / fuzzy). We don't require it to be a known command (that gate blocked "vox what can
+        # you see" / "vox set a timer"). Tolerate (a) leading filler — "um vox search…", "so vox open…"
+        # — and (b) the very common "vox"→"box"/"fox" mishear. The name must still be the FIRST real
+        # word (re.match anchors it), so mid-sentence "vox" doesn't fire; stray "box …" chatter that
+        # slips through is IGNOREd downstream by the executor.
+        t = re.sub(r"^(?:(?:um|uh|er|ah|oh|so|okay|ok|well|and|now|like|yeah|right|alright)\s+)+",
+                   "", normalize(text))
+        m = re.match(r"(?:vox|vocks|vaux|fox|box)\s+(.+)", t)
+        if not m:
             return None
-        rest = t[4:].strip()
-        return rest or None
+        return m.group(1).strip() or None
 
 
 class OpenWakeWordBackend:

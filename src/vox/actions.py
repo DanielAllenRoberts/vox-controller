@@ -960,6 +960,7 @@ def edit_selection(transform) -> str:
 _FAIL_MARKERS = (
     "no app called", "no tab matching", "no window matching",
     "not sure how to do that", "isn't wired up", "there aren't",
+    "to click",  # click_element found no labelled control → escalate to the LLM + AX-tree click
 )
 
 

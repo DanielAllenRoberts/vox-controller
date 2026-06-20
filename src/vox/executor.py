@@ -42,6 +42,10 @@ _SYSTEM = (
     "kind of text it is — the selection is fetched and rewritten automatically.\n"
     "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
     "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
+    "To CLICK an on-screen control by what the user calls it ('click the play button', 'click daily "
+    "report', 'press submit', 'tap the menu', 'select Settings'): output  CLICK: <what to click>. "
+    "The exact control is matched from the screen's accessibility tree in a separate step — just pass "
+    "the user's target.\n"
     "To set a TIMER, ALARM, or REMINDER ('remind me to call Sam in 10 minutes', 'set a timer for "
     "5 minutes', 'set an alarm for 7am', 'remind me every day at 9 to stretch'): output  "
     "SCHEDULE: <a clear, COMPLETE restatement that includes the time>, e.g. SCHEDULE: remind me "
@@ -106,6 +110,38 @@ def _look_axtree(question: str) -> str | None:
     if answer.strip() == "[BIG]":
         answer = assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="big", kind="vision_axtree")
     return answer
+
+
+_CLICK_PICK_SYSTEM = (
+    "You click controls on the user's Mac. You're given the focused app's accessibility (AX) tree as "
+    "indented text — each line is a UI element (role, title, value) — and what the user wants to "
+    "click, in their own (possibly imprecise or mis-transcribed) words. Find the single best-matching "
+    "CLICKABLE element (button, link, menu item, tab, checkbox, etc.) and reply with ONLY its title, "
+    "copied VERBATIM from the tree — no role, no quotes, no extra words. If nothing reasonably "
+    "matches, reply with exactly NONE."
+)
+
+
+def _click_via_axtree(target: str) -> str:
+    """LLM-assisted click. The deterministic AXPress search couldn't find `target`, so read the AX
+    tree, let the brain map the user's words to an exact element label, then click that label (the
+    label is matched in the tree by `actions.click_element`). Falls back to the plain 'couldn't
+    find' message when the tree is unavailable or nothing matches."""
+    try:
+        from vox.web import axtree
+        snap = axtree.snapshot_text()
+    except Exception:
+        snap = {"error": "unavailable"}
+    if "error" in snap:
+        return f"I couldn't find a '{target}' to click."
+    prompt = (f"Focused app: {snap.get('app', '?')}\n\nAX tree:\n{snap['text']}\n\n"
+              f"The user wants to click: {target!r}\nExact title to click (or NONE):")
+    pick = assistant.complete(prompt, system=_CLICK_PICK_SYSTEM, brain="small",
+                              kind="click_axtree").strip().strip('"').strip("'")
+    assistant._dbg("[executor]", f"click pick for {target!r} → {pick!r}")
+    if not pick or pick.upper().strip("[]") == "NONE":
+        return f"I couldn't find a '{target}' to click on the screen."
+    return actions.click_element(pick)
 
 
 def execute(text: str, history=None) -> tuple[bool, str]:
@@ -174,6 +210,12 @@ def execute(text: str, history=None) -> tuple[bool, str]:
             msg = None
         assistant._dbg("[executor]", f"decision=SCHEDULE {phrase!r} → {msg!r}")
         return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
+    if upper.startswith("CLICK:"):
+        target = raw.split(":", 1)[1].strip()
+        result = _click_via_axtree(target)
+        assistant._dbg("[executor]", f"decision=CLICK target={target!r} → {result!r}")
+        # Success → silent "did it" cue; failure → speak the "couldn't find it" so the user hears it.
+        return result.lower().startswith("clicked"), result
 
     command = raw.splitlines()[0].strip().strip('"').rstrip(".")
     if actions.parse(command) is None:

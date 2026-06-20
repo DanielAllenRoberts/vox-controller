@@ -103,6 +103,7 @@ _ACTION_HINTS = (
     "clean this", "summarize", "summarise", "screen", "look at", "read this", "read the",
     "what can you see", "what do you see", "open ", "go to", "search", "switch",
     " tab", "window", "desktop", "remind", "timer", "alarm", "what app",
+    "click", "press ", "tap ", "select ",
 )
 
 

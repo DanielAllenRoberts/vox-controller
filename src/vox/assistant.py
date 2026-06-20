@@ -59,7 +59,7 @@ _SYSTEM = (
 )
 
 _anthropic_client = None
-_openai_client = None
+_openai_clients = {}  # (base_url, key) -> OpenAI client — one per endpoint (DeepSeek, local model, …)
 
 
 def _dbg(label: str, content) -> None:
@@ -366,6 +366,8 @@ def complete(text: str, history=None, *, brain: str = "small", system: str = _SY
         raw = _claude_cli(text, history, model, system, brain, kind)
     elif provider == "openai":
         raw = _openai(text, history, model, system, brain, kind)
+    elif provider == "local_ai":
+        raw = _local_ai(text, history, model, system, brain, kind)
     else:
         raw = _anthropic(text, history, model, system, brain, kind)
     # Debug: dump the COMPLETE raw response, BEFORE any [OPEN]/[DONE]/[BIG]/SAY:/MEMORY[...]
@@ -411,9 +413,12 @@ def _split_signal(raw: str) -> tuple[str, bool]:
 
 
 def _anthropic(text, history, model, system, brain="small", kind="chat"):
-    key = os.environ.get(CONFIG.llm_api_key_env or "ANTHROPIC_API_KEY")
+    # The Anthropic provider has its OWN key env (ANTHROPIC_API_KEY), NOT the shared llm_api_key_env
+    # (which holds the DeepSeek key) — otherwise a Claude/Haiku brain sends the DeepSeek key → 401.
+    key_env = getattr(CONFIG, "anthropic_key_env", "ANTHROPIC_API_KEY")
+    key = os.environ.get(key_env)
     if not key:
-        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
+        return f"I need {key_env} in your .env — add it and restart Vox."
     global _anthropic_client
     if _anthropic_client is None:
         from anthropic import Anthropic
@@ -433,30 +438,56 @@ def _anthropic(text, history, model, system, brain="small", kind="chat"):
         return f"(LLM error: {exc})"
 
 
-def _openai(text, history, model, system, brain="small", kind="chat"):
-    key = os.environ.get(CONFIG.llm_api_key_env)
-    if not key:
-        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
-    global _openai_client
-    if _openai_client is None:
+def _openai_client_for(base_url, key):
+    """Cache one OpenAI client per (base_url, key) so different OpenAI-compatible endpoints (e.g.
+    DeepSeek as the small brain AND a local model as the big brain) don't clobber each other."""
+    ck = (base_url or "", key or "")
+    client = _openai_clients.get(ck)
+    if client is None:
         from openai import OpenAI
-        _openai_client = OpenAI(api_key=key, base_url=CONFIG.llm_base_url or None)
+        client = OpenAI(api_key=key or "local", base_url=base_url or None)
+        _openai_clients[ck] = client
+    return client
+
+
+def _openai_call(text, history, model, system, brain, kind, base_url, key, label="openai"):
+    """One completion against any OpenAI-compatible endpoint. `label` tags the usage record."""
+    client = _openai_client_for(base_url, key)
     msgs = ([{"role": "system", "content": system}]
             + [{"role": r, "content": c} for r, c in (history or [])]
             + [{"role": "user", "content": text}])
     t0 = time.monotonic()
     try:
-        # 45s cap (matches the SDK/anthropic paths) so a stalled DeepSeek/local call can't freeze
-        # the voice loop — the client otherwise defaults to ~10 min.
-        resp = _openai_client.with_options(timeout=45.0).chat.completions.create(
+        # 45s cap (matches the SDK/anthropic paths) so a stalled remote/local call can't freeze the
+        # voice loop — the client otherwise defaults to ~10 min.
+        resp = client.with_options(timeout=45.0).chat.completions.create(
             model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs)
         u = getattr(resp, "usage", None)
-        _record_usage("openai", model, brain, kind,
+        _record_usage(label, model, brain, kind,
                       (u.prompt_tokens, u.completion_tokens) if u else None,
                       (time.monotonic() - t0) * 1000)
         return (resp.choices[0].message.content or "").strip()
     except Exception as exc:
         return f"(LLM error: {exc})"
+
+
+def _openai(text, history, model, system, brain="small", kind="chat"):
+    key = os.environ.get(CONFIG.llm_api_key_env)
+    if not key:
+        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
+    return _openai_call(text, history, model, system, brain, kind, CONFIG.llm_base_url, key)
+
+
+def _local_ai(text, history, model, system, brain="small", kind="chat"):
+    """A self-hosted OpenAI-compatible model (LM Studio / Ollama / vLLM, e.g. a home GPU box over a
+    Cloudflare tunnel). URL + key come from .env (kept out of the repo); the model is local_ai_model."""
+    url_env = getattr(CONFIG, "local_ai_base_url_env", "LOCAL_AI1_URL")
+    base = os.environ.get(url_env, "").strip()
+    if not base:
+        return f"Set {url_env} in your .env to your local model's /v1 URL, then restart Vox."
+    key = os.environ.get(getattr(CONFIG, "local_ai_key_env", "LOCAL_AI1"), "") or "local"
+    mdl = getattr(CONFIG, "local_ai_model", "") or model
+    return _openai_call(text, history, mdl, system, brain, kind, base, key, label="local_ai")
 
 
 def _claude_sdk(text, history, model, system, brain="big", kind="chat"):
