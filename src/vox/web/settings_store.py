@@ -284,6 +284,13 @@ _SCHEMA_META: list[dict] = [
         "options": _KOKORO_VOICE_OPTIONS,
         "help": "Kokoro voice for the MCP when its engine is Kokoro (or 'Follow system' resolves to Kokoro). Reload the MCP server to apply.",
     },
+    {
+        "key": "mcp_speak_cue",
+        "label": "MCP speak cue sound",
+        "group": "MCP voice",
+        "type": "text",
+        "help": "Path to a short sound played just before the vox-speak MCP speaks, so a spoken heads-up doesn't come out of nowhere. Blank to disable. Reload the MCP server to apply.",
+    },
     # --- Cost ---
     {
         "key": "monthly_budget_usd",

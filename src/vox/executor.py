@@ -10,6 +10,12 @@ LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 from vox import actions, assistant
 from vox.config import CONFIG
 
+# Sentinel returned as the message (with acted=True) when the brain decides the user wants to
+# START DICTATION — they said "start typing" or a garbled version the deterministic _is_dictate
+# missed (e.g. "dot typing"). The loop's execute() callers detect this and switch into
+# _dictation_mode instead of treating it as a normal action result.
+ENTER_DICTATION = "\x00ENTER_DICTATION\x00"
+
 
 def _setting(key: str, fallback):
     """Read a runtime override from the dashboard's settings_store, else fall back to Config.
@@ -46,10 +52,24 @@ _SYSTEM = (
     "report', 'press submit', 'tap the menu', 'select Settings'): output  CLICK: <what to click>. "
     "The exact control is matched from the screen's accessibility tree in a separate step — just pass "
     "the user's target.\n"
-    "To set a TIMER, ALARM, or REMINDER ('remind me to call Sam in 10 minutes', 'set a timer for "
-    "5 minutes', 'set an alarm for 7am', 'remind me every day at 9 to stretch'): output  "
-    "SCHEDULE: <a clear, COMPLETE restatement that includes the time>, e.g. SCHEDULE: remind me "
-    "to call Sam in 10 minutes.\n"
+    "To set a TIMER, ALARM, or REMINDER: output  SCHEDULE: <kind> | <when> | <text> | <repeat>\n"
+    "  <kind> = timer, alarm, or reminder.\n"
+    "  <when> = the ABSOLUTE local date-time as 24-hour ISO YYYY-MM-DDTHH:MM, which YOU compute from "
+    "the 'Now:' time in the Mac state — turn 'in 10 minutes' / 'at 3:45 pm' / 'tomorrow at 7am' / "
+    "'every day at 9' into the real clock date+time (pick the next future occurrence).\n"
+    "  <text> = what to remind about (leave blank for a bare timer/alarm).\n"
+    "  <repeat> = once, daily, weekdays, or weekly.\n"
+    "  Examples (when Now is 2026-06-23 15:04): 'remind me to call Sam in 10 minutes' → "
+    "SCHEDULE: reminder | 2026-06-23T15:14 | call Sam | once  ·  'set an alarm for 7am' → "
+    "SCHEDULE: alarm | 2026-06-24T07:00 |  | once  ·  'remind me at 3:45 pm that I have a meeting' → "
+    "SCHEDULE: reminder | 2026-06-23T15:45 | I have a meeting | once  ·  'remind me every day at 9 to "
+    "stretch' → SCHEDULE: reminder | 2026-06-24T09:00 | stretch | daily.\n"
+    "To START DICTATION — when the user wants to TYPE WITH THEIR VOICE, i.e. begin dictating text "
+    "that Vox transcribes at the cursor ('start typing', 'start dictation', 'begin typing', "
+    "'dictate', 'take dictation', or a mis-heard version like 'dot typing' / 'star typing' / 'start "
+    "typ'): output exactly  DICTATE  and nothing else. This hands the keyboard to the user's voice "
+    "(everything they say next is typed) — it is DIFFERENT from TYPE, which composes specific text "
+    "you write. When the user just wants to start dictating, DICTATE — don't write anything yourself.\n"
     "Rules:\n"
     "• Be autonomous — strongly prefer ACTING over asking. Make a sensible choice and do it; never "
     "ask for confirmation. Questions slow the user down, so only ask when you genuinely cannot "
@@ -170,6 +190,9 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
         return False, reply
+    if upper.startswith("DICTATE"):  # user wants to type by voice → tell the loop to enter dictation
+        assistant._dbg("[executor]", "decision=DICTATE → enter dictation mode")
+        return True, ENTER_DICTATION
     if upper.startswith("TYPE:"):
         body = raw.split(":", 1)[1].strip()
         result = actions.type_text(body)
@@ -202,13 +225,23 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         assistant._dbg("[executor]", f"decision=LOOK (screenshot) q={question!r} → {answer!r}")
         return False, answer
     if upper.startswith("SCHEDULE:"):
-        phrase = raw.split(":", 1)[1].strip()
+        body = raw.split(":", 1)[1].strip()
+        msg = None
         try:
             from vox import scheduler
-            msg = scheduler.parse_and_create(phrase)
+            # Preferred: the brain emits a structured "kind | ISO-when | text | repeat" (it computed
+            # the absolute time from 'Now:'), so we create it directly — no fragile English re-parse.
+            if "|" in body:
+                parts = [p.strip() for p in body.split("|")]
+                parts += [""] * (4 - len(parts))  # pad so missing trailing fields are just empty
+                msg = scheduler.create_structured(parts[0], parts[1], parts[2], parts[3])
+            # Fallback: a plain-English restatement (model ignored the format) → the deterministic
+            # parser (now connector-tolerant: "to"/"that"/"about"/"saying").
+            if msg is None:
+                msg = scheduler.parse_and_create(body)
         except Exception:
             msg = None
-        assistant._dbg("[executor]", f"decision=SCHEDULE {phrase!r} → {msg!r}")
+        assistant._dbg("[executor]", f"decision=SCHEDULE {body!r} → {msg!r}")
         return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
     if upper.startswith("CLICK:"):
         target = raw.split(":", 1)[1].strip()

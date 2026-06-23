@@ -284,6 +284,13 @@ Stores are JSON/JSONL under `data/` today. For an open-source **download** (user
 
 Stop putting all memory into the prompt. Layer it: **quick-recall** (a few always-injected, high-importance facts) · **daily logs** (the agent documents what it did) · a scheduled **"dream"** job (big-brain) that consolidates the logs, dedupes, resolves inconsistencies, and rolls them up into weekly/monthly/total memories · and a **second brain** — index everything into folders the agent *navigates on demand* ("the user is at work — let me check the work folder for their progress") instead of stuffing it all in context. Agentic RAG over a structured, human-readable tree. Builds on #14/#24/#27; the dream job rides the scheduler (#16) on the big brain.
 
+**Fuller design (discussed 2026-06-21) — give memory an explicit framework the big brain owns:**
+- **Two cheap raw inputs.** A short **per-chat / session memory** (what happened in *this* conversation) plus the **daily log** — both append-only, human-readable Markdown, written as you go. This is the unstructured intake.
+- **The "dream" job *structures*, not just dedupes.** A scheduled big-brain pass (a **cron on the scheduler #16**) reads the raw session/daily memory and **files each fact into a topic folder** — `coding/`, `uni/`, `personal/`, `finances/`, … — rolling related notes together and resolving contradictions. Memory stops being one flat pile and becomes a **navigable tree the user can read folder-by-folder**. (The folder taxonomy can itself be learned/extended by the dream job rather than hard-coded.)
+- **Retrieve by *opening the right folder*, not by stuffing context.** On a new request, an **agentic retrieval step decides which folder(s) are relevant and opens only those** ("finances question → read `finances/`"), so the brain is never barraged with everything at once — the key to keeping context tight as memory grows. This is the **LangGraph** fit (see `research/langchain-langgraph.md`): a small graph routing *query → folder-selector → read → answer*, each node with its own scoped prompt (#25). Builds directly on the topic tree the dream job produces.
+
+Connects to #25 (each dream/retrieval step is its own scoped prompt), #16 (the dream cron), #29 (auto-capture feeds the raw intake), #38/#39 (a `coding/` folder feeding the coding brain/agent), #47 (time-aware "today's" daily file).
+
 ## 29. Memory auto-capture — remember on its own
 
 > **Status:** ✅ BUILT — the assistant decides to save salient facts itself via a gated `MEMORY[...]` directive (and on "remember that…"), feeding the tiered store; toggle in Settings.
@@ -330,6 +337,8 @@ An MCP server that lets the coding agent (Claude Code) speak through the system 
 
 The same phrase should mean different things depending on what's focused. "Search for X" → searches **YouTube** when it's open, the web otherwise; with **Cursor** focused, unlock Cursor-specific verbs ("new terminal", "type in the terminal", "open file"). Per-app / per-site command sets let you **reuse phrases for different purposes** and cut ambiguity — the router picks the profile from the focused app/tab (already surfaced by `actions.environment_context()`). Near-term win on the same theme: tab-switching by name is unreliable when a tab's *title* is generic (a Google Doc shows as "Untitled" / "unknown doc"), so neither the fuzzy matcher nor the brain can tie "open Google Docs" to it — enrich the context with each tab's **URL/domain** (`docs.google.com`) and the match (deterministic, or learned via #24) becomes solid. Pairs with scoped prompts (#25), the learning layer (#24), and AX-tree handles (#35).
 
+**→ Storage design (SQLite):** [`command-db.md`](command-db.md) — the `context`/`command`/`phrase`/`intent` schema (FKs, sample Arc data, runtime resolution flow) that holds per-app command sets. On the SQLite direction from #27; sets up learning (#14). *Schema is in review — no code yet.*
+
 ## 37. Real website control — simplified DOM + expand-on-demand + screenshot grid
 
 Interacting with web pages needs more than the macOS a11y tree. The mature web-agent stack: (1) **simplify the DOM** to a compact list of interactive/labelled elements (or HTML→Markdown for reading) — raw HTML is far too much context; (2) a **progressive-disclosure tool** so the model can *expand* a specific region only when it needs the detail; (3) **screenshot + numbered marks** ("set-of-marks": overlay numbered boxes on clickable elements, the model picks a number) as visual grounding / fallback. Combine: simplified-DOM/a11y as the cheap primary, the expand-tool for depth, the screenshot-grid for visual cases. Needs browser automation (CDP / the browser's own a11y / an extension) beyond System Events. Builds on #35; connects to in-browser tab/profile control (#4) and the learned-click macros of #24/#35.
@@ -341,6 +350,8 @@ Beyond **small** (fast/cheap) and **big** (deep) brains, add a **coding** brain:
 ## 39. Multiple named agents (late-stage)
 
 Call different agents by **name** — "Hey Atlas" for a coding work-session agent, "Hey Vox" for the general one — each with its **own voice, persona, brain, and command set**, so the *name itself routes* to a different agent. Builds on the wake phrases, personalities (#22), scoped prompts (#25), and the coding brain (#38). A fun, late-stage feature.
+
+**→ Full design:** [`named-agents.md`](named-agents.md) — talk to your Claude CLIs by name (David/Greg), no-focus-steal injection (tmux/iTerm), self-registering agents, the steer/reply conversation model, headless-vs-interactive explained, and staging. Related: #3, #34, #49.
 
 ## 40. Learn your name (setup / personalization)
 
@@ -384,7 +395,9 @@ While dictation/typing is active (between **"start typing"** and **"stop typing"
 - **Grounded, not guessed** — the corpus is the user's *actual* writing, so the learned voice is real, and it sharpens as more accumulates (periodic re-analysis).
 - Keep the **distilled profile** (small, injected into the compose prompt) separate from the **raw corpus** (bulkier, just the training material) — and it needn't be heavyweight: even an ephemeral rolling buffer that's analysed and discarded works.
 
-**Connects to:** #10 (compose — the consumer of the style profile), #8 (personalisation over time), #2 (literal-dictation vs AI-compose handoff), #25 (scoped prompts — the compose prompt carries the style rules), and #27/#28 (where the corpus/profile would live).
+**Self-improving prompts over time (discussed 2026-06-21):** treat the compose prompt as **living**, not fixed. The style profile is **re-tuned** as more of the user's writing accumulates (periodic re-analysis) and, optionally, from explicit feedback ("no — shorter / more casual"). The scoped **"write this"** prompt (#25) carries the current profile, so it gets *better at sounding like you the more you use it*. The mechanism **generalises beyond writing style**: any scoped prompt (#25) can keep a small, evolving "what works for this user" addendum that a background pass refines — the assistant slowly tunes its own prompts to the user rather than shipping one static prompt forever.
+
+**Connects to:** #10 (compose — the consumer of the style profile), #8 (personalisation over time), #2 (literal-dictation vs AI-compose handoff), #25 (scoped prompts — the compose prompt carries the style rules *and* is the thing that self-tunes), and #27/#28 (where the corpus/profile would live).
 
 ## 46. Teaching / demonstration mode — show Vox the exact steps (high-stakes tasks)
 
@@ -464,6 +477,33 @@ items?").
 **Connects to:** Whisper STT, the brains (#17), memory (#27/#28/#29), scheduler (#16, action
 items → reminders), AEC (#21, clean capture), and the conversation viewer (#43, same "show a
 session" surface). The genuinely new work is **system-audio capture** of the far end.
+
+## 49. MCP as a two-way bridge to Vox's powers (extends #3/#34)
+
+The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `import vox.*`, so it can expose **everything Vox already does** to the IDE assistant (Claude Code / Cursor) as tools — turning a one-way "speak when done" into a real bridge between the keyboard-assistant and the voice-assistant. Each tool is a thin wrapper over an existing module:
+
+- **Shared memory** — `remember(fact, tier)` / `recall(query)` over `vox.memory.add`/`.recall`, so a fact Claude learns while coding is something **Vox knows by voice later** (and vice versa): one brain across both assistants. **(user-flagged priority; pure reuse, no mic.)** Ties to #27/#28/#29.
+- **Scheduled spoken reminders** — `remind(text, when)` / `set_timer(mins)` over `vox.scheduler.parse_and_create`/`create_job`; the running daemon's scheduler **speaks it out loud** later, even after the IDE is closed. **(user-flagged priority; pure reuse.)** Ties to #16.
+- **Two-way voice** — `ask(question) -> spoken answer`: Vox speaks the question and captures the reply via Whisper, so Claude can ask "force-push?" hands-free. Catch: the daemon **owns the mic** (single-instance guard), so the clean design routes the question through a small **web-bridge endpoint** to the running daemon (which already has speak+listen) rather than the MCP grabbing the mic itself. The flagship; biggest build.
+- **Voice approval gate** — `confirm(prompt) -> bool`: a spoken yes/no before destructive steps. A subset of two-way voice (same mic-routing).
+- **Mac control passthrough** — `do(command)` over `vox.actions.handle` ("open dashboard", "switch to Arc", "go to GitHub"); GUI things Bash can't easily do (Arc tab reuse, Space/window switching). Overlaps Bash → medium value.
+- **Screen vision** — `look_at_screen(question)` over `actions.capture_screen` / the AX tree (#18/#35), so Claude can "see" another window ("what's the error in the browser?").
+- **Desktop notification** — `notify(title, msg)` (osascript banner) to complement speak when muted/away.
+
+**Start with memory + reminders** (both ~20 lines, no mic constraint); scope the web-bridge endpoint *before* committing to the two-way-voice tools. Connects to #3, #34, #16, #28, #18.
+
+## 50. Clarifying follow-up questions — ask instead of failing (Alexa-style)
+
+**Vision:** when a command is *almost* actionable but missing or ambiguous on one detail, **ask one short spoken follow-up** and use the answer to complete it — instead of giving up with a flat error. Like Alexa: "set an alarm for 3 o'clock" → *"Morning or afternoon?"* → "afternoon" → done.
+
+**Why it matters:** a near-miss should degrade to a quick question, not a dead end. Real example (`issues.md` O10): "remind me at 3:30 PM **that** I have a meeting" failed entirely — but even genuine gaps (a bare "3 o'clock" with no AM/PM, "remind me in a bit" with no duration) should prompt a one-line clarification rather than "I couldn't work out a time."
+
+**How it might work:**
+- The plumbing **already exists** — the executor carries a `pending` clarification history and can emit `CHAT: <question>`; control mode already loops the next answer back in with context (`loop._control_mode`'s `pending`). The deterministic scheduler path just doesn't use it: on a `None` from `parse_and_create` it returns a fixed failure string instead of asking.
+- Cheapest slice: **hard-code** the common ambiguities (AM/PM, missing duration/time) → ask a templated question, then re-parse with the answer merged in. No LLM needed.
+- General slice: when the deterministic parse misses, hand the brain the utterance + "what single detail is missing?" and let it ask via `CHAT:`, then resolve on the reply. Ties to the LLM-executor (#12) and intent recovery (#26).
+
+**Connects to:** the scheduler (#16), the executor + intent recovery (#12/#26), and the command DB (a "needs clarification" outcome could be a first-class command result).
 
 ## Sequencing note
 

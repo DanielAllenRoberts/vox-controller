@@ -15,7 +15,7 @@ import webbrowser
 from dotenv import load_dotenv
 
 from vox import actions, assistant, dispatch, executor, sounds, tts
-from vox.audio import capture_utterance, open_mic_stream
+from vox.audio import MicStreamDead, capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
@@ -383,6 +383,9 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
                 redirect, pending = interrupt[1], []
                 continue
             acted, msg = result
+            if msg == executor.ENTER_DICTATION:  # brain heard "start typing" → switch to dictation
+                out.emit("→ entering dictation…")
+                return "dictation"
             if acted:
                 sounds.play(cfg.sound_oneshot)  # quiet "did it" cue — action-first (#13)
                 out.emit(f"  ⚡ {msg}")
@@ -469,6 +472,9 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         if dispatch.looks_like_action(text, cfg):
             sounds.play(cfg.sound_thinking)
             acted, msg = executor.execute(text)
+            if msg == executor.ENTER_DICTATION:  # brain heard "start typing" → switch to dictation
+                out.emit("→ entering dictation…")
+                return "dictation"
             if acted:
                 _record_turn("user", text)
                 sounds.play(cfg.sound_oneshot)
@@ -609,7 +615,8 @@ def main() -> None:
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
-        transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type)
+        transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type,
+                                         cpu_threads=cfg.whisper_cpu_threads)
         wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
 
@@ -619,7 +626,7 @@ def main() -> None:
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
     try:
-        with open_mic_stream(cfg) as mic:
+        with open_mic_stream(cfg, out) as mic:
             frames = mic.frames()
             # _Quit/_Restart are handled INSIDE the `with` (not propagated out) so we never run
             # MicStream.__exit__: PortAudio's Pa_StopStream → CoreAudio DeviceStop can deadlock and
@@ -627,7 +634,7 @@ def main() -> None:
             # frees the mic when we exit, so a clean re-open works.
             try:
                 while True:
-                    label = wake.listen(frames)
+                    label = wake.listen(frames, mic)
                     if label == "quit":
                         raise _Quit
                     if label == "restart":
@@ -657,9 +664,14 @@ def main() -> None:
                                 out.emit(f"  🔊 {msg}")
                                 tts.speak(msg)
                                 mic.flush()
+                            out.emit(idle_msg)
+                            continue
+                        sounds.play(cfg.sound_thinking)
+                        acted, msg = executor.execute(cmd)
+                        if msg == executor.ENTER_DICTATION:  # garbled "start typing" → dictate
+                            out.emit("→ entering dictation…")
+                            label = "dictation"  # fall through to the mode-chaining loop below
                         else:
-                            sounds.play(cfg.sound_thinking)
-                            acted, msg = executor.execute(cmd)
                             if acted:
                                 out.emit(f"⚡ {msg}")
                             elif msg:
@@ -667,8 +679,8 @@ def main() -> None:
                                 out.emit(f"  🔊 {shown}")
                                 tts.speak(spoken)
                                 mic.flush()
-                        out.emit(idle_msg)
-                        continue
+                            out.emit(idle_msg)
+                            continue
                     # A mode may return a follow-on label to chain into the other mode
                     # without dropping to idle. If the assistant was reached *from* control,
                     # it returns to control when done (instead of idling).
@@ -688,6 +700,14 @@ def main() -> None:
                                                     return_to="control" if from_control else None)
                             from_control = False
                     out.emit(idle_msg)
+            except MicStreamDead as exc:
+                # The mic died and in-process recovery couldn't bring it back (usually an audio-device
+                # change PortAudio can't re-bind). Self-restart: a fresh process re-acquires the mic
+                # cleanly — same proven path as a voice "restart Vox" — so Vox never wedges silently.
+                out.emit(f"\n⚠️  Mic unrecoverable ({exc}) — auto-restarting Vox to re-acquire it…")
+                subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True,
+                                 env={**os.environ, "VOX_RESTART": "1"})
+                os._exit(0)
             except _Restart:
                 out.emit("\n↻ Restarting Vox…")
                 # Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,

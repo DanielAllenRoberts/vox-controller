@@ -38,6 +38,34 @@ _MAX_CHARS = 1000  # keep spoken text sane
 # The `voice` tool arg still overrides the `say` voice per call.
 _DEFAULT_SAY_VOICE = "Samantha"     # US English, present on essentially all macOS — ≠ Vox's "Daniel"
 _DEFAULT_KOKORO_VOICE = "af_bella"  # ≠ Vox's default Kokoro "af_heart"
+# A short chime played BEFORE the MCP speaks, so a spoken heads-up doesn't appear out of nowhere.
+# Resolved dashboard setting (mcp_speak_cue) → env (VOX_MCP_CUE) → this default; "" disables it.
+_DEFAULT_CUE = "/System/Library/Sounds/Tink.aiff"
+
+
+def _cue_path():
+    """Path to the pre-speech cue sound: dashboard setting → env → default. '' disables it.
+    Mirrors _mcp_voice()'s resolution so it's controllable from the same Settings page."""
+    try:
+        from vox.web import settings_store
+        val = settings_store.get("mcp_speak_cue")
+        return _DEFAULT_CUE if val is None else val
+    except Exception:
+        return os.environ.get("VOX_MCP_CUE", _DEFAULT_CUE)
+
+
+def _play_cue() -> None:
+    """Play the short cue chime and wait for it to finish, so it precedes the voice rather than
+    overlapping it. Fully guarded — a missing file / non-macOS / no `afplay` just skips silently,
+    never blocking the actual speech."""
+    path = _cue_path()
+    if not path or platform.system() != "Darwin" or not shutil.which("afplay"):
+        return
+    try:
+        subprocess.run(["afplay", path], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass
 
 
 def _mcp_voice():
@@ -66,6 +94,7 @@ def _say(text: str, voice: str, rate: int) -> str:
     if not text:
         return "(nothing to speak)"
     text = text[:_MAX_CHARS]
+    _play_cue()  # short chime first, so the spoken heads-up doesn't come out of nowhere
     engine, say_voice, kokoro_voice = _mcp_voice()
     # Prefer Vox's own TTS engine (supports the neural Kokoro engine + the independent MCP voice);
     # fall back to a bare `say` if the vox package isn't importable from this process.

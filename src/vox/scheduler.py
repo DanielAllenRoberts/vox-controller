@@ -321,12 +321,16 @@ _RE_TIMER = re.compile(
 _RE_REMIND_IN = re.compile(
     r"\bremind\s+me\s+(?:to\s+(.+?)\s+)?in\s+(\d+)\s*(seconds?|minutes?|hours?|secs?|mins?|hrs?)\b"
     r"(?:\s+to\s+(.+))?")
+# The task after the time may be introduced by any of several connectors, not just "to"
+# ("remind me at 3:30 pm THAT I have a meeting" / "... ABOUT the dentist" / "... SAYING call mom").
+# Kept REQUIRED (not bare trailing text) so "set an alarm for 5 minutes" still doesn't read 5 as a clock.
+_TASK_TAIL = r"(?:\s+(?:to|that|about|saying)\s+(.+?))?$"
 _RE_REMIND_AT = re.compile(
-    r"\bremind\s+me\s+(?:to\s+(.+?)\s+)?at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?(?:\s+to\s+(.+?))?$")
+    r"\bremind\s+me\s+(?:to\s+(.+?)\s+)?at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?" + _TASK_TAIL)
 # `(?:for|at)+` (not just one) tolerates "alarm for at 8am" left behind after a day word like
 # "tomorrow" is stripped from "set an alarm for tomorrow at 8am".
 _RE_ALARM_AT = re.compile(
-    r"\b(?:set\s+(?:an|a)\s+)?alarm\s+(?:(?:for|at)\s+)+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?(?:\s+to\s+(.+?))?$")
+    r"\b(?:set\s+(?:an|a)\s+)?alarm\s+(?:(?:for|at)\s+)+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?" + _TASK_TAIL)
 _RE_EVERY = re.compile(
     r"\bevery\s+(day|weekday|weekdays|week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b")
 # A day qualifier ("tomorrow", "tonight", "this evening", "on Monday") that shifts the at-time to
@@ -463,6 +467,30 @@ def parse_and_create(text: str) -> str | None:
     return None
 
 
+def create_structured(kind: str, when: str, text: str = "", recurrence: str | None = None) -> str | None:
+    """Create a job from already-structured fields and return the spoken confirmation.
+
+    The brain computes the ABSOLUTE local time itself (it's given 'Now:' in context) and passes it
+    as an ISO string, so we skip the fragile English re-parse entirely. Returns None if the kind or
+    time is invalid (the caller then falls back to parse_and_create on a plain-English phrase)."""
+    kind = (kind or "").strip().lower()
+    if kind not in VALID_KINDS:
+        return None
+    fire = _parse_iso(when)
+    if fire is None:
+        return None
+    rec = (recurrence or "").strip().lower() or None
+    if rec in ("once", "none", "no"):
+        rec = None
+    if rec not in VALID_RECURRENCE:
+        rec = None
+    try:
+        create_job(kind, (text or "").strip(), fire_at=fire, recurrence=rec)
+    except Exception:
+        return None
+    return _confirm(kind, (text or "").strip(), fire, rec)
+
+
 def _confirm(kind: str, body: str, fire: datetime, recurrence: str | None) -> str:
     """Human confirmation line for an at-time job."""
     when = fire.strftime("%-I:%M %p").lower() if hasattr(fire, "strftime") else _iso(fire)
@@ -475,7 +503,7 @@ def _confirm(kind: str, body: str, fire: datetime, recurrence: str | None) -> st
             day = fire.strftime(" on %A")
     every = {"daily": " every day", "weekdays": " every weekday", "weekly": " every week"}.get(
         recurrence or "", "")
-    label = "reminder" if kind == "reminder" else "alarm"
+    label = kind if kind in VALID_KINDS else "reminder"
     tail = f" to {body}" if body else ""
     return f"{label.capitalize()} set for {when}{day}{every}{tail}."
 

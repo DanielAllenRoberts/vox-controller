@@ -5,8 +5,11 @@ from faster_whisper import WhisperModel
 
 
 class WhisperTranscriber:
-    def __init__(self, model_size: str, compute_type: str):
-        self._model = WhisperModel(model_size, device="cpu", compute_type=compute_type)
+    def __init__(self, model_size: str, compute_type: str, cpu_threads: int = 0):
+        # cpu_threads caps CTranslate2's intra-op threads. 0 = its default (≈ all physical cores),
+        # which lets idle transcription saturate the machine; a modest cap keeps the system responsive.
+        self._model = WhisperModel(model_size, device="cpu", compute_type=compute_type,
+                                   cpu_threads=cpu_threads)
 
     def transcribe(self, audio: np.ndarray, hotwords: str = "") -> str:
         # faster-whisper wants float32 mono in [-1, 1]; mic gives us int16.

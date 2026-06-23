@@ -92,12 +92,30 @@ class Config:
     sample_rate: int = 16_000
     frame_samples: int = 1280
     input_device: int | None = None  # None = system default; index from `uv run vox-diagnose`
+    # Mic-stall self-heal: a healthy input stream delivers a frame every ~80 ms even in silence, so if
+    # NO audio arrives for this long the device died (commonly an audio-device change — opening an app
+    # that grabs audio, a Bluetooth/headphone switch). Vox first re-opens the stream in the background;
+    # if audio still doesn't return within this window it does a clean self-restart (a fresh process
+    # reliably re-acquires the mic) instead of wedging silently — the "freezes after a while" bug.
+    mic_stall_restart_seconds: float = 12.0
 
     # --- Utterance capture (energy-based) ---
-    speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
+    speech_rms: float = 150.0            # speech-ONSET threshold (start capturing); calibrate via `vox-diagnose`
+    # Release threshold for ENDING a turn, as a fraction of speech_rms (hysteresis / two-threshold VAD).
+    # Once you've started talking, a frame only counts toward "silence" below this LOWER bar — so soft
+    # passages, trailing words and breaths between words don't get mistaken for a pause and cut you off
+    # mid-sentence (the "it interrupts me while I'm still speaking" report). Onset still needs the full
+    # speech_rms so background never triggers. 1.0 = old single-threshold behaviour; lower = harder to
+    # cut you off (but a noisy room can hold the turn open longer, up to max_utterance_seconds).
+    end_rms_ratio: float = 0.5
     silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
-    assistant_silence_seconds: float = 1.2  # pause allowed in ASSISTANT mode before it sends (snappy, but room to breathe)
+    assistant_silence_seconds: float = 1.8  # pause allowed in ASSISTANT mode before it sends — long enough to think mid-sentence ("um…") without it cutting you off; lower (≈1.2) is snappier, higher (≈2.2) more patient. (Also used by dictation.)
     max_utterance_seconds: float = 15.0  # hard cap on one utterance — long enough not to cut off a full request/reminder
+    # Idle (wake-detection) has a SHORTER cap than max_utterance_seconds: a wake phrase / "Vox, …"
+    # one-shot lives at the START of the utterance, so decoding a 15s ambient monologue while idle
+    # only burns CPU and spikes RAM for nothing. Capping idle capture bounds those spikes in a talky
+    # room (the "doesn't idle well / freezes after a while" report) without affecting active modes.
+    idle_max_utterance_seconds: float = 8.0
     listen_timeout_seconds: float = 6.0  # wake/dictation re-arm interval (control mode keeps listening)
     assistant_idle_timeout_seconds: float = 4.0   # assistant chat: drop to control/idle after this silence
     # Patient wait while the model tagged its reply [OPEN] (it expects you to respond) — a safety
@@ -156,6 +174,11 @@ class Config:
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
     whisper_model: str = "small.en"   # more accurate for accents than base.en (~250MB 1-time download, ~2-3x slower STT but still <1s). Revert to "base.en" for max speed.
     whisper_compute_type: str = "int8"
+    # Cap how many CPU threads CTranslate2 uses per transcription. Left at 0 (its default), it grabs
+    # ~all physical cores, so back-to-back idle transcriptions in a talky room can saturate the whole
+    # machine and make it beachball ("freezes after a while"). A modest cap leaves cores free for the
+    # rest of the system — STT stays well under a second — so the Mac stays responsive while Vox listens.
+    whisper_cpu_threads: int = 4
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
@@ -264,6 +287,9 @@ class Config:
     mcp_tts_engine: str = "system"        # "system" (follow tts_engine) | "say" | "kokoro"
     mcp_tts_voice: str = "Samantha"       # macOS `say` voice for the MCP (≠ system "Daniel")
     mcp_kokoro_voice: str = "af_bella"    # Kokoro voice for the MCP when on the kokoro engine (≠ system "af_heart")
+    # A short chime played just BEFORE the MCP speaks, so an IDE heads-up doesn't come out of
+    # nowhere (the most-used MCP flow: "tell me out loud when you're done"). "" disables it.
+    mcp_speak_cue: str = "/System/Library/Sounds/Tink.aiff"
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
