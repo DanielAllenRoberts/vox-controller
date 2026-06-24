@@ -23,6 +23,7 @@ Local-first · provider-agnostic · modular · privacy-conscious.
 - [`docs/plan/wake-word-training.md`](docs/plan/wake-word-training.md) — how to train a custom wake word.
 - [`docs/plan/phrases.md`](docs/plan/phrases.md) — cheat sheet of every phrase/command Vox understands.
 - [`docs/plan/observations.md`](docs/plan/observations.md) — running log of edge cases & ideas found while using Vox.
+- [`docs/plan/memory-footprint.md`](docs/plan/memory-footprint.md) — measured RAM breakdown (where the ~2 GB goes) and how to get under 1 GB.
 - [`docs/plan/ideas.md`](docs/plan/ideas.md) — idea parking lot: bigger future directions (gaze input, coding/handoff mode, Claude-CLI voice callback).
 
 ## Project layout

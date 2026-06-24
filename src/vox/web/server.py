@@ -403,8 +403,11 @@ def create_app() -> FastAPI:
         if not isinstance(fire_at, str) or not fire_at.strip():
             return _bad_request("'fireAt' (ISO local datetime) is required")
         recurrence = body.get("recurrence")
-        if recurrence not in (None, "", "daily", "weekdays", "weekly"):
-            return _bad_request("'recurrence' must be null|daily|weekdays|weekly")
+        # Accept the fixed words, an interval ("every:<seconds>" or "every 30 minutes"), or
+        # null/empty. The scheduler's canon is the single source of truth (None ⇒ unrecognised).
+        if recurrence not in (None, "") and mod._canon_recurrence(recurrence) is None:
+            return _bad_request("'recurrence' must be null|daily|weekdays|weekly "
+                                "or an interval like 'every:1800'")
         try:
             job = mod.create_job(
                 kind,

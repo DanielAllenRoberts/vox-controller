@@ -51,6 +51,24 @@ const RECURRENCE_LABEL: Record<string, string> = {
   weekly: "every week",
 };
 
+// Human label for a recurrence — the fixed words above, or an interval reminder
+// stored as "every:<seconds>" (e.g. "every:1800" → "every 30 minutes").
+function recurrenceLabel(rec: Recurrence): string {
+  if (!rec) return "";
+  const m = /^every:(\d+)$/.exec(rec);
+  if (m) {
+    const secs = Number(m[1]);
+    for (const [unit, n] of [["hour", 3600], ["minute", 60], ["second", 1]] as const) {
+      if (secs >= n && secs % n === 0) {
+        const q = secs / n;
+        return `every ${q} ${unit}${q !== 1 ? "s" : ""}`;
+      }
+    }
+    return `every ${secs} seconds`;
+  }
+  return RECURRENCE_LABEL[rec] ?? rec;
+}
+
 // --- fireAt is a NAIVE local ISO ("2026-06-19T21:30:00"); parse it as local time. ---
 function fireMs(iso: string): number {
   const d = new Date(iso);
@@ -348,7 +366,7 @@ function JobRow({
           {job.recurrence && (
             <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
               <Repeat className="h-3 w-3" />
-              {RECURRENCE_LABEL[job.recurrence] ?? job.recurrence}
+              {recurrenceLabel(job.recurrence)}
             </Badge>
           )}
         </div>

@@ -62,6 +62,13 @@ _WEEKDAYS = {
 VALID_KINDS = ("timer", "alarm", "reminder")
 VALID_RECURRENCE = (None, "daily", "weekdays", "weekly")
 
+# Interval recurrence ("every 30 minutes") is stored as the string "every:<seconds>",
+# alongside the fixed day-based words above. The seconds are floored to
+# _MIN_INTERVAL_SECONDS so a recurring job can never advance by zero (which would spin
+# the catch-up loop forever).
+_MIN_INTERVAL_SECONDS = 10
+_INTERVAL_RE = re.compile(r"^every:(\d+)$")
+
 
 # --- Persistence -----------------------------------------------------------
 # Stored shape: {"jobs": [Job, ...]}. fire_at / created_at are ISO LOCAL strings
@@ -96,9 +103,7 @@ def _clean_job(j) -> dict | None:
         return None
     if _parse_iso(j.get("fire_at")) is None:
         return None
-    rec = j.get("recurrence")
-    if rec not in VALID_RECURRENCE:
-        rec = None
+    rec = _canon_recurrence(j.get("recurrence"))
     return {
         "id": jid,
         "kind": kind,
@@ -191,7 +196,11 @@ def _announce(job: dict, *, prefix: str = "") -> None:
 # --- Recurrence: advance a fired recurring job to its next occurrence -------
 
 def _advance(dt: datetime, recurrence: str) -> datetime:
-    """Next fire time for a recurring job after it fired at ``dt`` (same time-of-day)."""
+    """Next fire time for a recurring job after it fired at ``dt``. Interval recurrences
+    ("every:<seconds>") step by that many seconds; day-based ones keep the time-of-day."""
+    secs = _interval_seconds(recurrence)
+    if secs:
+        return dt + timedelta(seconds=secs)
     if recurrence == "weekly":
         return dt + timedelta(days=7)
     if recurrence == "weekdays":
@@ -200,6 +209,56 @@ def _advance(dt: datetime, recurrence: str) -> datetime:
             nxt += timedelta(days=1)
         return nxt
     return dt + timedelta(days=1)  # daily (default)
+
+
+def _interval_seconds(recurrence) -> int | None:
+    """Seconds for an "every:<n>" interval recurrence, else None (day-based / one-shot)."""
+    if isinstance(recurrence, str):
+        m = _INTERVAL_RE.match(recurrence.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _humanize_every(secs: int) -> str:
+    """Speak an interval: 1800 → "every 30 minutes", 7200 → "every 2 hours"."""
+    for unit, n in (("hour", 3600), ("minute", 60), ("second", 1)):
+        if secs >= n and secs % n == 0:
+            q = secs // n
+            return f"every {q} {unit}{'s' if q != 1 else ''}"
+    return f"every {secs} seconds"
+
+
+def _canon_recurrence(rec) -> str | None:
+    """Normalise any recurrence input to its stored form, or None for a one-shot.
+
+    Accepts the fixed words (daily/weekdays/weekly), the canonical "every:<seconds>",
+    or a spoken interval phrase ("every 30 minutes", "2 hours"). Interval seconds are
+    floored to ``_MIN_INTERVAL_SECONDS`` so a recurring job can never advance by zero."""
+    if rec is None:
+        return None
+    s = " ".join(str(rec).strip().lower().split())
+    if not s or s in ("once", "none", "no"):
+        return None
+    if s in VALID_RECURRENCE:  # daily / weekdays / weekly
+        return s
+    secs = _interval_seconds(s)
+    if secs is None:
+        m = _RE_INTERVAL.match(s)  # "every 30 minutes" / "30 minutes" / "2 hrs"
+        if m:
+            secs = int(m.group(1)) * _UNIT_SECONDS[_unit_base(m.group(2))]
+    if secs is not None:
+        return f"every:{max(_MIN_INTERVAL_SECONDS, int(secs))}"
+    return None
+
+
+def _recurrence_phrase(rec) -> str:
+    """Leading-space spoken suffix for a recurrence: " every 30 minutes" / " every day" / ""."""
+    secs = _interval_seconds(rec)
+    if secs is not None:
+        return " " + _humanize_every(secs)
+    return {"daily": " every day", "weekdays": " every weekday",
+            "weekly": " every week"}.get(rec or "", "")
 
 
 # --- CRUD (server + voice) -------------------------------------------------
@@ -222,8 +281,7 @@ def create_job(kind: str, text: str = "", *, fire_at: datetime | str | None = No
     dt = fire_at if isinstance(fire_at, datetime) else _parse_iso(fire_at)
     if dt is None:
         raise ValueError("fire_at is required")
-    if recurrence not in VALID_RECURRENCE:
-        recurrence = None
+    recurrence = _canon_recurrence(recurrence)
     job = {
         "id": uuid.uuid4().hex[:12],
         "kind": kind,
@@ -338,6 +396,15 @@ _RE_EVERY = re.compile(
 _RE_DAY = re.compile(
     r"\b(tomorrow|tonight|today|this\s+(?:morning|afternoon|evening|night)|"
     r"(?:on\s+|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b")
+# "remind me (to X) every N seconds|minutes|hours (to X)" → an interval reminder that
+# repeats. The task may come before "every" or after the interval (both are natural,
+# like _RE_REMIND_IN). A digit is required so "every day"/"every Monday" stay day-based.
+_RE_REMIND_EVERY = re.compile(
+    r"\bremind\s+me\s+(?:to\s+(.+?)\s+)?every\s+(\d+)\s*"
+    r"(seconds?|minutes?|hours?|secs?|mins?|hrs?)\b(?:\s+to\s+(.+))?")
+# A whole-string interval phrase, for canonicalising a structured / dashboard <repeat> field.
+_RE_INTERVAL = re.compile(
+    r"^(?:every\s+)?(\d+)\s*(seconds?|minutes?|hours?|secs?|mins?|hrs?)$")
 
 
 def _unit_base(unit: str) -> str:
@@ -434,6 +501,17 @@ def parse_and_create(text: str) -> str | None:
         create_job("timer", "", fire_at=fire)
         return f"Timer set for {n} {unit}{'s' if n != 1 else ''}."
 
+    # remind me (to X) every N <unit> (to X) — an interval reminder that repeats forever.
+    m = _RE_REMIND_EVERY.search(t)
+    if m:
+        body = (m.group(1) or m.group(4) or "").strip()
+        n, unit = int(m.group(2)), _unit_base(m.group(3))
+        secs = max(_MIN_INTERVAL_SECONDS, n * _UNIT_SECONDS[unit])
+        fire = _now() + timedelta(seconds=secs)  # first fire one interval from now
+        create_job("reminder", body, fire_at=fire, recurrence=f"every:{secs}")
+        every = _humanize_every(secs)
+        return f"I'll remind you to {body} {every}." if body else f"I'll remind you {every}."
+
     # remind me (to X) in N <unit> (to X) — relative reminder; task may be before "in" or after.
     m = _RE_REMIND_IN.search(t)
     if m:
@@ -479,11 +557,7 @@ def create_structured(kind: str, when: str, text: str = "", recurrence: str | No
     fire = _parse_iso(when)
     if fire is None:
         return None
-    rec = (recurrence or "").strip().lower() or None
-    if rec in ("once", "none", "no"):
-        rec = None
-    if rec not in VALID_RECURRENCE:
-        rec = None
+    rec = _canon_recurrence(recurrence)
     try:
         create_job(kind, (text or "").strip(), fire_at=fire, recurrence=rec)
     except Exception:
@@ -501,8 +575,7 @@ def _confirm(kind: str, body: str, fire: datetime, recurrence: str | None) -> st
             day = " tomorrow"
         elif delta > 1:
             day = fire.strftime(" on %A")
-    every = {"daily": " every day", "weekdays": " every weekday", "weekly": " every week"}.get(
-        recurrence or "", "")
+    every = _recurrence_phrase(recurrence)
     label = kind if kind in VALID_KINDS else "reminder"
     tail = f" to {body}" if body else ""
     return f"{label.capitalize()} set for {when}{day}{every}{tail}."
@@ -518,7 +591,8 @@ def summary() -> str:
         when = _parse_iso(j["fire_at"])
         clock = when.strftime("%-I:%M %p").lower() if when else "?"
         txt = (j.get("text") or "").strip()
-        parts.append(f"a {j['kind']} at {clock}" + (f" to {txt}" if txt else ""))
+        rec = _recurrence_phrase(j.get("recurrence"))
+        parts.append(f"a {j['kind']} at {clock}" + (f" to {txt}" if txt else "") + rec)
     head = f"You have {len(jobs)} scheduled: " if len(jobs) > 1 else "You have "
     return head + ("; ".join(parts)) + "."
 

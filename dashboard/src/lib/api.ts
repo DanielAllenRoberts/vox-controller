@@ -126,7 +126,8 @@ export interface Rule {
 // scheduler (src/vox/scheduler.py), serialised camelCase by the bridge. `fireAt`
 // is an ISO LOCAL datetime (naive). `recurrence` is null for a one-shot.
 export type ReminderKind = "timer" | "alarm" | "reminder";
-export type Recurrence = "daily" | "weekdays" | "weekly" | null;
+// Interval reminders ("remind me every 30 minutes") are stored as `every:<seconds>`.
+export type Recurrence = "daily" | "weekdays" | "weekly" | `every:${number}` | null;
 
 export interface Reminder {
   id: string;

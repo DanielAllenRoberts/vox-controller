@@ -321,5 +321,13 @@ class Config:
     # scriptable nor phone-synced.) Guarded: a mirror failure never blocks the local job.
     apple_reminders_mirror: bool = False
 
+    # --- Focus watcher (observability; foundation for app-scoped commands, idea #36) --- A small
+    # background thread (vox.focus_watch) polls the frontmost app and logs "window in view: <App>"
+    # to vox.log whenever it CHANGES, so you can see Vox notice when you switch apps (Arc ↔ Slack).
+    # This is the focus-change detection the command DB's per-app lookup will later hook into.
+    # Entirely additive + guarded: a failure here can never take down the voice daemon.
+    focus_watch_enabled: bool = True        # run the background focus-watch thread on startup
+    focus_watch_poll_seconds: float = 1.5   # how often it checks the frontmost app
+
 
 CONFIG = Config()

@@ -88,6 +88,21 @@ def _start_scheduler(cfg, out) -> None:
             out.emit(f"  [scheduler] not started: {exc}")
 
 
+def _start_focus_watch(cfg, out) -> None:
+    """Start the background focus-watch thread (logs "window in view: <App>" on each app switch).
+    Guarded like _start_scheduler: a missing/broken vox.focus_watch must NEVER stop the voice
+    daemon. Only runs when cfg.focus_watch_enabled."""
+    if not getattr(cfg, "focus_watch_enabled", True):
+        return
+    try:
+        from vox import focus_watch
+        if focus_watch.start(out) is not None:
+            out.emit("  [focus] watching the frontmost app")
+    except Exception as exc:  # focus_watch module missing/broken → log and carry on
+        if cfg.debug:
+            out.emit(f"  [focus] not started: {exc}")
+
+
 def _open_dashboard(cfg, out) -> None:
     """Open the dashboard in its own window (Arc opens external localhost links as a standalone
     'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
@@ -622,6 +637,7 @@ def main() -> None:
 
     _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
     _start_scheduler(cfg, out)  # additive; non-fatal if the scheduler module is missing/broken
+    _start_focus_watch(cfg, out)  # additive; logs "window in view: <App>" on each app switch
 
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
