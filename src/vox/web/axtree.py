@@ -124,6 +124,23 @@ def _is_mac() -> bool:
     return sys.platform == "darwin"
 
 
+def _enable_manual_ax() -> None:
+    """Best-effort: tell the focused app to expose its full accessibility tree. Electron/Chromium
+    apps (Slack, Discord, VS Code/Cursor, Teams…) only build their web-content AX tree once an
+    assistive client sets ``AXManualAccessibility`` — without this their windows read as nearly empty.
+    Idempotent + guarded; a short settle lets a cold app build the tree before we read it."""
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to tell (first process whose frontmost is true) '
+             'to set value of attribute "AXManualAccessibility" to true'],
+            capture_output=True, timeout=4)
+        import time
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+
 def _run_osa(script: str) -> tuple[bool, str]:
     """Shell osascript once. Mirrors ``actions._osa`` failure handling."""
     try:
@@ -187,6 +204,7 @@ def snapshot() -> dict:
     """
     if not _is_mac():
         return {"error": "AX tree is only available on macOS"}
+    _enable_manual_ax()  # so Electron/Chromium apps expose their web content (else the tree is blank)
     script = _SCRIPT % {
         "vmax": VALUE_MAXLEN,
         "maxd": MAX_DEPTH,

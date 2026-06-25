@@ -225,9 +225,9 @@ def known_url(target: str) -> str | None:
     return None
 
 
-def _osa(script: str) -> tuple[bool, str]:
+def _osa(script: str, timeout: float = 20) -> tuple[bool, str]:
     try:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "timed out"  # never let a wedged AppleScript freeze the loop
     return r.returncode == 0, (r.stdout or r.stderr).strip()
@@ -458,6 +458,88 @@ def click_element(target: str) -> str:
     if ok and out.startswith("ok"):
         return f"Clicked {label or target}."
     return f"I couldn't find a '{target}' to click."
+
+
+# Collect the labels of on-screen elements the user could plausibly click — for giving the brain
+# VISIBILITY of what's actually on screen so it can disambiguate (e.g. realise "github" is a Slack
+# channel to CLICK, not a website to open). Same Electron AX unlock + deep walk as the click engine;
+# filtered to interactive-ish roles and capped/early-stopped so it stays bounded on huge web trees.
+_CLICKABLE_LIST_SCRIPT = '''
+property gItems : {}
+property gVisited : 0
+
+on collect(el, depth)
+    if depth > %(maxd)d then return
+    if (count of gItems) is greater than or equal to %(limit)d then return
+    set gVisited to gVisited + 1
+    if gVisited > %(budget)d then return
+    -- Read ROLE first; only read NAME for interactive roles. The tree is mostly structural
+    -- AXGroup/AXWebArea nodes — skipping their name read is what keeps this bounded on Electron.
+    set r to "?"
+    try
+        tell application "System Events" to set r to role of el
+    end try
+    if r is in {"AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton", "AXTabButton", "AXPopUpButton", "AXStaticText", "AXRow", "AXCell", "AXTextField", "AXHeading", "AXDisclosureTriangle"} then
+        set nm to ""
+        try
+            tell application "System Events" to set nm to (name of el) as text
+        end try
+        if nm is not missing value and nm is not "" and (length of nm) is less than 60 then
+            if gItems does not contain nm then set end of gItems to nm
+        end if
+    end if
+    set kids to {}
+    try
+        tell application "System Events" to set kids to UI elements of el
+    end try
+    set total to count of kids
+    set n to total
+    if n > %(maxb)d then set n to %(maxb)d
+    repeat with i from 1 to n
+        my collect(item i of kids, depth + 1)
+    end repeat
+end collect
+
+set gItems to {}
+set gVisited to 0
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        tell p to set value of attribute "AXManualAccessibility" to true
+    end try
+end tell
+delay %(settle).1f
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        set root to front window of p
+    on error
+        set root to p
+    end try
+end tell
+my collect(root, 0)
+set AppleScript's text item delimiters to linefeed
+return (gItems as text)
+'''
+
+
+def clickable_targets(limit: int = 60) -> list[str]:
+    """Labels of on-screen elements the user could click in the focused app (deduped, capped).
+    Enables Electron web-content AX first (like ``click_element``). Used to give the brain a view of
+    what's clickable so it can disambiguate. Bounded by a node-visit budget so it stays fast on huge
+    web trees. Returns ``[]`` on any failure (never raises)."""
+    ok, out = _osa(_CLICKABLE_LIST_SCRIPT
+                   % {"maxd": 30, "maxb": 90, "limit": limit, "budget": 4000, "settle": 0.6},
+                   timeout=30)
+    if not ok or not out:
+        return []
+    seen, items = set(), []
+    for line in out.splitlines():
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            items.append(name)
+    return items
 
 
 def _browser_tab_script(browser: str, url: str) -> str | None:

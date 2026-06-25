@@ -48,10 +48,14 @@ _SYSTEM = (
     "kind of text it is — the selection is fetched and rewritten automatically.\n"
     "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
     "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
-    "To CLICK an on-screen control by what the user calls it ('click the play button', 'click daily "
-    "report', 'press submit', 'tap the menu', 'select Settings'): output  CLICK: <what to click>. "
-    "The exact control is matched from the screen's accessibility tree in a separate step — just pass "
-    "the user's target.\n"
+    "To CLICK any on-screen control by what the user calls it ('click the play button', 'press "
+    "submit', 'tap the menu', 'select Settings'): output  CLICK: <what to click>. This also covers "
+    "items INSIDE the current app — a Slack/Discord/Teams channel or DM, a chat, a conversation, a "
+    "person's name, a playlist, a file, any sidebar entry. IMPORTANT: when the user wants to open / go "
+    "to / switch to something that lives inside the focused app rather than a website or a Mac app, use "
+    "CLICK: <its name> — do NOT treat an in-app name as a website (e.g. on Slack, 'go to the github "
+    "chat' is  CLICK: github , NOT opening github.com). Vox finds and clicks the exact control (and can "
+    "list what's on screen if your first guess misses) in a separate step — just pass the target.\n"
     "To set a TIMER, ALARM, or REMINDER: output  SCHEDULE: <kind> | <when> | <text> | <repeat>\n"
     "  <kind> = timer, alarm, or reminder.\n"
     "  <when> = the ABSOLUTE local date-time as 24-hour ISO YYYY-MM-DDTHH:MM, which YOU compute from "
@@ -137,32 +141,28 @@ def _look_axtree(question: str) -> str | None:
 
 
 _CLICK_PICK_SYSTEM = (
-    "You click controls on the user's Mac. You're given the focused app's accessibility (AX) tree as "
-    "indented text — each line is a UI element (role, title, value) — and what the user wants to "
-    "click, in their own (possibly imprecise or mis-transcribed) words. Find the single best-matching "
-    "CLICKABLE element (button, link, menu item, tab, checkbox, etc.) and reply with ONLY its title, "
-    "copied VERBATIM from the tree — no role, no quotes, no extra words. If nothing reasonably "
-    "matches, reply with exactly NONE."
+    "You click controls on the user's Mac. You're given a list of the LABELS of elements currently "
+    "clickable on screen (sidebar items, chats, channels, buttons, links, menu items, files…) and "
+    "what the user wants to click, in their own (possibly imprecise or mis-transcribed) words. Reply "
+    "with ONLY the single best-matching label, copied VERBATIM from the list — no quotes, no extra "
+    "words. If nothing reasonably matches, reply with exactly NONE."
 )
 
 
-def _click_via_axtree(target: str) -> str:
-    """LLM-assisted click. The deterministic AXPress search couldn't find `target`, so read the AX
-    tree, let the brain map the user's words to an exact element label, then click that label (the
-    label is matched in the tree by `actions.click_element`). Falls back to the plain 'couldn't
-    find' message when the tree is unavailable or nothing matches."""
-    try:
-        from vox.web import axtree
-        snap = axtree.snapshot_text()
-    except Exception:
-        snap = {"error": "unavailable"}
-    if "error" in snap:
+def _click_fuzzy(target: str) -> str:
+    """LLM-assisted click fallback — the 'let the brain SEE the elements in case of confusion' path.
+    The fast targeted AXPress couldn't find `target` verbatim, so list what's actually clickable on
+    screen (Electron-aware), let the brain map the user's words to a real label, then click that.
+    Falls back to a plain 'couldn't find' message when nothing is listed or matches."""
+    labels = actions.clickable_targets()
+    if not labels:
         return f"I couldn't find a '{target}' to click."
-    prompt = (f"Focused app: {snap.get('app', '?')}\n\nAX tree:\n{snap['text']}\n\n"
-              f"The user wants to click: {target!r}\nExact title to click (or NONE):")
+    listing = "\n".join(f"  - {label}" for label in labels)
+    prompt = (f"Clickable elements on screen:\n{listing}\n\n"
+              f"The user wants to click: {target!r}\nBest-matching label (verbatim), or NONE:")
     pick = assistant.complete(prompt, system=_CLICK_PICK_SYSTEM, brain="small",
                               kind="click_axtree").strip().strip('"').strip("'")
-    assistant._dbg("[executor]", f"click pick for {target!r} → {pick!r}")
+    assistant._dbg("[executor]", f"click pick for {target!r} from {len(labels)} on-screen labels → {pick!r}")
     if not pick or pick.upper().strip("[]") == "NONE":
         return f"I couldn't find a '{target}' to click on the screen."
     return actions.click_element(pick)
@@ -249,7 +249,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
     if upper.startswith("CLICK:"):
         target = raw.split(":", 1)[1].strip()
-        result = _click_via_axtree(target)
+        # Fast path: the targeted AXPress finder (Electron-aware, early-exit). Only if it can't find
+        # the target verbatim do we fall back to listing the screen + letting the brain pick (slower).
+        result = actions.click_element(target)
+        if not result.lower().startswith("clicked"):
+            result = _click_fuzzy(target)
         assistant._dbg("[executor]", f"decision=CLICK target={target!r} → {result!r}")
         # Success → silent "did it" cue; failure → speak the "couldn't find it" so the user hears it.
         return result.lower().startswith("clicked"), result

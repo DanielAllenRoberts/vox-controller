@@ -19,6 +19,59 @@
 | O11 | 2026-06-24 | **~2 GB RAM while running** — heavy for a "low running" daemon meant to run on any machine | 🟡 | **Diagnosed by measurement** (see `memory-footprint.md`): it's **two model weights**, not Python. **Kokoro neural TTS ~940 MB** (lazy-loaded on first speak; only active because `data/settings.json` set `tts_engine="kokoro"`, overriding the lean `"say"` code default) + **Whisper `small.en` ~840 MB** (always resident; serves wake + transcription). All Python/numpy/FastAPI/LLM-SDK/pyobjc glue is ~180 MB combined — a language rewrite would reclaim only ~100 MB while the native-backend models (90% of RAM) stay identical. **Path to < 1 GB:** `tts_engine` `kokoro`→`say` (−940 MB, the macOS voice is free) and/or `whisper_model` `small.en`→`base.en` (−460 MB). `say`+`base.en` ≈ **~580 MB**. onnxruntime arena tuning barely helps Kokoro (−115 MB only). **Recommendation:** ship `say`+`base.en` as defaults, expose Kokoro + `small.en` as opt-in quality upgrades. **Pending the user's decision on the voice/accuracy trade.** |
 | O10 | 2026-06-23 | **Absolute reminder/alarm with a clear time still fails when the task isn't introduced by "to"** — e.g. "remind me at 3:30 PM **that** I have a meeting" → "I couldn't work out a time." | 🔴 | **Not** a time-parse failure (3:30 PM is fine). `_RE_REMIND_AT` / `_RE_ALARM_AT` only capture the task via `\s+to\s+(.+?)` anchored to `$`, so any other connector ("that", "about", "saying") or trailing text breaks the *whole* match → `parse_and_create` returns None → generic "couldn't work out a time". **✅ FIXED (2026-06-23):** broadened the task connector in both regexes via a shared `_TASK_TAIL = (?:\s+(?:to\|that\|about\|saying)\s+(.+?))?$` — kept *required* (not bare trailing text) so "set an alarm for 5 minutes" still doesn't read 5 as a clock. Verified: the reported case + `to`/`about`/`saying` connectors create reminders; alarm forms work; timer path unaffected; regression guard passes. **Also added — the robust fix (2026-06-23):** a **structured SCHEDULE path** — the brain now computes the absolute time itself (it's given `Now:`) and emits `SCHEDULE: <kind> \| <ISO when> \| <text> \| <repeat>`; the executor creates the job directly via `scheduler.create_structured()`, **skipping the fragile English re-parse**. The English regex remains as a backward-compatible fallback. So *any* phrasing now works as long as the model fills the time. **Still future (idea #50):** the AM/PM-ambiguity *follow-up question*. *Minor cosmetic:* `_confirm` still prefixes the body with "to" ("…3:45 pm **to** I have a meeting") regardless of connector — separate, low-priority. |
 
+## Click / AX support for Electron apps (2026-06-25) — 🟡 partial: core works, **latency unacceptable**
+
+**Status:** the *mechanism* works (verified live), but it's **too slow to ship** — a click that
+isn't an immediate hit can take **~50 s** to fail. All changes are **uncommitted** on `command-db`.
+
+### What was diagnosed (against Slack, an Electron app)
+The user said *"click github"* (a Slack channel) and it failed → the brain then turned it into
+*"go to github.com"*. Root causes, confirmed by probing Slack's live AX tree:
+1. **Electron/Chromium hides its web-content AX tree** until an assistive client sets
+   `AXManualAccessibility` on the process. Without it, Slack's window reads as `windows=0` / nearly
+   empty — so the old click matcher had nothing to match.
+2. **The label isn't pressable.** The "github" chat is an `AXStaticText` whose actions are only
+   `AXShowMenu`/`AXScrollToVisible` (no `AXPress`). Its **ancestor `AXRow`/`AXGroup` *do* support
+   `AXPress`** — so you must press the nearest pressable ancestor, not the label.
+3. **It's deep** (depth 23) — the old matcher capped at depth 14, never reaching it.
+4. **The LLM had no screen visibility**, so it guessed "github" was a website.
+
+### What was built (works, but slow)
+- `actions._CLICK_SCRIPT` / `click_element` rewritten: set `AXManualAccessibility` first, deep walk
+  (depth 32), match label on any role, **press the nearest `AXPress`-able ancestor**, `AXScrollToVisible`
+  first, exact-match priority. **Verified live: "click github" → Slack jumped to the github channel.**
+- `actions.clickable_targets()` — lists on-screen clickable labels (Electron-aware, node-budgeted).
+- `executor`: `_SYSTEM` now routes in-app items (channels/chats/people/sidebar) to `CLICK` not a
+  website; `_click_fuzzy()` lists clickables + lets the brain pick when the verbatim click misses;
+  CLICK branch = fast `click_element` → fuzzy fallback. `axtree.snapshot` sets `AXManualAccessibility`
+  so `LOOK`/the dashboard AX page see Electron content.
+
+### Why it's still bad — the LATENCY (the blocker)
+System Events / AppleScript AX traversal of deep Electron trees is **fundamentally slow** (~1 read
+per node, thousands of nodes). The *success* path is ~5 s; every **miss is brutal and they STACK**.
+Real example from `vox.log` — *"click on alec"* (mis-heard "alex"), 21:09:18 → 21:10:09 = **~51 s**:
+1. deterministic `click_element("alec")` in the dispatch hot path → full deep traversal, miss (~slow)
+2. escalate → executor `environment_context()` + small-brain LLM → `CLICK: alec`
+3. CLICK branch `click_element("alec")` again → full traversal, miss again
+4. `_click_fuzzy` → `clickable_targets()` enumeration **~19 s** + LLM pick → `NONE`
+5. "I couldn't find a 'alec'…"
+
+Extra problems: the **deep traversal runs in the deterministic hot path** (so even ambient "click…"
+speech blocks for seconds); **mis-transcriptions** ("alec"/"alex") should fail *fast*, not crawl;
+the fuzzy list was only 18 labels and the brain returned `NONE` (matching/coverage also weak).
+
+### Next session — fix the latency (don't add more features first)
+- **The real fix: replace AppleScript AX with `pyobjc` `AXUIElement`** — direct AX API is ~100× faster
+  and supports targeted attribute search; turns ~19 s into ~instant. **It's a dependency** (the user
+  is cautious about deps + disk) — discuss first. This is almost certainly the right call.
+- **Stop the stacking:** if the deterministic click misses, don't re-traverse in the executor *and*
+  enumerate. Read the screen **once**, decide once.
+- **Don't deep-traverse in the hot path** — keep the dispatch-level click cheap/fail-fast; do the
+  expensive Electron walk only in the (already-slow) executor path.
+- **Cache `AXManualAccessibility`** per app + drop the 0.6 s settle when already enabled.
+- **Fail fast on a clear miss** so a mis-said target returns in ~1 s, not ~50 s.
+- Then: broaden fuzzy coverage (>18 labels) and re-test breadth (Discord/Cursor/Notion/native).
+
 ## External code-review triage (2026-06-19)
 
 An open-source scanner (free model) flagged ~20 items; each was **verified against the source** before acting. Verdicts:
