@@ -64,11 +64,9 @@ def handle(text: str) -> str:
     return _run(text)
 
 
-def _run(text: str) -> str:
-    intent = parse(text)
-    if intent is None:
-        return _handoff(text)
-    name, arg = intent
+def run_intent(name: str, arg: str, _text: str | None = None) -> str:
+    """Execute a known ``(intent, arg)`` action directly via the dispatch map. Used by the command
+    DB resolver, which already has the intent+arg and must NOT re-parse. Unknown intent → handoff."""
     dispatch = {
         "navigate": _navigate, "navigate_new": _navigate_new, "search": _search, "back": _back,
         "tab": _tab, "tab_arrow": _tab_arrow, "tab_index": _tab_index,
@@ -78,7 +76,15 @@ def _run(text: str) -> str:
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
         "click": click_element,
     }
-    return dispatch.get(name, lambda _: _handoff(text))(arg)
+    return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
+
+
+def _run(text: str) -> str:
+    intent = parse(text)
+    if intent is None:
+        return _handoff(text)
+    name, arg = intent
+    return run_intent(name, arg, _text=text)
 
 
 def parse(text: str) -> tuple[str, str] | None:
@@ -321,39 +327,73 @@ def capture_screen() -> str | None:
     return raw  # downscale failed — fall back to the full-res capture
 
 
-# Recursively search the focused app's accessibility tree for a clickable control whose label
-# CONTAINS the target (case-insensitive — AppleScript `contains` ignores case), and AXPress it.
-# Bounded depth/breadth so a pathological tree can't hang. Works well for native apps + standard
-# UI; deep web pages expose huge trees (the browser-DOM path is ideas.md #37).
+# Search the focused app's accessibility tree for a control whose label matches `target`, and
+# AXPress the nearest pressable element. Two hard-won lessons drive the design (diagnosed against
+# Slack, an Electron app — see docs/plan/issues.md):
+#   1. Electron/Chromium apps don't expose their web-content AX tree until an assistive client sets
+#      `AXManualAccessibility` on the process — so we set it first, else the sidebar/buttons simply
+#      aren't there (the old script silently found nothing).
+#   2. The matching label is often an AXStaticText with NO AXPress action; the *clickable* element is
+#      an ancestor (the AXRow/AXGroup/AXLink wrapping it). So on a match we walk UP to the nearest
+#      ancestor that supports AXPress and press that — not the label.
+# Exact name matches win over substring matches (we press the thing literally named `target` before
+# anything merely containing it). `AXScrollToVisible` first handles virtualised lists. Bounded
+# depth/breadth so a pathological tree can't hang; web content is deep, hence the higher caps.
 _CLICK_SCRIPT = '''
-on matchClick(el, target, depth)
-    if depth > %(maxd)d then return ""
-    set r to "?"
+property gPressEl : missing value
+property gLabel : ""
+property gFallback : missing value
+property gFallbackLabel : ""
+
+on actionNames(el)
     try
-        tell application "System Events" to set r to role of el
+        tell application "System Events" to return (name of actions of el) as text
+    on error
+        return ""
     end try
-    set label to ""
+end actionNames
+
+on pressableTarget(el, chain)
+    -- el if it can be pressed, else the nearest ancestor (deepest first) that can.
+    if my actionNames(el) contains "AXPress" then return el
+    set i to (count of chain)
+    repeat while i is greater than or equal to 1
+        set anc to item i of chain
+        if my actionNames(anc) contains "AXPress" then return anc
+        set i to i - 1
+    end repeat
+    return missing value
+end pressableTarget
+
+on search(el, depth, chain, target)
+    if depth > %(maxd)d then return false
+    set nm to ""
     try
-        tell application "System Events" to set label to (name of el) as text
+        tell application "System Events" to set nm to (name of el) as text
     end try
-    if label is missing value then set label to ""
-    if label is "" then
-        try
-            tell application "System Events" to set label to (description of el) as text
-        end try
-        if label is missing value then set label to ""
+    if nm is missing value then set nm to ""
+    set ds to ""
+    try
+        tell application "System Events" to set ds to (description of el) as text
+    end try
+    if ds is missing value then set ds to ""
+    if nm is target then
+        set tgt to my pressableTarget(el, chain)
+        if tgt is not missing value then
+            set gPressEl to tgt
+            set gLabel to nm
+            return true
+        end if
     end if
-    if r is in {"AXButton", "AXLink", "AXMenuButton", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXTabButton", "AXDisclosureTriangle"} then
-        if label contains target then
-            try
-                tell application "System Events" to perform action "AXPress" of el
-                return "ok" & tab & label
-            on error
-                try
-                    tell application "System Events" to click el
-                    return "ok" & tab & label
-                end try
-            end try
+    if gFallback is missing value and ((nm contains target) or (ds contains target)) then
+        set t2 to my pressableTarget(el, chain)
+        if t2 is not missing value then
+            set gFallback to t2
+            if nm is not "" then
+                set gFallbackLabel to nm
+            else
+                set gFallbackLabel to ds
+            end if
         end if
     end if
     set kids to {}
@@ -364,32 +404,56 @@ on matchClick(el, target, depth)
     set n to total
     if n > %(maxb)d then set n to %(maxb)d
     repeat with i from 1 to n
-        set res to my matchClick(item i of kids, target, depth + 1)
-        if res is not "" then return res
+        if my search(item i of kids, depth + 1, chain & {el}, target) then return true
     end repeat
-    return ""
-end matchClick
+    return false
+end search
+
+set gPressEl to missing value
+set gLabel to ""
+set gFallback to missing value
+set gFallbackLabel to ""
 tell application "System Events"
     set p to first process whose frontmost is true
     try
-        set w to front window of p
-    on error
-        return "err" & tab & "no front window"
+        tell p to set value of attribute "AXManualAccessibility" to true
     end try
 end tell
-set out to my matchClick(w, "%(target)s", 0)
-if out is "" then return "err" & tab & "not found"
-return out
+delay %(settle).1f
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        set root to front window of p
+    on error
+        set root to p
+    end try
+end tell
+my search(root, 0, {}, "%(target)s")
+if gPressEl is missing value and gFallback is not missing value then
+    set gPressEl to gFallback
+    set gLabel to gFallbackLabel
+end if
+if gPressEl is missing value then return "err" & tab & "not found"
+try
+    tell application "System Events" to perform action "AXScrollToVisible" of gPressEl
+end try
+try
+    tell application "System Events" to perform action "AXPress" of gPressEl
+    return "ok" & tab & gLabel
+on error errMsg
+    return "err" & tab & "press failed: " & errMsg
+end try
 '''
 
 
 def click_element(target: str) -> str:
-    """Find a button/link/control labelled `target` in the focused app's accessibility tree and
-    click it (AXPress). Needs Accessibility permission. Returns a result string (never raises)."""
+    """Find a control labelled `target` in the focused app's accessibility tree and click it
+    (AXPress the nearest pressable element). Enables Electron web-content AX first. Needs
+    Accessibility permission. Returns a result string (never raises)."""
     t = (target or "").strip().replace("\\", " ").replace('"', " ")
     if not t:
         return "Click what? Try 'click Submit'."
-    ok, out = _osa(_CLICK_SCRIPT % {"target": t, "maxd": 14, "maxb": 60})
+    ok, out = _osa(_CLICK_SCRIPT % {"target": t, "maxd": 32, "maxb": 90, "settle": 0.6})
     label = out.split("\t", 1)[-1].strip() if out else ""
     if ok and out.startswith("ok"):
         return f"Clicked {label or target}."

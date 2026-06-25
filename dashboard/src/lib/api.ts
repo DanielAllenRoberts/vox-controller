@@ -122,6 +122,59 @@ export interface Rule {
   enabled: boolean;
 }
 
+// --- Command DB (app/site-scoped voice commands, idea #36) -----------------
+// Mirrors src/vox/web/commands.py. A `CommandContext` scopes WHEN commands
+// apply (global "Everywhere" / an app / a site); each `Command` is one action
+// (intent + arg) triggered by one or more `CommandPhrase`s. Numeric ids are the
+// SQLite primary keys (not strings, unlike Rule).
+export type ContextKind = "global" | "app" | "site";
+export type CommandSource = "builtin" | "user" | "learned";
+export type PhraseMatchType = "exact" | "contains" | "regex";
+export type IntentCategory = "action" | "mode" | "system";
+
+export interface CommandPhrase {
+  id: number;
+  text: string;
+  isPrimary: boolean;
+  matchType: PhraseMatchType;
+}
+
+export interface Command {
+  id: number;
+  intent: string;
+  arg: string | null;
+  param: string | null;
+  label: string;
+  source: CommandSource;
+  enabled: boolean;
+  priority: number;
+  phrases: CommandPhrase[];
+}
+
+export interface CommandContext {
+  id: number;
+  kind: ContextKind;
+  matchValue: string | null;
+  displayName: string;
+  priority: number;
+  enabled: boolean;
+  commands: Command[];
+}
+
+export interface CommandIntent {
+  name: string;
+  category: IntentCategory;
+  takesArg: boolean;
+  argHelp: string | null;
+  description: string;
+}
+
+export interface CommandDb {
+  contexts: CommandContext[];
+  intents: CommandIntent[];
+  summary: Record<string, number>;
+}
+
 // Scheduled job (timer / alarm / reminder) — mirrors a Job from the Vox-owned
 // scheduler (src/vox/scheduler.py), serialised camelCase by the bridge. `fireAt`
 // is an ISO LOCAL datetime (naive). `recurrence` is null for a one-shot.
@@ -376,6 +429,32 @@ export const api = {
     }),
   removeRule: (id: string) =>
     request<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
+
+  // --- Command DB (app/site-scoped voice commands, idea #36) ---------------
+  commands: () => request<CommandDb>("/commands"),
+  setCommandEnabled: (id: number, enabled: boolean) =>
+    request<Command>(`/commands/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  setCommandContextEnabled: (id: number, enabled: boolean) =>
+    request<{ id: number; enabled: boolean }>(`/commands/contexts/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  addCommandPhrase: (
+    commandId: number,
+    text: string,
+    matchType: PhraseMatchType = "contains",
+  ) =>
+    request<CommandPhrase>(`/commands/${commandId}/phrases`, {
+      method: "POST",
+      body: JSON.stringify({ text, matchType }),
+    }),
+  removeCommandPhrase: (phraseId: number) =>
+    request<{ ok: boolean }>(`/commands/phrases/${phraseId}`, {
+      method: "DELETE",
+    }),
 
   // --- Reminders / timers / alarms (Vox-owned scheduler, idea #16) ---------
   reminders: () => request<Reminder[]>("/reminders"),

@@ -377,6 +377,87 @@ def create_app() -> FastAPI:
             return _not_found("rule")
         return {"ok": True}
 
+    # --- Commands (app/site-scoped voice command DB; guarded; src/vox/web/commands.py, idea #36) ---
+    @app.get("/api/commands")
+    def get_commands() -> dict:
+        mod = _try_import("commands")
+        if mod is None:
+            return {"contexts": [], "intents": [], "summary": {}}
+        try:
+            return mod.list_all()
+        except Exception:  # never 500 a read — degrade to an empty DB view
+            return {"contexts": [], "intents": [], "summary": {}}
+
+    @app.patch("/api/commands/contexts/{ctx_id}")
+    async def patch_command_context(ctx_id: int, request: Request):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("context")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return _bad_request("'enabled' must be a boolean")
+        try:
+            return mod.set_context_enabled(ctx_id, enabled)
+        except ValueError:
+            return _not_found("context")
+        except Exception as exc:
+            return _bad_request(f"could not update context: {exc}")
+
+    @app.patch("/api/commands/{cmd_id}")
+    async def patch_command(cmd_id: int, request: Request):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("command")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return _bad_request("'enabled' must be a boolean")
+        try:
+            return mod.set_command_enabled(cmd_id, enabled)
+        except ValueError:
+            return _not_found("command")
+        except Exception as exc:
+            return _bad_request(f"could not update command: {exc}")
+
+    @app.post("/api/commands/{cmd_id}/phrases")
+    async def add_command_phrase(cmd_id: int, request: Request):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("command")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return _bad_request("'text' is required and must be a non-empty string")
+        match_type = body.get("matchType", "contains")
+        if match_type not in ("exact", "contains", "regex"):
+            return _bad_request("'matchType' must be exact, contains, or regex")
+        try:
+            return mod.add_phrase(cmd_id, text, match_type)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add phrase: {exc}")
+
+    @app.delete("/api/commands/phrases/{phrase_id}")
+    def remove_command_phrase(phrase_id: int):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("phrase")
+        try:
+            removed = bool(mod.remove_phrase(phrase_id))
+        except Exception as exc:
+            return _bad_request(f"could not remove phrase: {exc}")
+        if not removed:
+            return _not_found("phrase")
+        return {"ok": True}
+
     # --- Reminders / timers / alarms (guarded; src/vox/scheduler.py, idea #16) ---
     @app.get("/api/reminders")
     def get_reminders() -> list:

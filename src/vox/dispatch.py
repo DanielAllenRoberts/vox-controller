@@ -19,6 +19,7 @@ command) before falling through to conversational chat — so chat stays chat-fi
 from __future__ import annotations
 
 from vox import actions
+from vox.config import CONFIG
 from vox.wakeword.backends import normalize
 
 
@@ -64,6 +65,47 @@ def _scheduler(text: str, t: str) -> tuple[bool, str] | None:
     return None
 
 
+# --- command DB (app/site-scoped commands, idea #36) --------------------------
+
+def _db_enabled() -> bool:
+    """Is the DB resolver on? Read through the dashboard's settings override (so it flips live,
+    no restart) with the frozen Config default as the floor. Guarded → default on any error."""
+    try:
+        from vox.web import settings_store
+        val = settings_store.get("command_db_enabled")
+        if val is not None:
+            return bool(val)
+    except Exception:
+        pass
+    return bool(getattr(CONFIG, "command_db_enabled", False))
+
+
+def _command_db(text: str) -> tuple[bool, str] | None:
+    """Consult the command DB (in-memory cache) for a context-scoped ACTION command, in front of the
+    regex parser. Returns ``(True, result)`` when one ran cleanly, else ``None`` (→ fall through to
+    the parser / LLM). Gated by ``command_db_enabled`` (default off) and fully guarded — a cache
+    problem can never break dispatch. Mode/system phrases are excluded (``actions_only``) so the
+    control plane stays in the loop's hardcoded floor (§8a)."""
+    if not _db_enabled():
+        return None
+    try:
+        from vox import command_cache
+        app = command_cache.current_app()
+        r = command_cache.resolve(text, app=app, actions_only=True)
+        if r is None:
+            if getattr(CONFIG, "debug", False):
+                command_cache.log(f"  [cmddb] resolve {text!r} [app={app}] → no match (→ parser/LLM)")
+            return None
+        result = actions.run_intent(r["intent"], r.get("arg") or "")
+        ok = result is not None and not actions.failed(result)
+        arg = f" {r['arg']!r}" if r.get("arg") else ""
+        command_cache.log(f"  [cmddb] resolve {text!r} [app={app}] → {r['intent']}{arg} "
+                          f"via {r['context']} '{r['phrase']}'  ⇒ {'ran' if ok else 'FAILED → fall through'}")
+        return (True, result) if ok else None
+    except Exception:
+        return None  # any cache/dispatch error → behave exactly as if the DB weren't there
+
+
 # --- the shared deterministic layer -------------------------------------------
 
 def try_deterministic(text: str) -> tuple[bool, str] | None:
@@ -84,6 +126,10 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     sched = _scheduler(text, t)
     if sched is not None:
         return sched
+
+    db = _command_db(text)  # app/site-scoped commands, in front of the regex parser (gated; off by default)
+    if db is not None:
+        return db
 
     if actions.parse(text) is not None:
         result = actions.handle(text)

@@ -249,10 +249,32 @@ def seed(conn: sqlite3.Connection) -> bool:
     return True
 
 
+# --- optional query logging ----------------------------------------------------------------------
+# A runtime hook so every DB read is visible in vox.log ("which query it runs"). Off by default
+# (no-op) so the CLI/tests stay quiet; the daemon installs ConsoleOutput.emit at boot (command_cache).
+_QUERY_LOG = None  # Callable[[str], None] | None
+
+
+def set_query_logger(fn) -> None:
+    """Install a logging callback (e.g. ``ConsoleOutput.emit``); pass ``None`` to disable."""
+    global _QUERY_LOG
+    _QUERY_LOG = fn
+
+
+def _one_line(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql).strip()
+
+
 # --- read API (used by phase 2's boot-load + lookup; handy for inspection/tests now) -------------
 
 def _rows(conn, sql, params=()) -> list[dict]:
-    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    if _QUERY_LOG is not None:
+        try:
+            _QUERY_LOG(f"  [cmddb] query: {_one_line(sql)}  params={tuple(params)} → {len(rows)} row(s)")
+        except Exception:
+            pass  # logging must never break a query
+    return rows
 
 
 def list_intents(conn) -> list[dict]:
@@ -263,13 +285,24 @@ def list_contexts(conn) -> list[dict]:
     return _rows(conn, "SELECT * FROM context ORDER BY priority DESC, id")
 
 
-def commands_with_phrases(conn, context_id: int) -> list[dict]:
-    """All commands for a context, each with its phrases attached (for resolution / display)."""
-    cmds = _rows(conn, "SELECT * FROM command WHERE context_id=? AND enabled=1 "
-                       "ORDER BY priority DESC, id", (context_id,))
+def commands_with_phrases(conn, context_id: int, include_disabled: bool = False) -> list[dict]:
+    """All commands for a context, each with its phrases attached (for resolution / display).
+    Loads phrases in ONE query (not N+1) so a focus load is a couple of clean log lines.
+    ``include_disabled`` keeps disabled commands too — the dashboard shows them so you can re-enable."""
+    where = "context_id=?" if include_disabled else "context_id=? AND enabled=1"
+    cmds = _rows(conn, f"SELECT * FROM command WHERE {where} ORDER BY priority DESC, id", (context_id,))
+    if not cmds:
+        return cmds
+    ids = [c["id"] for c in cmds]
+    rows = _rows(conn, "SELECT id, command_id, text, is_primary, match_type FROM phrase "
+                       f"WHERE command_id IN ({','.join('?' * len(ids))}) "
+                       "ORDER BY command_id, is_primary DESC, id", tuple(ids))
+    by_cmd: dict[int, list[dict]] = {}
+    for r in rows:
+        by_cmd.setdefault(r["command_id"], []).append(
+            {"id": r["id"], "text": r["text"], "is_primary": r["is_primary"], "match_type": r["match_type"]})
     for c in cmds:
-        c["phrases"] = _rows(conn, "SELECT text, is_primary, match_type FROM phrase "
-                                   "WHERE command_id=? ORDER BY is_primary DESC, id", (c["id"],))
+        c["phrases"] = by_cmd.get(c["id"], [])
     return cmds
 
 

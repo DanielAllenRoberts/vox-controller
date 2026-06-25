@@ -299,6 +299,23 @@ _SCHEMA_META: list[dict] = [
         "type": "text",
         "help": "Monthly spend budget in USD; 0 = no budget.",
     },
+    # --- Commands (app/site-scoped command DB, idea #36) ---
+    {
+        "key": "command_db_enabled",
+        "label": "App-scoped command DB",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Resolve voice commands from the per-app command database (in front of the built-in "
+                "parser), so the same words can do different things depending on the focused app. "
+                "Off = built-in commands only. Applies live — no restart.",
+    },
+    {
+        "key": "command_db_log",
+        "label": "Log command DB activity",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Write every command-DB query, per-app load, and resolution to vox.log. Restart to apply.",
+    },
     # --- Debug ---
     {
         "key": "debug",

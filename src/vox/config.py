@@ -329,5 +329,14 @@ class Config:
     focus_watch_enabled: bool = True        # run the background focus-watch thread on startup
     focus_watch_poll_seconds: float = 1.5   # how often it checks the frontmost app
 
+    # --- Command DB (app/site-scoped voice commands, idea #36 / docs/plan/command-db.md) --- The
+    # SQLite store (data/commands.db) is loaded into memory at boot (global + mode/system commands)
+    # and per-app on focus change (vox.command_cache); matching is in-memory so the hot path never
+    # touches SQLite. `command_db_enabled` flips on the deterministic DB resolver in vox.dispatch
+    # (a BEHAVIOR change — kept OFF until tested live); `command_db_log` mirrors every DB query +
+    # focus load + resolve to vox.log so you can watch it work. Both are additive + guarded.
+    command_db_enabled: bool = False        # consult the DB resolver in dispatch (OFF: load+log only)
+    command_db_log: bool = True             # log every DB query / focus load / resolve to vox.log
+
 
 CONFIG = Config()

@@ -7,10 +7,13 @@ See docs/plan/modes.md.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -88,15 +91,29 @@ def _start_scheduler(cfg, out) -> None:
             out.emit(f"  [scheduler] not started: {exc}")
 
 
-def _start_focus_watch(cfg, out) -> None:
-    """Start the background focus-watch thread (logs "window in view: <App>" on each app switch).
-    Guarded like _start_scheduler: a missing/broken vox.focus_watch must NEVER stop the voice
-    daemon. Only runs when cfg.focus_watch_enabled."""
+def _start_command_cache(cfg, out):
+    """Boot-load the command DB (global + mode/system) into memory and install query logging.
+    Returns command_cache.on_focus (the per-app loader the focus watcher hooks), or None. Fully
+    guarded + additive: a missing/broken store must never stop the voice daemon."""
+    try:
+        from vox import command_cache
+        command_cache.boot(out, cfg)
+        return command_cache.on_focus
+    except Exception as exc:  # command_cache/command_store missing or broken → carry on as today
+        if getattr(cfg, "command_db_log", True) or cfg.debug:
+            out.emit(f"  [cmddb] not started: {exc}")
+        return None
+
+
+def _start_focus_watch(cfg, out, on_change=None) -> None:
+    """Start the background focus-watch thread (logs "window in view: <App>" on each app switch,
+    and triggers the command DB's per-app load via ``on_change``). Guarded like _start_scheduler:
+    a missing/broken vox.focus_watch must NEVER stop the voice daemon. Only runs when enabled."""
     if not getattr(cfg, "focus_watch_enabled", True):
         return
     try:
         from vox import focus_watch
-        if focus_watch.start(out) is not None:
+        if focus_watch.start(out, on_change=on_change) is not None:
             out.emit("  [focus] watching the frontmost app")
     except Exception as exc:  # focus_watch module missing/broken → log and carry on
         if cfg.debug:
@@ -594,6 +611,84 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
         out.emit(f"  typed: {text!r}")
 
 
+# --- PID file + clean stop ------------------------------------------------------------------------
+# Vox restarts itself by spawning a detached process (start_new_session=True), so after a voice
+# "restart" or an auto-restart it's no longer attached to the terminal and Ctrl+C can't reach it.
+# A PID file gives a reliable way to stop it (`vox --stop` / `vox --replace`) regardless.
+_PIDFILE = Path(__file__).resolve().parents[3] / "data" / "vox.pid"
+
+
+def _write_pidfile() -> None:
+    try:
+        _PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+        _PIDFILE.write_text(str(os.getpid()))
+    except Exception:
+        pass  # the daemon must start even if we can't write the pidfile
+
+
+def _read_pidfile() -> "int | None":
+    try:
+        return int(_PIDFILE.read_text().strip())
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check, doesn't actually signal
+        return True
+    except OSError:
+        return False
+
+
+def _pid_on_port(cfg) -> "int | None":
+    """Best-effort: the PID listening on the dashboard port (macOS `lsof`). Covers instances with a
+    stale/missing pidfile — e.g. one started before this feature, or a detached auto-restart."""
+    try:
+        r = subprocess.run(["lsof", "-nP", f"-iTCP:{cfg.dashboard_port}", "-sTCP:LISTEN", "-t"],
+                           capture_output=True, text=True, timeout=3)
+        pids = [int(x) for x in r.stdout.split() if x.strip()]
+        return next((p for p in pids if p != os.getpid()), None)
+    except Exception:
+        return None
+
+
+def _running_pid(cfg) -> "int | None":
+    """The live Vox daemon's PID: trust the pidfile if it points at a live process, else fall back
+    to whatever holds the dashboard port."""
+    pid = _read_pidfile()
+    if pid and pid != os.getpid() and _pid_alive(pid):
+        return pid
+    return _pid_on_port(cfg)
+
+
+def _stop_running(cfg, out) -> bool:
+    """Stop a running Vox daemon: SIGTERM, wait for it to release the port, SIGKILL as a backstop.
+    Returns True if something was stopped. Used by `--stop`, `--replace`, and the guard."""
+    pid = _running_pid(cfg)
+    if not pid:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    for _ in range(50):  # up to ~5s for a graceful exit + port release
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.1)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)  # didn't go quietly → force it
+        except OSError:
+            pass
+    try:
+        _PIDFILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    out.emit(f"🛑 Stopped {cfg.assistant_name} (PID {pid}).")
+    return True
+
+
 def _another_instance_running(cfg) -> bool:
     """True if a Vox daemon is already running — detected by its dashboard port being held.
     Two daemons fight over the mic + duck the audio (the recurring duplicate-instance bug), so
@@ -612,21 +707,41 @@ def _another_instance_running(cfg) -> bool:
 
 def main() -> None:
     cfg = CONFIG
-    load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
+    args = set(sys.argv[1:])
     out = ConsoleOutput(cfg.log_file)
+
+    # `vox --stop`: stop a running (possibly detached) daemon and exit. The reliable way to kill a
+    # Vox that auto-restarted into the background where Ctrl+C can no longer reach it.
+    if "--stop" in args:
+        if not _stop_running(cfg, out):
+            out.emit(f"No running {cfg.assistant_name} found.")
+        return
+
+    load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
 
     # Single-instance guard: a second daemon fights the first over the mic + ducks the audio (and
     # leaves the dashboard served by a stale process). Refuse to start a second copy — EXCEPT on a
     # restart, where the process we're replacing is exiting and may still briefly hold the port
     # (restart spawns us with VOX_RESTART=1; pop it so our own child processes don't inherit it).
     if os.environ.pop("VOX_RESTART", "") != "1" and _another_instance_running(cfg):
-        out.emit(
-            f"⚠️  {cfg.assistant_name} is already running (port {cfg.dashboard_port} is in use). "
-            f"NOT starting a second copy — two daemons fight over the mic and duck the audio. "
-            f"Quit the other one first (say \"quit {cfg.assistant_name}\", or Ctrl+C its terminal), "
-            f"then start again."
-        )
-        return
+        if args & {"--replace", "--force"}:  # `vox --replace`: stop the old one, then start fresh
+            out.emit(f"↻ --replace: stopping the running {cfg.assistant_name} first…")
+            _stop_running(cfg, out)
+        else:
+            pid = _running_pid(cfg)
+            pid_hint = f" (PID {pid})" if pid else ""
+            out.emit(
+                f"⚠️  {cfg.assistant_name} is already running{pid_hint} (port {cfg.dashboard_port} "
+                f"is in use). Two daemons fight over the mic, so this won't start a second copy.\n"
+                f"   • Stop it:    uv run vox --stop\n"
+                f"   • Replace it: uv run vox --replace\n"
+                f"   • Or say \"quit {cfg.assistant_name}\".\n"
+                f"   (If it auto-restarted into the background, Ctrl+C in this terminal can't reach it"
+                f" — that's why it kept running.)"
+            )
+            return
+
+    _write_pidfile()  # we're cleared to run — record our PID so `--stop`/`--replace` can find us
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
@@ -637,7 +752,8 @@ def main() -> None:
 
     _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
     _start_scheduler(cfg, out)  # additive; non-fatal if the scheduler module is missing/broken
-    _start_focus_watch(cfg, out)  # additive; logs "window in view: <App>" on each app switch
+    _cmd_on_focus = _start_command_cache(cfg, out)  # boot-load the command DB + install query logging
+    _start_focus_watch(cfg, out, on_change=_cmd_on_focus)  # logs app switches + loads each app's commands
 
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)

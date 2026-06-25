@@ -24,12 +24,13 @@ class _FocusThread(threading.Thread):
     """Polls the frontmost app every ~poll seconds; logs each change. Guarded so a bad poll
     is swallowed rather than raised — it can never crash the daemon."""
 
-    def __init__(self, out, poll_seconds: float):
+    def __init__(self, out, poll_seconds: float, on_change=None):
         super().__init__(name="vox-focus-watch", daemon=True)
         self._out = out
         self._poll = max(0.3, float(poll_seconds))
         self._stop = threading.Event()
         self._last = ""
+        self._on_change = on_change  # called with the new app name on each switch (e.g. command_cache.on_focus)
 
     def stop(self) -> None:
         self._stop.set()
@@ -46,20 +47,26 @@ class _FocusThread(threading.Thread):
             if app and app != self._last:
                 self._last = app
                 self._out.emit(f"  👁  window in view: {app}")
+                if self._on_change is not None:
+                    try:
+                        self._on_change(app)  # load this app's command set into the cache (logs its own queries)
+                    except Exception:
+                        pass  # a broken cache load must never take down the focus thread
         except Exception:
             pass  # a bad poll / log write must never take down the thread
 
 
-def start(out) -> "_FocusThread | None":
+def start(out, on_change=None) -> "_FocusThread | None":
     """Start the focus-watch thread (idempotent). Returns the thread, or None if disabled /
-    already running. Fully guarded — a failure to start must never break the daemon."""
+    already running. ``on_change`` (optional) is called with the new app name on each switch — the
+    command DB hooks its per-app load in here. Fully guarded — a failure to start never breaks the daemon."""
     global _THREAD
     if not getattr(CONFIG, "focus_watch_enabled", True):
         return None
     if _THREAD is not None and _THREAD.is_alive():
         return _THREAD
     try:
-        _THREAD = _FocusThread(out, getattr(CONFIG, "focus_watch_poll_seconds", 1.5))
+        _THREAD = _FocusThread(out, getattr(CONFIG, "focus_watch_poll_seconds", 1.5), on_change=on_change)
         _THREAD.start()
         return _THREAD
     except Exception:
