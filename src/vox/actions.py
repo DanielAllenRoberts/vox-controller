@@ -338,12 +338,15 @@ def capture_screen() -> str | None:
 #      ancestor that supports AXPress and press that — not the label.
 # Exact name matches win over substring matches (we press the thing literally named `target` before
 # anything merely containing it). `AXScrollToVisible` first handles virtualised lists. Bounded
-# depth/breadth so a pathological tree can't hang; web content is deep, hence the higher caps.
+# depth/breadth AND a node-visit budget, with role-gated reads, so the walk stays as fast as
+# `clickable_targets()` and can't time out before reaching a deep target (the old name+description
+# read on every node did — see docs/plan/issues.md).
 _CLICK_SCRIPT = '''
 property gPressEl : missing value
 property gLabel : ""
 property gFallback : missing value
 property gFallbackLabel : ""
+property gVisited : 0
 
 on actionNames(el)
     try
@@ -367,32 +370,42 @@ end pressableTarget
 
 on search(el, depth, chain, target)
     if depth > %(maxd)d then return false
-    set nm to ""
+    set gVisited to gVisited + 1
+    if gVisited > %(budget)d then return true
+    -- Role-gate the reads: get ROLE first (cheap), and only read NAME (then DESCRIPTION, lazily,
+    -- for icon-only controls) on interactive roles. The old version read name+description on EVERY
+    -- node and timed out on deep Electron trees before reaching the target — this matches the fast
+    -- clickable_targets() walk. See docs/plan/issues.md.
+    set r to "?"
     try
-        tell application "System Events" to set nm to (name of el) as text
+        tell application "System Events" to set r to role of el
     end try
-    if nm is missing value then set nm to ""
-    set ds to ""
-    try
-        tell application "System Events" to set ds to (description of el) as text
-    end try
-    if ds is missing value then set ds to ""
-    if nm is target then
-        set tgt to my pressableTarget(el, chain)
-        if tgt is not missing value then
-            set gPressEl to tgt
-            set gLabel to nm
-            return true
+    if r is in {"AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton", "AXTabButton", "AXPopUpButton", "AXStaticText", "AXRow", "AXCell", "AXTextField", "AXHeading", "AXImage", "AXDisclosureTriangle"} then
+        set nm to ""
+        try
+            tell application "System Events" to set nm to (name of el) as text
+        end try
+        if nm is missing value then set nm to ""
+        if nm is "" then
+            try
+                tell application "System Events" to set nm to (description of el) as text
+            end try
+            if nm is missing value then set nm to ""
         end if
-    end if
-    if gFallback is missing value and ((nm contains target) or (ds contains target)) then
-        set t2 to my pressableTarget(el, chain)
-        if t2 is not missing value then
-            set gFallback to t2
-            if nm is not "" then
-                set gFallbackLabel to nm
-            else
-                set gFallbackLabel to ds
+        if nm is not "" then
+            if nm is target then
+                set tgt to my pressableTarget(el, chain)
+                if tgt is not missing value then
+                    set gPressEl to tgt
+                    set gLabel to nm
+                    return true
+                end if
+            else if gFallback is missing value and (nm contains target) then
+                set t2 to my pressableTarget(el, chain)
+                if t2 is not missing value then
+                    set gFallback to t2
+                    set gFallbackLabel to nm
+                end if
             end if
         end if
     end if
@@ -413,6 +426,7 @@ set gPressEl to missing value
 set gLabel to ""
 set gFallback to missing value
 set gFallbackLabel to ""
+set gVisited to 0
 tell application "System Events"
     set p to first process whose frontmost is true
     try
@@ -448,15 +462,45 @@ end try
 
 def click_element(target: str) -> str:
     """Find a control labelled `target` in the focused app's accessibility tree and click it
-    (AXPress the nearest pressable element). Enables Electron web-content AX first. Needs
-    Accessibility permission. Returns a result string (never raises)."""
+    (AXPress the nearest pressable element). Uses the fast native AX engine (``vox.ax``, ~77 ms even
+    on a miss) so it can't freeze the voice loop or let focus drift to another app; falls back to the
+    AppleScript walk only if native AX is unavailable. Needs Accessibility permission. Never raises."""
     t = (target or "").strip().replace("\\", " ").replace('"', " ")
     if not t:
         return "Click what? Try 'click Submit'."
-    ok, out = _osa(_CLICK_SCRIPT % {"target": t, "maxd": 32, "maxb": 90, "settle": 0.6})
-    label = out.split("\t", 1)[-1].strip() if out else ""
-    if ok and out.startswith("ok"):
-        return f"Clicked {label or target}."
+
+    # Native AX first — when it runs it's authoritative (a "not found" is a real, fast miss, NOT a
+    # timeout), so we do NOT retry on the slow AppleScript path.
+    try:
+        from vox import ax
+        res = ax.click(t)
+    except Exception:
+        res = None
+    if res is not None:
+        status, label = res
+        if status == "clicked":
+            return f"Clicked {label or target}."
+        try:
+            from vox import assistant
+            assistant._dbg("[click]", f"click_element({target!r}) [native] → {status}")
+        except Exception:
+            pass
+        if status == "not_found":
+            return f"I couldn't find a '{target}' to click."  # fast, authoritative miss — no slow retry
+        # status == "press_failed": native found it but the press errored → one-off AppleScript retry.
+
+    # Native AX unavailable (or a rare native press failure) → AppleScript fallback.
+    ok, out = _osa(_CLICK_SCRIPT % {"target": t, "maxd": 32, "maxb": 90, "budget": 6000, "settle": 0.6},
+                   timeout=25)
+    status, _, detail = (out or "").partition("\t")
+    if ok and status.strip() == "ok":
+        return f"Clicked {detail.strip() or target}."
+    reason = detail.strip() or status.strip() or ("timed out" if not ok else "not found")
+    try:
+        from vox import assistant
+        assistant._dbg("[click]", f"click_element({target!r}) [osa] → {reason}")
+    except Exception:
+        pass
     return f"I couldn't find a '{target}' to click."
 
 
@@ -525,9 +569,17 @@ return (gItems as text)
 
 def clickable_targets(limit: int = 60) -> list[str]:
     """Labels of on-screen elements the user could click in the focused app (deduped, capped).
-    Enables Electron web-content AX first (like ``click_element``). Used to give the brain a view of
-    what's clickable so it can disambiguate. Bounded by a node-visit budget so it stays fast on huge
-    web trees. Returns ``[]`` on any failure (never raises)."""
+    Uses the fast native AX engine (``vox.ax``); falls back to the AppleScript walk only if native AX
+    is unavailable. Used to give the brain a view of what's clickable so it can disambiguate. Returns
+    ``[]`` on any failure (never raises)."""
+    try:
+        from vox import ax
+        res = ax.targets(limit)
+    except Exception:
+        res = None
+    if res is not None:
+        return res
+
     ok, out = _osa(_CLICKABLE_LIST_SCRIPT
                    % {"maxd": 30, "maxb": 90, "limit": limit, "budget": 4000, "settle": 0.6},
                    timeout=30)

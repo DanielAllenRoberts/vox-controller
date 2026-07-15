@@ -569,8 +569,8 @@ def _sdk_look(question, image_path, model, brain="small"):
     from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
     prompt = (f"Read the image file {image_path} — it's a screenshot of the user's Mac. "
-              f"Then answer concisely for text-to-speech (1-2 sentences): {question}")
-    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=8,
+              f"Read it once, then answer concisely for text-to-speech (1-2 sentences): {question}")
+    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=12,
                               permission_mode="bypassPermissions", model=model)
 
     captured = {}
@@ -588,14 +588,20 @@ def _sdk_look(question, image_path, model, brain="small"):
 
     t0 = time.monotonic()
     try:
-        reply = asyncio.run(asyncio.wait_for(_run(), timeout=90)) or "(no response)"
+        reply = asyncio.run(asyncio.wait_for(_run(), timeout=90))
         _record_usage("claude_sdk", model, brain, "vision", captured.get("usage"),
                       (time.monotonic() - t0) * 1000)
+        if not reply:  # agent hit its turn cap without a final answer → don't blurt internals
+            _dbg("[vision]", "claude_sdk vision returned no text (likely hit max_turns)")
+            return "I couldn't make out the screen — try asking again."
         return reply
     except asyncio.TimeoutError:
-        return "(vision timed out — try again)"
+        _dbg("[vision]", "claude_sdk vision timed out after 90s")
+        return "I couldn't read the screen in time — try again."
     except Exception as exc:
-        return f"(vision error: {exc})"
+        # NEVER speak the raw error (e.g. 'Reached maximum number of turns') — log it, say something human.
+        _dbg("[vision]", f"claude_sdk vision failed: {exc}")
+        return "I couldn't read the screen just now."
 
 
 def _anthropic_look(question, image_path, model, brain="small"):
@@ -622,4 +628,5 @@ def _anthropic_look(question, image_path, model, brain="small"):
                       (time.monotonic() - t0) * 1000)
         return "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as exc:
-        return f"(vision error: {exc})"
+        _dbg("[vision]", f"anthropic vision failed: {exc}")
+        return "I couldn't read the screen just now."

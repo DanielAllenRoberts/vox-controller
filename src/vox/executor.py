@@ -7,6 +7,8 @@ reply). So it works on the Claude subscription (SDK/CLI), the Anthropic/OpenAI A
 LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 """
 
+import re
+
 from vox import actions, assistant
 from vox.config import CONFIG
 
@@ -132,40 +134,94 @@ def _look_axtree(question: str) -> str | None:
     prompt = (f"Focused app: {snap.get('app', '?')}\n\nAX tree:\n{snap['text']}\n\n"
               f"Question: {question}")
     # The AX tree is structured TEXT, so the cheap/small brain reads it fine — no need for the
-    # vision-grade big brain. It can defer with '[BIG]' for a genuinely hard screen, which we then
-    # retry on the big brain. kind="vision_axtree" tags both on the Token Usage page.
+    # vision-grade big brain. kind="vision_axtree" tags it on the Token Usage page. When the tree
+    # genuinely can't answer (e.g. Chromium/Electron content the tree doesn't expose — Arc, Slack),
+    # the brain replies '[BIG]'. Re-reading the SAME empty tree on the big brain doesn't add vision
+    # (it just replies '[BIG]' again, which then got spoken aloud) — so instead we return None to
+    # hand the caller off to REAL vision: the screenshot path, which already uses the big brain.
     answer = assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="small", kind="vision_axtree")
-    if answer.strip() == "[BIG]":
-        answer = assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="big", kind="vision_axtree")
+    if answer.strip().upper().startswith("[BIG]"):
+        return None
     return answer
 
 
 _CLICK_PICK_SYSTEM = (
-    "You click controls on the user's Mac. You're given a list of the LABELS of elements currently "
-    "clickable on screen (sidebar items, chats, channels, buttons, links, menu items, files…) and "
-    "what the user wants to click, in their own (possibly imprecise or mis-transcribed) words. Reply "
-    "with ONLY the single best-matching label, copied VERBATIM from the list — no quotes, no extra "
-    "words. If nothing reasonably matches, reply with exactly NONE."
+    "You decide which on-screen control the user wants to click. You're given the LABELS of the "
+    "elements currently clickable on screen (sidebar items, chats, channels, buttons, links, menu "
+    "items, people, files…) and what the user asked for. The request came from SPEECH-TO-TEXT, so it "
+    "is OFTEN MIS-TRANSCRIBED — match by how it SOUNDS, not exact spelling. A word that sounds like a "
+    "label is almost certainly that label, even if spelled differently (e.g. 'alec' or 'burn' → "
+    "'Alex Fairbairn', 'get up' → 'github', 'daily report' → 'daily-report').\n"
+    "Reply with EXACTLY ONE of:\n"
+    "• the single best-matching label, copied VERBATIM from the list — when you're reasonably "
+    "confident (a clear sound-alike with no rival counts as confident).\n"
+    "• ASK: <label>  — only when you have a plausible guess but are genuinely torn (so Vox can "
+    "confirm 'Did you mean <label>?' before clicking). Copy <label> verbatim from the list.\n"
+    "• NONE  — when nothing on the list plausibly matches.\n"
+    "No quotes, no other words."
 )
+
+# A 'yes' to our 'Did you mean <X>?' click prompt should just run the click — match common spoken
+# affirmations, and pull <X> back out of the question we asked (carried in the clarification history).
+_AFFIRMATIVE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ya|sure|correct|right|exactly|definitely|"
+    r"that'?s?\s+(?:right|it|him|her|the\s+one)|do\s+it|go\s+ahead|ok(?:ay)?|please|uh[\s-]*huh)\b",
+    re.I)
+_DID_YOU_MEAN = re.compile(r"did you mean\s+(.+?)\s*\?\s*$", re.I)
+
+
+def _confirmed_click_target(text: str, history) -> str | None:
+    """If we just asked 'Did you mean <X>?' for a click and the user affirmed, return <X> to click.
+    Reads the candidate from the most-recent assistant turn in the clarification history."""
+    if not history or not _AFFIRMATIVE.match(text or ""):
+        return None
+    for role, content in reversed(history):
+        if role == "assistant":
+            m = _DID_YOU_MEAN.match((content or "").strip())
+            return m.group(1).strip() if m else None
+    return None
+
+
+def _parse_pick(raw: str, labels: list[str]) -> tuple[str, str | None]:
+    """Pull the decision out of the picker's reply, tolerating a big brain that 'thinks out loud'
+    before its final answer. Returns ("pick"|"ask"|"none", label). The chosen label must appear
+    verbatim in `labels` (case-insensitive) — guards both reasoning preamble and hallucinated labels.
+    Scans from the LAST line up, since the final answer comes at the end."""
+    by_lower = {l.lower(): l for l in labels}
+    for line in reversed([ln.strip().strip('"').strip("'").rstrip(".,")
+                           for ln in (raw or "").splitlines() if ln.strip()]):
+        if line.upper().startswith("ASK:"):
+            cand = line.split(":", 1)[1].strip().strip('"').strip("'").rstrip(".,")
+            if cand.lower() in by_lower:
+                return "ask", by_lower[cand.lower()]
+        elif line.upper().strip("[]") == "NONE":
+            return "none", None
+        elif line.lower() in by_lower:
+            return "pick", by_lower[line.lower()]
+    return "none", None
 
 
 def _click_fuzzy(target: str) -> str:
     """LLM-assisted click fallback — the 'let the brain SEE the elements in case of confusion' path.
     The fast targeted AXPress couldn't find `target` verbatim, so list what's actually clickable on
-    screen (Electron-aware), let the brain map the user's words to a real label, then click that.
-    Falls back to a plain 'couldn't find' message when nothing is listed or matches."""
+    screen (Electron-aware) and let the BIG brain map the user's (often mis-transcribed) words to a
+    real label by sound. On a confident match it clicks; when genuinely unsure it returns a 'Did you
+    mean <X>?' question (a 'yes' then runs it, via _confirmed_click_target); else 'couldn't find'."""
     labels = actions.clickable_targets()
     if not labels:
         return f"I couldn't find a '{target}' to click."
     listing = "\n".join(f"  - {label}" for label in labels)
     prompt = (f"Clickable elements on screen:\n{listing}\n\n"
-              f"The user wants to click: {target!r}\nBest-matching label (verbatim), or NONE:")
-    pick = assistant.complete(prompt, system=_CLICK_PICK_SYSTEM, brain="small",
-                              kind="click_axtree").strip().strip('"').strip("'")
-    assistant._dbg("[executor]", f"click pick for {target!r} from {len(labels)} on-screen labels → {pick!r}")
-    if not pick or pick.upper().strip("[]") == "NONE":
-        return f"I couldn't find a '{target}' to click on the screen."
-    return actions.click_element(pick)
+              f"The user wants to click: {target!r}\n"
+              f"Your answer (a verbatim label, or ASK: <label>, or NONE):")
+    raw = assistant.complete(prompt, system=_CLICK_PICK_SYSTEM, brain="big", kind="click_axtree")
+    kind, label = _parse_pick(raw, labels)
+    assistant._dbg("[executor]", f"click pick for {target!r} from {len(labels)} on-screen labels → {kind}:{label!r}")
+    if kind == "ask":
+        return f"Did you mean {label}?"  # acted=False question → a 'yes' next turn clicks it
+    if kind == "pick":
+        return actions.click_element(label)
+    return f"I couldn't find a '{target}' to click on the screen."
 
 
 def execute(text: str, history=None) -> tuple[bool, str]:
@@ -177,6 +233,14 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     """
     if not _setting("llm_executor_enabled", CONFIG.llm_executor_enabled):
         return False, assistant.respond(text, history)
+
+    # A 'yes' to our earlier 'Did you mean <X>?' click prompt → just click <X> (deterministic, no
+    # second LLM round-trip). Anything other than an affirmation falls through to the brain below.
+    cand = _confirmed_click_target(text, history)
+    if cand:
+        result = actions.click_element(cand)
+        assistant._dbg("[executor]", f"decision=CLICK (confirmed {cand!r}) → {result!r}")
+        return result.lower().startswith("clicked"), result
 
     ctx = actions.environment_context()
     prompt = f"{text}\n\n[Current Mac state — use this to pick the right app/tab]\n{ctx}" if ctx else text

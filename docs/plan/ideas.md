@@ -505,6 +505,16 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 
 **Connects to:** the scheduler (#16), the executor + intent recovery (#12/#26), and the command DB (a "needs clarification" outcome could be a first-class command result).
 
+## 51. In-dashboard workspace board (Trello-like, agent-readable/writable)
+
+**Vision:** a home-grown, Trello-like kanban board built into the dashboard — lists and cards for planning Vox itself — rather than integrating with actual Trello. It should be a shared planning surface: the agent can reference it and discuss it in conversation, and add/update cards on it directly via tools, not just a human-facing UI.
+
+**Why it matters:** a persistent, agent-referenceable place to plan and track ideas/notes for Vox, without depending on an external SaaS tool — fits the self-contained storage direction (#27, SQLite/Markdown) over third-party services.
+
+**How it might work (not yet scoped):** likely a boards/lists/cards schema in SQLite (consistent with the command-db approach, `command-db.md`), a dashboard UI panel, and agent-facing tools (`add_card`, `move_card`, `query_board`) so the agent can read from and write to it mid-conversation.
+
+**Connects to:** #27 (SQLite/Markdown storage direction), `command-db.md` (SQLite schema precedent), #43 (live conversation viewer — another dashboard-native surface the agent feeds).
+
 ## Sequencing note
 
 > **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation.
