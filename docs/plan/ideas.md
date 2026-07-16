@@ -507,6 +507,8 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 
 ## 51. In-dashboard workspace board (Trello-like, agent-readable/writable)
 
+> **Status:** ✅ BUILT v1 (2026-07-15/16). SQLite `board_store` (board → list → card, CRUD + search, seeds a "Workspace" board with To Do / Doing / Done) + FastAPI routes (`/api/board*`) + a **Board** dashboard page (columns, add cards per column, move via ◄►, delete, add lists, live 4s refresh). Decided **build-our-own over integrating `kanbn/kan`** (AGPL + Postgres + heavy). NEXT: agent-facing tools (`board_add_card`/`board_search`) so the brain reads/writes it mid-conversation (the knowledge-base half), plus real drag-and-drop.
+
 **Vision:** a home-grown, Trello-like kanban board built into the dashboard — lists and cards — that doubles as an **agent-accessible knowledge base**. It's a shared surface: the agent can reference it in conversation and **add, move, read, and search** cards directly via tools, not just a human-facing UI. Use it both to plan Vox itself and as a durable place the agent stashes/retrieves structured notes.
 
 **Why it matters:** a persistent, agent-referenceable place for planning *and* knowledge, without depending on an external SaaS — fits the self-contained storage direction (#27, SQLite/Markdown) over third-party services.
@@ -526,6 +528,8 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 **Connects to:** #27 (SQLite/Markdown storage direction), `command-db.md` (SQLite schema precedent), #43 (live conversation viewer), #49 (MCP two-way bridge — could expose the board over MCP later).
 
 ## 52. "Click link / click button" — numbered overlay on every clickable element (Dragon-style)
+
+> **Status:** ✅ BUILT (2026-07-16). "show clickable" / "click link" / "click button" draws a numbered blue badge on every clickable element (incl. **text boxes** — Slack compose, search fields); say the number ("click 14" / "14") to click it; any other phrase / "hide clickable" dismisses. Clicks are **coordinate-based** (`ax._click_at` via CGEvent) — reliable on web/Electron where `AXPress` silently no-ops; this also fixed the by-label path (direct + AI-escalated "click X"). The overlay runs in a **separate helper process** (`overlay.py`) so AppKit can't freeze the daemon, is `NSWindowSharingNone` (won't trip screen-capture/DRM), and **spans all displays** (Sidecar / second screens). NEXT (the learning loop, below): when "click X" can't find it → auto-show the overlay → pick a number → **save the phrase→element to the command DB** so next time it resolves directly (ties #14/#24/#36).
 
 **Vision:** say **"click link"** / **"click button"** / **"show clickable"** and Vox overlays a **numbered badge on every clickable element on screen**; say **"click 14"** (or just "14") and it presses element 14 — exactly the Dragon NaturallySpeaking flow. Doubles as a **debugging/visibility tool**: you see precisely what Vox's accessibility tree exposes and where.
 
@@ -552,6 +556,8 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 **Connects to:** #31 (pluggable voice-model/API), #36 (command-db), #43 (live viewer), #54 (custom vocabulary — same recognizer foundation). Full mapping + sequencing in [`research/dictation-stt-tools.md`](research/dictation-stt-tools.md).
 
 ## 54. Custom vocabulary / "learn a word" — fix homophones like clawed → Claude (Dragon vocabulary)
+
+> **Status:** ✅ BUILT (2026-07-16) — the **replacement-dictionary** slice. `src/vox/vocab.py` applies a user map ("when you hear X, write Y") to Whisper's output right after STT (`whisper_transcriber`) — whole-word, case-insensitive, longest-match-wins, guarded. Managed on a new **Dictionary** dashboard page (add / toggle / delete; re-adding a word updates it); stored in `data/vocab.json` (gitignored), applied live (no restart after the first). Hotword biasing already exists; the optional **cloud-STT keyword-boost** backend (Deepgram/AssemblyAI) is the remaining, ties into #53.
 
 **Problem:** Whisper mis-transcribes specific words / proper nouns — e.g. "Claude" ↔ "clawed" ↔ "cloud" — and there's no way today to *teach* it the right spelling. Dragon lets you add a word to a personal vocabulary; we don't have that.
 

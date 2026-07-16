@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -116,6 +117,27 @@ def _apply_suggested_voice(mod) -> None:
             settings_store.set("tts_voice", voice)
     except Exception:
         pass
+
+
+def _say_voices() -> list:
+    """The installed macOS ``say`` voices (English), parsed from ``say -v '?'`` — order preserved,
+    deduped. Empty list off-mac or if ``say`` is missing. Each line is
+    ``Name…  <locale>  # sample``; the name may contain spaces (e.g. "Bad News")."""
+    exe = shutil.which("say")
+    if exe is None:
+        return []
+    proc = subprocess.run([exe, "-v", "?"], capture_output=True, text=True, timeout=5)
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in proc.stdout.splitlines():
+        m = re.match(r"^(.+?)\s{2,}([a-z]{2}(?:[_-][A-Z]{2})?)\b", line)
+        if not m or not m.group(2).lower().startswith("en"):
+            continue
+        name = m.group(1).strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 
 def create_app() -> FastAPI:
@@ -302,6 +324,38 @@ def create_app() -> FastAPI:
             return {"ok": False}
         return {"ok": bool(mod.remove_custom(pid))}
 
+    @app.patch("/api/personalities/{pid}/voice")
+    async def set_personality_voice(pid: str, request: Request):
+        """Change a persona's voice — works for PRESETS too (saved as an override). Body:
+        ``{suggestedVoice?, kokoroVoice?}``. Applies live (the TTS reads the active persona's voice)."""
+        mod = _try_import("personalities")
+        if mod is None:
+            return _service_unavailable("personalities")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        if "suggestedVoice" not in body and "kokoroVoice" not in body:
+            return _bad_request("provide 'suggestedVoice' and/or 'kokoroVoice'")
+        try:
+            updated = mod.set_voice(pid, suggestedVoice=body.get("suggestedVoice"),
+                                    kokoroVoice=body.get("kokoroVoice"))
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not set voice: {exc}")
+        # Keep the say-engine tts_voice setting in sync if we just changed the ACTIVE persona.
+        _apply_suggested_voice(mod)
+        return updated
+
+    @app.get("/api/voices")
+    def get_voices() -> dict:
+        """Installed macOS `say` voices (English) for the persona voice picker. Guarded — returns
+        ``{voices: []}`` off-mac or on any error."""
+        try:
+            return {"voices": _say_voices()}
+        except Exception:
+            return {"voices": []}
+
     # --- Rules (guarded) ---
     @app.get("/api/rules")
     def get_rules() -> list:
@@ -375,6 +429,72 @@ def create_app() -> FastAPI:
             return _bad_request(f"could not remove rule: {exc}")
         if not removed:
             return _not_found("rule")
+        return {"ok": True}
+
+    # --- Dictionary / speech corrections ("learn a word"; guarded; src/vox/vocab.py, idea #54) ---
+    @app.get("/api/vocab")
+    def get_vocab() -> list:
+        try:
+            from .. import vocab
+            return vocab.list_entries()
+        except Exception:  # never 500 a read
+            return []
+
+    @app.post("/api/vocab")
+    async def add_vocab(request: Request):
+        try:
+            from .. import vocab
+        except Exception:
+            return _service_unavailable("vocab")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        heard = body.get("heard")
+        if not isinstance(heard, str) or not heard.strip():
+            return _bad_request("'heard' is required and must be a non-empty string")
+        write = body.get("write")
+        if write is not None and not isinstance(write, str):
+            return _bad_request("'write' must be a string")
+        try:
+            return vocab.add(heard, write or "")
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add correction: {exc}")
+
+    @app.patch("/api/vocab/{entry_id}")
+    async def patch_vocab(entry_id: str, request: Request):
+        try:
+            from .. import vocab
+        except Exception:
+            return _not_found("correction")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        patch: dict = {k: body.get(k) for k in ("heard", "write", "enabled") if k in body}
+        if not patch:
+            return _bad_request("provide at least one of 'heard', 'write', or 'enabled'")
+        if "enabled" in patch and not isinstance(patch["enabled"], bool):
+            return _bad_request("'enabled' must be a boolean")
+        try:
+            updated = vocab.update(entry_id, **patch)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not update correction: {exc}")
+        if updated is None:
+            return _not_found("correction")
+        return updated
+
+    @app.delete("/api/vocab/{entry_id}")
+    def delete_vocab(entry_id: str):
+        try:
+            from .. import vocab
+            removed = bool(vocab.remove(entry_id))
+        except Exception as exc:
+            return _bad_request(f"could not delete correction: {exc}")
+        if not removed:
+            return _not_found("correction")
         return {"ok": True}
 
     # --- Commands (app/site-scoped voice command DB; guarded; src/vox/web/commands.py, idea #36) ---
@@ -1195,6 +1315,13 @@ def _handbook_static() -> list:
                     "phrase": "click Submit / click the Log in button",
                     "description": "Press a button, link, tab or control by its label — found in the "
                     "accessibility tree (works best in native apps & standard UI).",
+                },
+                {
+                    "phrase": "show clickable  →  “click 14”",
+                    "description": "Overlays a number on every clickable element on screen; say the "
+                    "number to press it (“click 14”, or just “14”). Also triggers "
+                    "on “click link” / “click button”. Say anything else to dismiss. "
+                    "Best in control mode, which stays listening for the number.",
                 },
             ],
         },

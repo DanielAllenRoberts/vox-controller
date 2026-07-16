@@ -155,16 +155,24 @@ def _parse_click_number(t: str) -> int | None:
     return n if (n is not None and n >= 1) else None
 
 
+_CANCEL_PHRASES = ("cancel", "never mind", "nevermind", "hide", "escape", "forget it",
+                   "clear", "dismiss", "go away")
+
+
 def _overlay(text: str, t: str) -> tuple[bool, str] | None:
-    """Handle the numbered-overlay flow. Returns (acted, msg), or None to fall through. Guarded."""
+    """Numbered clickable-element overlay flow (idea #52). Returns (acted, msg), or None to fall
+    through. Guarded — any AppKit/AX problem degrades gracefully."""
     try:
         from vox import ax, overlay
     except Exception:
         return None
 
-    if overlay.is_active():
+    is_show = any(_has_phrase(t, p) for p in _SHOW_CLICKABLE_PHRASES)
+
+    # A number (or a dismiss) while the overlay is up — but NOT a fresh "show" (that re-shows below).
+    if overlay.is_active() and not is_show:
         n = _parse_click_number(t)
-        overlay.hide()  # ANY utterance dismisses the overlay
+        overlay.hide()  # any utterance dismisses the overlay
         if n is not None:
             res = ax.click_index(n - 1)  # spoken 1-based → 0-based index
             if res and res[0] == "clicked":
@@ -172,11 +180,11 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
             if res and res[0] == "press_failed":
                 return (True, f"found #{n} ({res[1]}) but couldn't press it")
             return (True, f"no #{n} on screen")
-        if any(c in t for c in ("cancel", "never mind", "nevermind", "hide", "escape", "forget it")):
+        if any(c in t for c in _CANCEL_PHRASES):  # "hide clickable", "cancel", "escape", …
             return (True, "hidden")
-        return None  # not a number/cancel → overlay dismissed; handle the utterance normally
+        return None  # neither a number nor a dismiss → overlay closed; handle the utterance normally
 
-    if any(_has_phrase(t, p) for p in _SHOW_CLICKABLE_PHRASES):
+    if is_show:  # first show, or a re-show while one's already up (overlay.show refreshes it)
         try:
             items = ax.targets_with_frames()
         except Exception:

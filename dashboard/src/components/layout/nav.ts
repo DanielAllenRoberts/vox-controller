@@ -12,6 +12,7 @@ import {
   MessagesSquare,
   AlarmClock,
   KanbanSquare,
+  SpellCheck,
   type LucideIcon,
 } from "lucide-react";
 
@@ -34,6 +35,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: "/personalities", label: "Personalities", icon: Drama },
   { to: "/axtree", label: "AX Tree", icon: Network },
   { to: "/rules", label: "Rules", icon: ScrollText },
+  { to: "/dictionary", label: "Dictionary", icon: SpellCheck },
   { to: "/commands", label: "Commands", icon: TerminalSquare },
   { to: "/memory", label: "Memory", icon: Brain },
   { to: "/integrations", label: "Integrations", icon: Plug },

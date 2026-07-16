@@ -122,6 +122,16 @@ export interface Rule {
   enabled: boolean;
 }
 
+// Speech-correction dictionary entry ("learn a word", idea #54). Mirrors
+// src/vox/vocab.py — "when you hear `heard`, write `write` instead". Applied to
+// Whisper's output, so it fixes homophones/proper nouns (clawed → Claude).
+export interface VocabEntry {
+  id: string;
+  heard: string;
+  write: string;
+  enabled: boolean;
+}
+
 // --- Command DB (app/site-scoped voice commands, idea #36) -----------------
 // Mirrors src/vox/web/commands.py. A `CommandContext` scopes WHEN commands
 // apply (global "Everywhere" / an app / a site); each `Command` is one action
@@ -445,6 +455,17 @@ export const api = {
     request<{ ok: boolean }>(`/personalities/custom/${id}`, {
       method: "DELETE",
     }),
+  // Change a persona's voice — works for PRESETS too (saved as an override on the bridge).
+  setPersonalityVoice: (
+    id: string,
+    body: { suggestedVoice?: string; kokoroVoice?: string },
+  ) =>
+    request<Personality>(`/personalities/${id}/voice`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  // Installed macOS `say` voices for the picker (English). Empty off-mac.
+  voices: () => request<{ voices: string[] }>("/voices"),
 
   rules: () => request<Rule[]>("/rules"),
   addRule: (text: string) =>
@@ -459,6 +480,24 @@ export const api = {
     }),
   removeRule: (id: string) =>
     request<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
+
+  // --- Dictionary / speech corrections ("learn a word", idea #54) ----------
+  vocab: () => request<VocabEntry[]>("/vocab"),
+  addVocab: (heard: string, write: string) =>
+    request<VocabEntry>("/vocab", {
+      method: "POST",
+      body: JSON.stringify({ heard, write }),
+    }),
+  updateVocab: (
+    id: string,
+    patch: { heard?: string; write?: string; enabled?: boolean },
+  ) =>
+    request<VocabEntry>(`/vocab/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  removeVocab: (id: string) =>
+    request<{ ok: boolean }>(`/vocab/${id}`, { method: "DELETE" }),
 
   // --- Command DB (app/site-scoped voice commands, idea #36) ---------------
   commands: () => request<CommandDb>("/commands"),

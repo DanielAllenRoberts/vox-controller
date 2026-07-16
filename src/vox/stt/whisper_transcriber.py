@@ -20,4 +20,13 @@ class WhisperTranscriber:
         # Whisper hallucinating words (often the biased hotwords) when you're not speaking.
         segments, _ = self._model.transcribe(audio, language="en", hotwords=hotwords or None,
                                              vad_filter=True)
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        # "Learn a word" (idea #54): apply the user's speech-correction dictionary to Whisper's output
+        # — fix homophones/proper nouns (clawed→Claude) that a frozen model can't be taught directly.
+        # Guarded + lazy: any problem (missing store/module) returns the raw transcript unchanged.
+        try:
+            from vox import vocab
+            text = vocab.apply(text)
+        except Exception:
+            pass
+        return text

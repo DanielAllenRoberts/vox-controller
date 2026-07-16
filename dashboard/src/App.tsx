@@ -11,6 +11,7 @@ import { Settings } from "@/pages/Settings";
 import { Personalities } from "@/pages/Personalities";
 import { AxTree } from "@/pages/AxTree";
 import { Rules } from "@/pages/Rules";
+import { Dictionary } from "@/pages/Dictionary";
 import { Commands } from "@/pages/Commands";
 import { Memory } from "@/pages/Memory";
 import { Integrations } from "@/pages/Integrations";
@@ -91,6 +92,14 @@ export default function App() {
           element={
             <PageTransition>
               <Rules />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="dictionary"
+          element={
+            <PageTransition>
+              <Dictionary />
             </PageTransition>
           }
         />

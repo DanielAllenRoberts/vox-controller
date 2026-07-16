@@ -22,11 +22,15 @@ import time
 # Interactive-ish roles whose label is worth listing as a click target (matches the old AppleScript
 # enumeration). The click SEARCH below is broader — it matches a label on any node — but the LISTING
 # stays role-gated so the fuzzy-pick list isn't flooded with structural text.
+# Text-input roles — a message box / search field you'd click into to start typing. Listed even when
+# unlabelled (empty boxes have no title) with a "text box" fallback label, so they still get a badge.
+_TEXT_INPUT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"}
+
 _CLICKABLE_ROLES = {
     "AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton",
-    "AXTabButton", "AXPopUpButton", "AXStaticText", "AXRow", "AXCell", "AXTextField",
+    "AXTabButton", "AXPopUpButton", "AXStaticText", "AXRow", "AXCell",
     "AXHeading", "AXImage", "AXDisclosureTriangle",
-}
+} | _TEXT_INPUT_ROLES
 
 _BUDGET = 9000       # node-visit safety cap (native is fast; this is just a runaway guard)
 _MAX_DEPTH = 45
@@ -88,6 +92,16 @@ def _has_press(fns, el):
         return False
 
 
+def _label_of(fns, el, role):
+    """A display label for a listable element: title → description → placeholder, else "text box" for
+    an unlabelled input (so an empty Slack/YouTube box still gets a badge). None if nothing usable."""
+    for attr in ("AXTitle", "AXDescription", "AXPlaceholderValue"):
+        nm = _attr(fns, el, attr)
+        if isinstance(nm, str) and nm.strip():
+            return nm.strip()
+    return "text box" if role in _TEXT_INPUT_ROLES else None
+
+
 def _app_root(fns):
     """The frontmost app's AX root, with web content enabled (settles once per app). Or None."""
     pid = _frontmost_pid()
@@ -145,12 +159,12 @@ def click(target: str):
             if low == tl:
                 pe = _pressable(fns, el, chain)
                 if pe is not None:
-                    found["exact"] = (pe, nm.strip())
+                    found["exact"] = (pe, el, nm.strip())  # keep the labelled el for its frame
                     return
             elif found["fallback"] is None and tl in low:
                 pe = _pressable(fns, el, chain)
                 if pe is not None:
-                    found["fallback"] = (pe, nm.strip())
+                    found["fallback"] = (pe, el, nm.strip())
         kids = _attr(fns, el, "AXChildren") or []
         child_chain = chain + [el]
         for k in kids:
@@ -165,11 +179,22 @@ def click(target: str):
     hit = found["exact"] or found["fallback"]
     if hit is None:
         return ("not_found", None)
-    press_el, label = hit
+    press_el, el, label = hit
     try:
         fns["AXUIElementPerformAction"](press_el, "AXScrollToVisible")  # virtualised lists
     except Exception:
         pass
+    # Prefer a real click at the element's centre — AXPress reports success on many web/Electron
+    # controls (Slack rows, buttons) yet only highlights/hovers. Read the frame AFTER scrolling so
+    # it's current, then synthesize a click there; AXPress stays as the native fallback.
+    frame = _frame(fns, el)
+    if frame is not None:
+        try:
+            x, y, w, h = frame
+            _click_at(x + w / 2.0, y + h / 2.0)
+            return ("clicked", label)
+        except Exception:
+            pass
     try:
         err = fns["AXUIElementPerformAction"](press_el, "AXPress")
     except Exception:
@@ -192,13 +217,12 @@ def targets(limit: int = 60):
         if len(out) >= limit or depth > _MAX_DEPTH or n[0] > _BUDGET:
             return
         n[0] += 1
-        if _attr(fns, el, "AXRole") in _CLICKABLE_ROLES:
-            nm = _attr(fns, el, "AXTitle")
-            if not (isinstance(nm, str) and nm.strip()):
-                nm = _attr(fns, el, "AXDescription")
-            if isinstance(nm, str) and nm.strip() and len(nm.strip()) < 60 and nm.strip() not in seen:
-                seen.add(nm.strip())
-                out.append(nm.strip())
+        role = _attr(fns, el, "AXRole")
+        if role in _CLICKABLE_ROLES:
+            nm = _label_of(fns, el, role)
+            if nm and len(nm) < 60 and nm not in seen:
+                seen.add(nm)
+                out.append(nm)
         for k in (_attr(fns, el, "AXChildren") or []):
             if len(out) >= limit:
                 break
@@ -265,23 +289,21 @@ def targets_with_frames(limit: int = 80):
         if len(out) >= limit or depth > _MAX_DEPTH or n[0] > _BUDGET:
             return
         n[0] += 1
-        if _attr(fns, el, "AXRole") in _CLICKABLE_ROLES:
-            nm = _attr(fns, el, "AXTitle")
-            if not (isinstance(nm, str) and nm.strip()):
-                nm = _attr(fns, el, "AXDescription")
-            if isinstance(nm, str) and nm.strip() and len(nm.strip()) < 60:
+        role = _attr(fns, el, "AXRole")
+        if role in _CLICKABLE_ROLES:
+            nm = _label_of(fns, el, role)
+            if nm and len(nm) < 60:
                 fr = _frame(fns, el)
                 if fr is not None:
-                    key = (nm.strip(), round(fr[0]), round(fr[1]))  # same label at same spot = dupe
+                    key = (nm, round(fr[0]), round(fr[1]))  # same label at same spot = dupe
                     if key not in seen:
                         seen.add(key)
                         press = _pressable(fns, el, chain)
                         if press is not None:  # only list things we can actually click
                             idx = len(out)
-                            out.append({"index": idx, "label": nm.strip(),
-                                        "role": _attr(fns, el, "AXRole"),
+                            out.append({"index": idx, "label": nm, "role": role,
                                         "x": fr[0], "y": fr[1], "w": fr[2], "h": fr[3]})
-                            cache.append((press, nm.strip()))
+                            cache.append((press, nm, fr))  # keep the frame for a real click
         child_chain = chain + [el]
         for k in (_attr(fns, el, "AXChildren") or []):
             if len(out) >= limit:
@@ -296,17 +318,40 @@ def targets_with_frames(limit: int = 80):
     return out
 
 
+def _click_at(cx: float, cy: float) -> None:
+    """Synthesize a real left-click at global screen point (cx, cy). CGEvent and AX share the same
+    top-left-origin global coordinate space, so the AX frame needs no flip. Move → down → up."""
+    import Quartz
+    pt = Quartz.CGPointMake(float(cx), float(cy))
+    for kind in (Quartz.kCGEventMouseMoved, Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+        ev = Quartz.CGEventCreateMouseEvent(None, kind, pt, Quartz.kCGMouseButtonLeft)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
 def click_index(i: int):
-    """AXPress the i-th element from the last ``targets_with_frames()`` call (the "click 14" step).
-    Returns ("clicked", label) / ("press_failed", label), or None if the index is stale/invalid."""
-    fns = _load()
-    if not fns or not (isinstance(i, int) and 0 <= i < len(_LAST_TARGETS)):
+    """Click the i-th element from the last ``targets_with_frames()`` call (the "click 14" step).
+    Prefers a REAL mouse click at the element's centre — ``AXPress`` reports success on many
+    web/Electron controls (Slack sidebar, buttons) yet does nothing, whereas a synthesized click at
+    the exact coords we already have actually works. Falls back to AXPress (native controls, no cursor
+    move). Returns ("clicked", label) / ("press_failed", label), or None if the index is stale."""
+    if not (isinstance(i, int) and 0 <= i < len(_LAST_TARGETS)):
         return None
-    press_el, label = _LAST_TARGETS[i]
-    try:
-        fns["AXUIElementPerformAction"](press_el, "AXScrollToVisible")
-    except Exception:
-        pass
+    press_el, label, frame = _LAST_TARGETS[i]
+    fns = _load()
+    if fns is not None:  # bring virtualised/scrolled targets into view before clicking
+        try:
+            fns["AXUIElementPerformAction"](press_el, "AXScrollToVisible")
+        except Exception:
+            pass
+    if frame is not None:
+        try:
+            x, y, w, h = frame
+            _click_at(x + w / 2.0, y + h / 2.0)
+            return ("clicked", label)
+        except Exception:
+            pass  # coordinate click failed → fall back to AXPress
+    if fns is None:
+        return None
     try:
         err = fns["AXUIElementPerformAction"](press_el, "AXPress")
     except Exception:
