@@ -507,13 +507,76 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 
 ## 51. In-dashboard workspace board (Trello-like, agent-readable/writable)
 
-**Vision:** a home-grown, Trello-like kanban board built into the dashboard — lists and cards for planning Vox itself — rather than integrating with actual Trello. It should be a shared planning surface: the agent can reference it and discuss it in conversation, and add/update cards on it directly via tools, not just a human-facing UI.
+**Vision:** a home-grown, Trello-like kanban board built into the dashboard — lists and cards — that doubles as an **agent-accessible knowledge base**. It's a shared surface: the agent can reference it in conversation and **add, move, read, and search** cards directly via tools, not just a human-facing UI. Use it both to plan Vox itself and as a durable place the agent stashes/retrieves structured notes.
 
-**Why it matters:** a persistent, agent-referenceable place to plan and track ideas/notes for Vox, without depending on an external SaaS tool — fits the self-contained storage direction (#27, SQLite/Markdown) over third-party services.
+**Why it matters:** a persistent, agent-referenceable place for planning *and* knowledge, without depending on an external SaaS — fits the self-contained storage direction (#27, SQLite/Markdown) over third-party services.
 
-**How it might work (not yet scoped):** likely a boards/lists/cards schema in SQLite (consistent with the command-db approach, `command-db.md`), a dashboard UI panel, and agent-facing tools (`add_card`, `move_card`, `query_board`) so the agent can read from and write to it mid-conversation.
+**Build vs integrate — evaluated 2026-07-15 → BUILD OUR OWN.** We looked at [`kanbn/kan`](https://github.com/kanbn/kan) (an open-source Trello alternative). It's a full **Next.js + PostgreSQL + tRPC + Better-Auth + S3/Redis** self-hosted web app under **AGPLv3**. Three reasons to build our own rather than integrate it:
+1. **License:** AGPLv3 is viral copyleft — bundling it into our downloadable open-source distro drags licensing obligations across the whole project. Our own board stays clean under our license.
+2. **Weight:** kan needs Node 18 + Postgres + Docker + SMTP + S3 — a huge dependency footprint for a single-user local app on a disk-constrained machine, vs our zero-dep SQLite.
+3. **Agent-native fit:** the whole point is fast, direct agent read/write. Our Python daemon touches SQLite in-process; kan forces an HTTP/tRPC hop to a separate service. (kan *does* ship an MCP server, but that's still an external process to run + maintain.)
+→ We *reference* kan's data model (boards → lists → cards → labels/checklist/comments) but implement lean.
 
-**Connects to:** #27 (SQLite/Markdown storage direction), `command-db.md` (SQLite schema precedent), #43 (live conversation viewer — another dashboard-native surface the agent feeds).
+**Shape:**
+- **Storage:** a `board`/`list`/`card` schema in SQLite (same pattern as `command-db.md`); optional Markdown mirror for transparency (#27).
+- **API:** FastAPI endpoints under the web bridge (list / create / move / update / search cards).
+- **Agent tools:** `board_add_card`, `board_move_card`, `board_search`, `board_read` so the brain uses it mid-conversation.
+- **UI:** one React page in the dashboard (drag between columns).
+
+**Connects to:** #27 (SQLite/Markdown storage direction), `command-db.md` (SQLite schema precedent), #43 (live conversation viewer), #49 (MCP two-way bridge — could expose the board over MCP later).
+
+## 52. "Click link / click button" — numbered overlay on every clickable element (Dragon-style)
+
+**Vision:** say **"click link"** / **"click button"** / **"show clickable"** and Vox overlays a **numbered badge on every clickable element on screen**; say **"click 14"** (or just "14") and it presses element 14 — exactly the Dragon NaturallySpeaking flow. Doubles as a **debugging/visibility tool**: you see precisely what Vox's accessibility tree exposes and where.
+
+**Why it matters:** (1) clicking by number is faster and far more reliable than clicking by label when labels are ambiguous, missing, or mis-heard; (2) it makes the AX tree *visible* so we can debug why a control isn't clickable. Dragon does this with vision/OCR; **we can do it better with the native AX tree** — exact element identity + frame, no image analysis.
+
+**How it might work:**
+- We already enumerate clickable elements natively (`vox/ax.py` `targets()` + `click()`). Extend the AX reader to also return each element's **screen frame** (`AXPosition` + `AXSize` via `AXValueGetValue`) — a small addition.
+- Draw a **transparent, click-through, always-on-top overlay** (PyObjC borderless `NSWindow`) with a numbered badge at each element's rect. On "click N", AXPress the stored element; "hide" / "cancel" / "escape" dismisses.
+- Voice: add `show_clickable` + `click_number` intents; a lightweight overlay mode in the loop.
+
+**Relation to existing ideas:** #35 (AX-as-structure), #37 (set-of-marks / numbered marks — that entry is the *web/DOM* version; this is the *native macOS* version), #18 (screenshot vs AX). For elements AX doesn't expose (some web content), fall back to the #37 DOM/screenshot-grid path. Because it's AX-based (stable identity), the same overlay could later feed *recorded* actions (#46) with reproducible targets — unlike vision-labeled coordinates.
+
+## 53. Pluggable + streaming STT recognizers (Vosk grammar commands · streaming partials · typed-arg grammar)
+
+**Vision:** formalize STT behind a recognizer interface and add a **Vosk** backend alongside faster-whisper to unlock three levers documented in [`research/dictation-stt-tools.md`](research/dictation-stt-tools.md):
+1. **Grammar-constrained command recognition** — compile the command-DB's active phrases into a Vosk JSON grammar so spoken commands snap to an exact command (or `[unk]`) with no Whisper+LLM round-trip. Highest ROI; reuses the command-DB we already built (#36).
+2. **Streaming partial transcripts** — Vosk emits live partials per audio chunk → live captions + a self-correcting loop (show Vosk instantly, replace with Whisper-final). Feeds the live conversation viewer (#43).
+3. **Typed-argument command grammar** — adopt Utterly Voice's arg model (no-arg / trailing-arg / optional-with-default / rest-of-utterance) to let users define *parameterised* commands as data (the half the command-DB deliberately left in the code parser).
+
+**Why it matters:** faster, more reliable command recognition; real-time dictation UX; and user-defined parameterised commands — all local, all additive, all gated.
+
+**Foundation:** extend `stt/base.py` (today batch-only `transcribe()`) to a streaming interface + a backend registry. Keep faster-whisper the default. Caveats: Vosk grammar mode needs the small "lookahead" models; some Vosk models are AGPL/CC (license-audit before bundling).
+
+**Connects to:** #31 (pluggable voice-model/API), #36 (command-db), #43 (live viewer), #54 (custom vocabulary — same recognizer foundation). Full mapping + sequencing in [`research/dictation-stt-tools.md`](research/dictation-stt-tools.md).
+
+## 54. Custom vocabulary / "learn a word" — fix homophones like clawed → Claude (Dragon vocabulary)
+
+**Problem:** Whisper mis-transcribes specific words / proper nouns — e.g. "Claude" ↔ "clawed" ↔ "cloud" — and there's no way today to *teach* it the right spelling. Dragon lets you add a word to a personal vocabulary; we don't have that.
+
+**What's possible with our current faster-whisper:**
+- We already pass **`hotwords`** (soft bias toward expected vocabulary); `initial_prompt` is a similar lever. **But these only bias — they won't reliably win a homophone**, and no acoustic model consistently disambiguates clawed/Claude/cloud from sound alone.
+- **You can't "train" Whisper on a new word** without fine-tuning (heavy). Hotwords/initial_prompt is the only in-model knob, and it's weak.
+
+**The reliable local fix — a user-editable replacement dictionary (recommended cheap win):**
+- A deterministic **post-ASR substitution map**: "when the transcript contains X, write Y" (e.g. `clawed`→`Claude`, `claude code`→`Claude Code`, plus user-defined rules). Instant, local, 100% reliable — exactly what Dragon vocabulary / WhisperTyping "text replacements" do for spelling. Applies to both dictation and command text.
+- Editable in the dashboard; stored in SQLite/Markdown (#27). This is the pragmatic "learn a word" and is worth building regardless of engine.
+
+**The stronger option — a cloud-STT API behind the recognizer interface (#53):**
+- Cloud engines with real **keyword boosting** (Deepgram `keyterm`/`keywords`, AssemblyAI `word_boost`, Soniox, …) handle custom vocabulary far better than Whisper hotwords. Offer them as an **optional** backend (privacy/cost tradeoff) via the pluggable recognizer interface (#53) — max accuracy on names/jargon for those who opt in, while local Whisper stays the default. This answers "should we have an API option too?" → yes, as an option, not a replacement.
+
+**Connects to:** #53 (recognizer interface = the foundation for the API option), #31 (pluggable voice/API), #8 (personalises over time — the replacement map is the explicit, deterministic complement to #8's implicit learning), #10 (compose — same cleanup surface).
+
+## 55. MemPalace — local-first semantic memory backend (evaluate adopting)
+
+**What:** [`MemPalace/mempalace`](https://github.com/MemPalace/mempalace) — an **MIT-licensed**, local-first Python memory library for AI apps. Stores verbatim conversation history for semantic search; **ChromaDB** vector store (default; pluggable SQLite/Qdrant/pgvector/Milvus) + a **temporal entity-relationship knowledge graph** on local SQLite. "Palace" hierarchy: people/projects = *wings*, topics = *rooms*, content = *drawers*. Ships a Python API, a CLI (`mine` / `search` / `wake-up`), an **MCP server (36 tools)**, and auto-save hooks for Claude Code / Cursor. Local embeddings (`all-MiniLM-L6-v2` ~30 MB English, or `embedding-gemma-300m` ~300 MB multilingual). No external services required.
+
+**Why it matters for Vox:** a ready-made, permissively-licensed answer to much of our memory roadmap — the **navigable second-brain RAG + tiered/consolidated memory (#28)**, semantic recall over past conversations, and the local/human-readable storage direction (#27). **MIT** means we can embed it directly (contrast kan's AGPL, #51). It could back or augment today's Markdown tiered memory (`memory.py`) with real semantic search instead of relevance heuristics.
+
+**How it might work:** embed as a Python dependency, or run its MCP server and reach it via the #49 MCP bridge. Vox writes each turn/memory into a palace wing; recall does a semantic `search` at turn start alongside/instead of today's injection. Evaluate: (1) does semantic recall beat our current tiered-Markdown recall in practice; (2) the ChromaDB + embedding-model **disk/RAM cost** (~30–300 MB) against the disk-constrained target machine; (3) embed the library vs the MCP-server route.
+
+**Connects to:** #27 (local storage), #28 (tiered memory + dream consolidation + second-brain RAG), #29 (auto-capture), #49 (MCP two-way bridge). Also a candidate backend behind the board's knowledge-base role (#51).
 
 ## Sequencing note
 

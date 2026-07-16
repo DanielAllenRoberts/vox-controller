@@ -207,6 +207,36 @@ export interface Memory {
   tier?: MemoryTier;
 }
 
+// --- Workspace board (Trello-like kanban + agent knowledge base, idea #51) --
+// Mirrors src/vox/web/board.py. A `Board` has ordered `BoardList` columns, each
+// with ordered `BoardCard`s. Numeric ids are the SQLite primary keys. `tags` is
+// a string[] (the store keeps them comma-separated). The default board
+// ("Workspace" → To Do/Doing/Done) is auto-seeded, so `id`/`name` are only null
+// if the bridge/module is unavailable.
+export interface BoardCard {
+  id: number;
+  listId: number;
+  title: string;
+  body: string;
+  tags: string[];
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BoardList {
+  id: number;
+  name: string;
+  position: number;
+  cards: BoardCard[];
+}
+
+export interface Board {
+  id: number | null;
+  name: string | null;
+  lists: BoardList[];
+}
+
 // vox-speak MCP setup block for THIS machine — mirrors GET /api/mcp/config.
 // `repoPath` is computed locally by the bridge and is never committed (docs use
 // the /ABSOLUTE/PATH/TO/vox-controller placeholder). Fields are read
@@ -505,6 +535,43 @@ export const api = {
   // Reveal data/memory/ in the OS file manager (bridge runs `open -R`).
   revealMemory: () =>
     request<{ ok: boolean }>("/memory/reveal", { method: "POST" }),
+
+  // --- Workspace board (Trello-like kanban + agent knowledge base, idea #51) -
+  board: () => request<Board>("/board"),
+  boardSearch: (query: string, limit = 50) =>
+    request<BoardCard[]>(
+      `/board/search?query=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
+  addBoardCard: (body: {
+    list: string;
+    title: string;
+    body?: string;
+    tags?: string;
+  }) =>
+    request<BoardCard>("/board/cards", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBoardCard: (
+    id: number,
+    patch: { title?: string; body?: string; tags?: string },
+  ) =>
+    request<BoardCard>(`/board/cards/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  moveBoardCard: (id: number, toList: string, position?: number) =>
+    request<BoardCard>(`/board/cards/${id}/move`, {
+      method: "POST",
+      body: JSON.stringify({ toList, position }),
+    }),
+  removeBoardCard: (id: number) =>
+    request<{ ok: boolean }>(`/board/cards/${id}`, { method: "DELETE" }),
+  addBoardList: (name: string) =>
+    request<{ id: number; name: string; position: number }>("/board/lists", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
 
   axtree: () => request<AxTree | AxTreeError>("/axtree"),
 

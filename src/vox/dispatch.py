@@ -18,6 +18,8 @@ command) before falling through to conversational chat — so chat stays chat-fi
 
 from __future__ import annotations
 
+import re
+
 from vox import actions
 from vox.config import CONFIG
 from vox.wakeword.backends import normalize
@@ -106,6 +108,90 @@ def _command_db(text: str) -> tuple[bool, str] | None:
         return None  # any cache/dispatch error → behave exactly as if the DB weren't there
 
 
+# --- numbered clickable-element overlay (idea #52) ----------------------------
+# "show clickable" / "click link" / "click button" → draw numbered badges on every clickable element;
+# then a spoken number → press it + hide. Runs BEFORE the parser so "click <N>" during the overlay
+# doesn't get read as "click the control labelled N". Silent (acted=True) on both show and click, so
+# the flow never speaks — that both keeps it snappy and dodges the TTS→mic-stall (audio -10863) that
+# would otherwise garble the number you say next. Fully guarded: any AppKit/AX problem falls back to
+# naming the targets aloud, so it degrades instead of breaking.
+
+_SHOW_CLICKABLE_PHRASES = ("show clickable", "show clickables", "click link", "click button",
+                           "show numbers", "show links", "show clickable items", "show clickables")
+
+_ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+         "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+         "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+         "eighty": 80, "ninety": 90}
+
+
+def _has_phrase(t: str, phrase: str) -> bool:
+    """Whole-phrase (word-boundary) match, so 'click link' doesn't fire on 'click linkedin'."""
+    return f" {phrase} " in f" {t} "
+
+
+def _words_to_int(s: str) -> int | None:
+    """Parse a spelled-out number 1–99 (e.g. 'twenty one'), or None."""
+    s = s.strip().replace("-", " ")
+    parts = [p for p in s.split() if p]
+    if len(parts) == 1:
+        return _ONES.get(parts[0], _TENS.get(parts[0]))
+    if len(parts) == 2 and parts[0] in _TENS and parts[1] in _ONES and _ONES[parts[1]] < 10:
+        return _TENS[parts[0]] + _ONES[parts[1]]
+    return None
+
+
+def _parse_click_number(t: str) -> int | None:
+    """The number the user said while the overlay is up — a digit anywhere ('click 14', '14'), else a
+    spelled-out number after stripping filler words. Returns a 1-based number, or None."""
+    m = re.search(r"\b(\d{1,3})\b", t)
+    if m:
+        n = int(m.group(1))
+        return n if n >= 1 else None
+    body = re.sub(r"\b(click|press|tap|select|choose|hit|number|item|option|the|on|that|please|go|to)\b",
+                  " ", t)
+    n = _words_to_int(re.sub(r"\s+", " ", body).strip())
+    return n if (n is not None and n >= 1) else None
+
+
+def _overlay(text: str, t: str) -> tuple[bool, str] | None:
+    """Handle the numbered-overlay flow. Returns (acted, msg), or None to fall through. Guarded."""
+    try:
+        from vox import ax, overlay
+    except Exception:
+        return None
+
+    if overlay.is_active():
+        n = _parse_click_number(t)
+        overlay.hide()  # ANY utterance dismisses the overlay
+        if n is not None:
+            res = ax.click_index(n - 1)  # spoken 1-based → 0-based index
+            if res and res[0] == "clicked":
+                return (True, f"clicked #{n} ({res[1]})")
+            if res and res[0] == "press_failed":
+                return (True, f"found #{n} ({res[1]}) but couldn't press it")
+            return (True, f"no #{n} on screen")
+        if any(c in t for c in ("cancel", "never mind", "nevermind", "hide", "escape", "forget it")):
+            return (True, "hidden")
+        return None  # not a number/cancel → overlay dismissed; handle the utterance normally
+
+    if any(_has_phrase(t, p) for p in _SHOW_CLICKABLE_PHRASES):
+        try:
+            items = ax.targets_with_frames()
+        except Exception:
+            items = None
+        if not items:
+            return (False, "I can't see anything clickable here.")
+        try:
+            overlay.show(items)
+        except Exception:  # overlay couldn't draw → fall back to naming them (still useful)
+            names = ", ".join(i["label"] for i in items[:10])
+            return (False, f"I can click: {names}. Say the one you want.")
+        return (True, f"showing {len(items)} clickable targets — say a number")
+    return None
+
+
 # --- the shared deterministic layer -------------------------------------------
 
 def try_deterministic(text: str) -> tuple[bool, str] | None:
@@ -118,6 +204,10 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     if not text or not text.strip():
         return None
     t = normalize(text)
+
+    ov = _overlay(text, t)  # numbered clickable overlay (idea #52) — before the parser
+    if ov is not None:
+        return ov
 
     if _is_what_app(t):
         app = actions.frontmost_app()

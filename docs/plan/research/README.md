@@ -2,10 +2,11 @@
 
 > Findings from a survey of how the best open-source / documented agent and voice systems are built, gathered to inform Vox's agent layer (the LLM-as-executor + learning vision in `../ideas.md` #12–#15). Each doc ends with a concrete "How this applies to Vox" section.
 
-## The five docs
+## The docs
 
 | Doc | Scope | Headline takeaway |
 |---|---|---|
+| [`dictation-stt-tools.md`](dictation-stt-tools.md) | Vibe, SpeechPulse, WhisperTyping, Utterly Voice, Vosk | **Most of these validate Vox's choices** (local faster-whisper, in-utterance edit commands, context-scoped command grammar, AX-tree clicks > their vision hacks). The 3 new levers are Vosk-shaped: **grammar-constrained command recognition** (plugs into the command-DB we built), **streaming partials** (live captions + self-correcting Whisper loop), and a **typed-arg command grammar** (Utterly Voice) to take the command-DB past fixed phrases. |
 | [`voice-turn-taking.md`](voice-turn-taking.md) | Pipecat, LiveKit Agents, Smart Turn, Vapi/Retell/Deepgram | **Nobody uses raw silence as the turn signal.** Layer a semantic end-of-utterance decision on fast VAD and *adjust the silence timeout* by content. Smart Turn **v3** makes audio EOU CPU-viable (~12ms). Vox's `[OPEN]/[DONE]` tag solves a *different* problem (agent re-engagement, not user-EOU). |
 | [`claude-agents.md`](claude-agents.md) | Anthropic "Building Effective Agents", Claude Agent SDK | **Start simple; add agency only when it pays.** Vox's planned cascade *is* the "routing" pattern. The Agent SDK = the Claude Code CLI (hence no API key / subscription). Switch `query()` → `ClaudeSDKClient` for free cross-turn memory; give the LLM **dedicated, gated** tools, never raw Bash. |
 | [`coding-agents.md`](coding-agents.md) | OpenCode, Aider, Cline, Open Interpreter | **One agent loop everywhere:** message → LLM → run tool → feed back → loop to a terminal signal; **one action per turn** suits a voice loop. Copy OpenCode's **3-way `allow`/`ask`/`deny`** permission model (per-command-pattern). Use **native function-calling** over `actions.py`; inject per-turn `environment_details` (frontmost app, profile, tabs). |

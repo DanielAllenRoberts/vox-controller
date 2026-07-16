@@ -11,6 +11,7 @@ import {
   BookOpen,
   MessagesSquare,
   AlarmClock,
+  KanbanSquare,
   type LucideIcon,
 } from "lucide-react";
 
@@ -26,6 +27,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
   { to: "/conversation", label: "Conversation", icon: MessagesSquare },
+  { to: "/board", label: "Board", icon: KanbanSquare },
   { to: "/scheduler", label: "Scheduler", icon: AlarmClock },
   { to: "/usage", label: "Token Usage", icon: Coins },
   { to: "/settings", label: "Settings", icon: Settings },

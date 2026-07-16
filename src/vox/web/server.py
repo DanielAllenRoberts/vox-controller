@@ -458,6 +458,128 @@ def create_app() -> FastAPI:
             return _not_found("phrase")
         return {"ok": True}
 
+    # --- Workspace board (Trello-like kanban + agent knowledge base; guarded; board_store, idea #51) ---
+    @app.get("/api/board")
+    def get_board() -> dict:
+        mod = _try_import("board")
+        if mod is None:
+            return {"id": None, "name": None, "lists": []}
+        try:
+            return mod.snapshot()
+        except Exception:  # never 500 a read — degrade to an empty board
+            return {"id": None, "name": None, "lists": []}
+
+    @app.get("/api/board/search")
+    def search_board(query: str = "", limit: int = 50) -> list:
+        mod = _try_import("board")
+        if mod is None or not query.strip():
+            return []
+        try:
+            return mod.search(query.strip(), limit)
+        except Exception:
+            return []
+
+    @app.post("/api/board/cards")
+    async def create_board_card(request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _service_unavailable("board")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        title = body.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return _bad_request("'title' is required and must be a non-empty string")
+        list_name = body.get("list")
+        if not isinstance(list_name, str) or not list_name.strip():
+            return _bad_request("'list' (column name) is required")
+        try:
+            return mod.create_card(list_name, title, body.get("body") or "", body.get("tags") or "")
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add card: {exc}")
+
+    @app.patch("/api/board/cards/{card_id}")
+    async def update_board_card(card_id: int, request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _not_found("card")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        # Only forward provided fields; at least one must be present.
+        patch: dict = {}
+        for key in ("title", "body", "tags"):
+            if key in body:
+                patch[key] = body.get(key)
+        if not patch:
+            return _bad_request("provide at least one of 'title', 'body', or 'tags'")
+        if "title" in patch and (not isinstance(patch["title"], str) or not patch["title"].strip()):
+            return _bad_request("'title' must be a non-empty string")
+        try:
+            updated = mod.update_card(card_id, **patch)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not update card: {exc}")
+        if updated is None:
+            return _not_found("card")
+        return updated
+
+    @app.post("/api/board/cards/{card_id}/move")
+    async def move_board_card(card_id: int, request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _not_found("card")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        to_list = body.get("toList")
+        if to_list is None or (isinstance(to_list, str) and not to_list.strip()):
+            return _bad_request("'toList' (target column name or id) is required")
+        position = body.get("position")
+        if position is not None and not isinstance(position, int):
+            return _bad_request("'position' must be an integer when provided")
+        try:
+            moved = mod.move_card(card_id, to_list, position)
+        except Exception as exc:
+            return _bad_request(f"could not move card: {exc}")
+        if moved is None:
+            return _not_found("card or target list")
+        return moved
+
+    @app.delete("/api/board/cards/{card_id}")
+    def delete_board_card(card_id: int):
+        mod = _try_import("board")
+        if mod is None:
+            return _not_found("card")
+        try:
+            removed = bool(mod.delete_card(card_id))
+        except Exception as exc:
+            return _bad_request(f"could not delete card: {exc}")
+        if not removed:
+            return _not_found("card")
+        return {"ok": True}
+
+    @app.post("/api/board/lists")
+    async def create_board_list(request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _service_unavailable("board")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return _bad_request("'name' is required and must be a non-empty string")
+        try:
+            return mod.create_list(name)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add list: {exc}")
+
     # --- Reminders / timers / alarms (guarded; src/vox/scheduler.py, idea #16) ---
     @app.get("/api/reminders")
     def get_reminders() -> list:

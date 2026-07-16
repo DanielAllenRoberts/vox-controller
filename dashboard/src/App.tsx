@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/components/layout/theme";
 import { PageTransition } from "@/components/animate/PageTransition";
 import { Overview } from "@/pages/Overview";
 import { Conversation } from "@/pages/Conversation";
+import { Board } from "@/pages/Board";
 import { Scheduler } from "@/pages/Scheduler";
 import { TokenUsage } from "@/pages/TokenUsage";
 import { Settings } from "@/pages/Settings";
@@ -34,6 +35,14 @@ export default function App() {
           element={
             <PageTransition>
               <Conversation />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="board"
+          element={
+            <PageTransition>
+              <Board />
             </PageTransition>
           }
         />
