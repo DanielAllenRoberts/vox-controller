@@ -20,6 +20,10 @@ dependencies = [
     "onnxruntime>=1.17,<1.21",
     "fastapi>=0.137.1",
     "uvicorn[standard]>=0.49.0",
+    # Vosk — grammar-constrained command recognition (idea #53). Small ~50MB "lookahead" model gives
+    # a fast, mis-hear-proof fast lane for the fixed command set; free-form still goes to Whisper.
+    # Lazy + gated (vosk_commands_enabled, default off) — a missing model/pkg falls back to Whisper.
+    "vosk>=0.3.44",
     "mcp>=1.28.0",
     "kokoro-onnx>=0.5.0",
     "pyobjc-framework-avfoundation>=12.2",

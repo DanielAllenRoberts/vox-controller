@@ -108,7 +108,7 @@ class Config:
     # speech_rms so background never triggers. 1.0 = old single-threshold behaviour; lower = harder to
     # cut you off (but a noisy room can hold the turn open longer, up to max_utterance_seconds).
     end_rms_ratio: float = 0.5
-    silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
+    silence_seconds: float = 0.5         # trailing silence that ends a CONTROL command — short so commands fire fast (assistant/dictation use the longer assistant_silence_seconds below). Raise toward 0.8 if it ends mid-command.
     assistant_silence_seconds: float = 1.8  # pause allowed in ASSISTANT mode before it sends — long enough to think mid-sentence ("um…") without it cutting you off; lower (≈1.2) is snappier, higher (≈2.2) more patient. (Also used by dictation.)
     max_utterance_seconds: float = 15.0  # hard cap on one utterance — long enough not to cut off a full request/reminder
     # Idle (wake-detection) has a SHORTER cap than max_utterance_seconds: a wake phrase / "Vox, …"
@@ -188,6 +188,21 @@ class Config:
         "switch cursor arc safari chrome github youtube gmail spotify notion "
         "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
     )
+
+    # --- Vosk grammar command recognition — the "fast lane" (idea #53) ---------------------------
+    # When ON, a captured CONTROL-mode utterance is first run through Vosk constrained to the CURRENT
+    # command phrases (from the command DB). A confident match runs the command instantly (~5ms, no
+    # Whisper, no LLM) AND snaps mis-hears to the nearest command ("necks tab" → "next tab"). Anything
+    # Vosk can't match ("[unk]") falls through to Whisper exactly as before — a two-lane design.
+    # LAZY + GUARDED: vosk + the ~50MB model load only when this is on; any problem falls back to
+    # Whisper, so the daemon runs with or without it.
+    vosk_commands_enabled: bool = False
+    # Path to a Vosk model dir. "" = auto-find ~/.cache/vox/vosk/vosk-model-* (where the setup
+    # download puts it). Auto-download by lang needs a live cert on alphacephei.com (currently expired),
+    # so prefer a downloaded model. See the Dictionary/#53 notes.
+    vosk_model_path: str = ""
+    vosk_min_conf: float = 0.0    # 0 = accept any grammar match; raise (e.g. 0.5) to reject low-confidence snaps
+    vosk_log: bool = True         # log [vosk] grammar builds + recognitions to vox.log (visibility)
 
     # --- Brains (idea #17) --- Vox routes thinking to one of two configurable "brains":
     #   • small = fast/cheap; default for chat + command execution

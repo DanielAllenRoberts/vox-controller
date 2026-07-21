@@ -215,6 +215,64 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     return text
 
 
+def _fast_lane_extra_phrases(cfg) -> list[str]:
+    """Put common PARAMETERISED app commands on the Vosk fast lane by enumerating known apps — they
+    live in the code parser (not the command DB), so ``active_phrases`` doesn't include them. Vosk
+    recognizes e.g. "switch cursor" / "open slack" and dispatch's parser handles them exactly as if
+    Whisper had transcribed it. The app list comes from ``command_hotwords`` (the curated app names).
+    Truly-open commands ("search X", dictation) can't be enumerated and stay on Whisper."""
+    apps = [w for w in (getattr(cfg, "command_hotwords", "") or "").split() if w and w != "switch"]
+    out: list[str] = []
+    for a in apps:
+        out.append(f"switch {a}")   # app-cycle (the "switch cursor" case)
+        out.append(f"open {a}")     # launch/focus the app
+    # The numbered-overlay triggers live in dispatch (not the command DB), so add them here — this
+    # puts "show clickable" on the fast lane and lets it snap mis-hears ("hard clickable" → the real
+    # phrase) instead of escalating to the LLM.
+    try:
+        out += list(dispatch._SHOW_CLICKABLE_PHRASES)
+    except Exception:
+        pass
+    return out
+
+
+def _recognize(audio, cfg, transcriber, out, hotwords: str = "") -> str:
+    """Two-lane recognition (idea #53). If the Vosk fast lane is on, run the utterance through Vosk
+    constrained to the CURRENT command phrases (from the command DB): a confident grammar match
+    returns instantly (no Whisper, no LLM) and snaps mis-hears to the nearest command
+    ("necks tab" → "next tab"). Anything Vosk can't match falls through to Whisper. Fully guarded —
+    any Vosk problem uses the Whisper lane. All `[vosk]` lines go to vox.log for visibility."""
+    if _setting("vosk_commands_enabled", getattr(cfg, "vosk_commands_enabled", False)):
+        try:
+            from vox import command_cache
+            from vox.stt import vosk_recognizer
+            log = command_cache.log if getattr(cfg, "vosk_log", True) else None
+            app = command_cache.current_app()
+            phrases = command_cache.active_phrases(app) + _fast_lane_extra_phrases(cfg)
+            if log:
+                log(f"  [vosk] grammar: {len(phrases)} phrases [app={app or '-'}] — recognizing…")
+            r = vosk_recognizer.recognize(audio, phrases, cfg.sample_rate,
+                                          model_path=getattr(cfg, "vosk_model_path", ""), log=log)
+            min_conf = float(_setting("vosk_min_conf", getattr(cfg, "vosk_min_conf", 0.0)))
+            if r and r["conf"] >= min_conf:
+                if log:
+                    snap = f" (heard {r['raw']!r})" if r["raw"].lower() != r["text"].lower() else ""
+                    log(f"  [vosk] ⚡ {r['text']!r} conf {r['conf']}{snap} → FAST LANE (skipped Whisper)")
+                if cfg.debug:
+                    out.emit(f"  [debug] heard (vosk): {r['text']!r}")
+                return r["text"]
+            if log:
+                log(f"  [vosk] {'low conf ' + str(r['conf']) if r else 'no match [unk]'} → Whisper lane")
+        except Exception as exc:  # any Vosk problem → Whisper, never break the loop
+            try:
+                from vox import command_cache
+                if getattr(cfg, "vosk_log", True):
+                    command_cache.log(f"  [vosk] unavailable ({exc}) → Whisper lane")
+            except Exception:
+                pass
+    return _transcribe(transcriber, audio, cfg, out, hotwords=hotwords)
+
+
 def _passes_interrupt_gate(audio, text, cfg) -> bool:
     """A mid-call barge-in must be REAL speech, not a blip (loop 1, O7/O8). Require the captured
     audio to be sustained ≥ interrupt_min_seconds AND carry ≥ interrupt_min_words transcribed
@@ -230,7 +288,7 @@ def _passes_interrupt_gate(audio, text, cfg) -> bool:
     return True
 
 
-def _run_interruptible(work, frames, cfg, transcriber, slow=True):
+def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
     """Run work() (a blocking LLM call) on a thread while still listening, so the user can cancel
     it by speaking a stop/sleep/quit/restart phrase (barge-in, idea #19). No echo worries — Vox
     isn't speaking during the call. Returns (result, interrupt): interrupt is None if work
@@ -260,7 +318,11 @@ def _run_interruptible(work, frames, cfg, transcriber, slow=True):
         audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
         if audio is None:
             continue  # silence — loop and re-check whether work() finished
-        text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
+        # Recognize the mid-call utterance via the fast lane first (Vosk ~5ms) so a re-said command
+        # cuts the LLM off INSTANTLY — you never wait on the LLM to give a command. `out` enables the
+        # fast lane + logging; without it, plain Whisper.
+        text = (_recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
+                if out is not None else transcriber.transcribe(audio, hotwords=cfg.command_hotwords))
         if not text:
             continue
         if not _passes_interrupt_gate(audio, text, cfg):
@@ -340,7 +402,7 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             audio = capture_utterance(frames, cfg)
             if audio is None:
                 continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
-            text = _transcribe(transcriber, audio, cfg, out, hotwords=cfg.command_hotwords)
+            text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
             if not text:
                 continue
         if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
@@ -397,11 +459,12 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             pending = []
         else:  # unparsed, or the deterministic attempt found no target → let the brain try
             sounds.play(cfg.sound_thinking)  # "thinking…" cue — the LLM can take a moment
-            # Control-mode executor is small-brain-first (a quick command translation) — it
-            # usually finishes before the poll loop ever captures an utterance, so arm barge-in
-            # only when interrupt_slow_calls_only is off (loop 1, O8).
+            # ARM barge-in on control escalations: the small brain can be a SLOW cloud model
+            # (DeepSeek etc.), and a mis-heard command shouldn't lock you out while it loads. So keep
+            # listening — a re-said command (recognized instantly by the Vosk fast lane) cuts the LLM
+            # off and runs instead. `slow=True` arms it regardless of interrupt_slow_calls_only.
             result, interrupt = _run_interruptible(
-                lambda: executor.execute(text, pending), frames, cfg, transcriber, slow=False)
+                lambda: executor.execute(text, pending), frames, cfg, transcriber, out=out, slow=True)
             if interrupt == "quit":
                 raise _Quit
             if interrupt == "restart":
@@ -531,7 +594,7 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         # Assistant chat is the slow path (full conversational reply, may escalate to the big
         # brain) — worth arming barge-in so a long answer can be cut off (loop 1).
         result, interrupt = _run_interruptible(
-            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber, slow=True)
+            lambda: assistant.respond_turn(text, history), frames, cfg, transcriber, out=out, slow=True)
         if interrupt == "quit":
             raise _Quit
         if interrupt == "restart":

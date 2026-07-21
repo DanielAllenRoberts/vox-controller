@@ -155,6 +155,28 @@ def resolve(text: str, *, app: str | None = None, domain: str | None = None,
     return None
 
 
+def active_phrases(app: str | None = None) -> list[str]:
+    """The enabled command phrases for the current focus (focused-app + global), flattened — this is
+    the grammar for the Vosk fast lane (idea #53). Regex phrases are skipped (a grammar wants literal
+    phrases). App phrases first, then global; deduped case-insensitively."""
+    if app is None:
+        app = _CURRENT_APP
+    out: list[str] = []
+    seen: set[str] = set()
+    pools: list[list[dict]] = []
+    if app and app in _APP_CACHE:
+        pools.append(_APP_CACHE[app])
+    pools.append(_BASE)
+    for pool in pools:
+        for c in pool:
+            for p in c.get("phrases", []):
+                t = (p.get("text") or "").strip()
+                if t and p.get("match_type") != "regex" and t.lower() not in seen:
+                    seen.add(t.lower())
+                    out.append(t)
+    return out
+
+
 # --- internals -----------------------------------------------------------------------------------
 
 def _commands_for(conn, kind: str, match_value: str | None) -> list[dict]:

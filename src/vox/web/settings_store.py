@@ -310,6 +310,17 @@ _SCHEMA_META: list[dict] = [
                 "Off = built-in commands only. Applies live — no restart.",
     },
     {
+        "key": "vosk_commands_enabled",
+        "label": "Vosk command fast-lane",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Recognise CONTROL-mode commands with a fast, grammar-constrained Vosk model (built "
+                "from your command phrases) BEFORE Whisper — near-instant and mis-hear-proof for known "
+                "commands ('necks tab' → 'next tab'); anything else falls through to Whisper. Needs "
+                "the Vosk model on disk (~/.cache/vox/vosk). Applies live — watch vox.log for [vosk] "
+                "lines.",
+    },
+    {
         "key": "command_db_log",
         "label": "Log command DB activity",
         "group": "Commands",

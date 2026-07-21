@@ -544,6 +544,8 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 
 ## 53. Pluggable + streaming STT recognizers (Vosk grammar commands · streaming partials · typed-arg grammar)
 
+> **Status:** ✅ **grammar-command fast lane BUILT** (2026-07-16, gated off). `vosk` dep + `src/vox/stt/vosk_recognizer.py` (grammar from the command DB's `command_cache.active_phrases`, `[unk]`-stripping, recognizer cached per grammar, C++ stderr suppressed) + `core/loop._recognize` two-lane wiring in CONTROL mode + `[vosk]` logging. Verified: ~4–7 ms after warmup, mis-hears snap to the nearest command ("necks tab"→"next tab"), out-of-vocab words (chatgpt/figma) skip gracefully → Whisper. Gated by `vosk_commands_enabled` (default OFF). **Model:** alphacephei.com's TLS cert is expired, so auto-download is broken — user downloaded the official small model to `~/.cache/vox/vosk/` (auto-found). **Streaming partials** + **typed-arg grammar** (the other two levers) still to build. Full research: [`research/dictation-stt-tools.md`](research/dictation-stt-tools.md).
+
 **Vision:** formalize STT behind a recognizer interface and add a **Vosk** backend alongside faster-whisper to unlock three levers documented in [`research/dictation-stt-tools.md`](research/dictation-stt-tools.md):
 1. **Grammar-constrained command recognition** — compile the command-DB's active phrases into a Vosk JSON grammar so spoken commands snap to an exact command (or `[unk]`) with no Whisper+LLM round-trip. Highest ROI; reuses the command-DB we already built (#36).
 2. **Streaming partial transcripts** — Vosk emits live partials per audio chunk → live captions + a self-correcting loop (show Vosk instantly, replace with Whisper-final). Feeds the live conversation viewer (#43).
