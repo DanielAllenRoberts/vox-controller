@@ -258,6 +258,14 @@ def _split_chunks(text: str, max_chars: int = 200) -> list[str]:
     return out or ([text.strip()] if text.strip() else [])
 
 
+def _close_quietly(stream) -> None:
+    """Close a finished OutputStream off the voice loop — see the teardown note in play()."""
+    try:
+        stream.close()
+    except Exception:
+        pass
+
+
 class _StreamingPlayer:
     """Synthesizes Kokoro chunks on a worker thread and plays them through one sounddevice
     OutputStream fed by a bounded float32 queue. `play()` blocks until the whole reply has played
@@ -326,17 +334,30 @@ class _StreamingPlayer:
             if eos and buf.size == 0:
                 raise sd.CallbackStop()
 
+        stream = sd.OutputStream(samplerate=self._sr, channels=1, dtype="float32",
+                                 blocksize=1024, callback=callback,
+                                 finished_callback=self._done.set)
+        stream.start()
         try:
             deadline = time.monotonic() + 60.0  # absolute backstop: never hang the daemon (spoken replies are short)
-            with sd.OutputStream(samplerate=self._sr, channels=1, dtype="float32",
-                                 blocksize=1024, callback=callback,
-                                 finished_callback=self._done.set):
-                # Block until playback finishes (end-of-stream reached) or stop() fires.
-                while not self._done.wait(timeout=0.05):
-                    if self._stop.is_set() or time.monotonic() > deadline:
-                        break
+            # Block until playback finishes (end-of-stream reached) or stop() fires.
+            while not self._done.wait(timeout=0.05):
+                if self._stop.is_set() or time.monotonic() > deadline:
+                    break
         finally:
             self._stop.set()  # ensure the synth worker exits even if playback ended early
+            # Tear the stream down WITHOUT Pa_StopStream. `with sd.OutputStream(...)` used to do the
+            # teardown, but its __exit__ calls stop() — which WAITS for the buffers to drain and
+            # deadlocks on an audio-device change (opening Spotify, a Bluetooth/headphone switch).
+            # That wedged the whole voice loop with no audio and no log line, past every backstop
+            # above, and left the process needing a kill. Same CoreAudio trap MicStream documents:
+            # abort() is immediate, and close() runs off the loop so even a stuck close can't freeze
+            # the daemon (a leaked stream object is cheap next to a dead assistant).
+            try:
+                stream.abort()  # Pa_AbortStream — returns at once, doesn't drain
+            except Exception:
+                pass
+            threading.Thread(target=_close_quietly, args=(stream,), daemon=True).start()
             synth.join(timeout=2.0)
 
     def _synth_worker(self, chunks: list[str]) -> None:
