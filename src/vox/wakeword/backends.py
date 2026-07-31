@@ -40,12 +40,23 @@ class WhisperWakeBackend:
                 return label
         return None
 
-    def listen(self, frames) -> str:
+    def listen(self, frames, mic=None) -> str:
         while True:
-            audio = capture_utterance(frames, self._cfg)
+            # Idle uses a shorter capture cap than active modes: a wake phrase / "Vox, …" one-shot is
+            # at the START of the utterance, so decoding a long ambient monologue here is wasted CPU
+            # (and the RAM spikes that make the machine freeze while idle in a talky room).
+            audio = capture_utterance(
+                frames, self._cfg,
+                max_seconds=getattr(self._cfg, "idle_max_utterance_seconds", self._cfg.max_utterance_seconds))
             if audio is None:
                 continue
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
+            # Passing/ambient audio that piled up in the mic buffer WHILE we were transcribing is
+            # stale — drop it so idle stays synced to LIVE audio instead of working through a growing
+            # backlog. In a talky room that backlog would otherwise lag, accumulate, and pile on
+            # needless transcriptions (and, if the CPU is throttled, grow the queue unbounded).
+            if mic is not None:
+                mic.flush()
             label = self.match(text)
             cmd = None if label is not None else self._oneshot(text)
             if self._cfg.debug and self._out is not None and text.strip():
@@ -59,13 +70,19 @@ class WhisperWakeBackend:
                 return "do:" + cmd
 
     def _oneshot(self, text: str) -> str | None:
-        # "Vox, <command>" from idle → run it once (no "hey" = command, not chat).
-        from vox import actions
-        t = normalize(text)
-        if not t.startswith("vox "):
+        # "Vox, <anything>" from idle → run it once, routed through the FULL shared dispatch
+        # (deterministic command / scheduler / what-app, else the executor for compose / rewrite /
+        # vision / fuzzy). We don't require it to be a known command (that gate blocked "vox what can
+        # you see" / "vox set a timer"). Tolerate (a) leading filler — "um vox search…", "so vox open…"
+        # — and (b) the very common "vox"→"box"/"fox" mishear. The name must still be the FIRST real
+        # word (re.match anchors it), so mid-sentence "vox" doesn't fire; stray "box …" chatter that
+        # slips through is IGNOREd downstream by the executor.
+        t = re.sub(r"^(?:(?:um|uh|er|ah|oh|so|okay|ok|well|and|now|like|yeah|right|alright)\s+)+",
+                   "", normalize(text))
+        m = re.match(r"(?:vox|vocks|vaux|fox|box)\s+(.+)", t)
+        if not m:
             return None
-        rest = t[4:].strip()
-        return rest if actions.parse(rest) else None
+        return m.group(1).strip() or None
 
 
 class OpenWakeWordBackend:
@@ -74,7 +91,9 @@ class OpenWakeWordBackend:
         self._labels = dict(phrase_to_label)
         self.prompt = prompt
 
-    def listen(self, frames) -> str:
+    def listen(self, frames, mic=None) -> str:
+        # mic accepted for interface parity with WhisperWakeBackend; openWakeWord drains frames
+        # continuously and per-frame, so there's no transcription backlog to flush.
         for frame in frames:
             fired = self._detector.fired(frame)
             if fired is not None:

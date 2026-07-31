@@ -1,21 +1,45 @@
 """Microphone capture. Yields fixed-size int16 frames from the default input device."""
 
 import queue
+import threading
+import time
 from collections import deque
 
 import numpy as np
 import sounddevice as sd
 
 
+class MicStreamDead(Exception):
+    """Raised by ``frames()`` when the input has been starved of audio long enough that in-process
+    recovery isn't bringing it back — typically a macOS audio-device change PortAudio can't re-bind
+    to. The daemon catches this and does a clean self-restart (a fresh process reliably re-acquires
+    the mic) instead of wedging silently in ``queue.get`` — the "freezes after a while" bug."""
+
+
 class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
-    def __init__(self, sample_rate: int, frame_samples: int, device: int | None = None):
+    def __init__(self, sample_rate: int, frame_samples: int, device: int | None = None,
+                 on_log=None, stall_restart_seconds: float = 12.0):
         self._sample_rate = sample_rate
         self._frame_samples = frame_samples
         self._device = device
+        self._on_log = on_log                    # surface recovery events to vox.log, not just stdout
+        self._stall_restart_seconds = stall_restart_seconds
         self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._stall_since: float | None = None   # monotonic time the current stall began (None = healthy)
+        self._ever_healthy = False               # have we EVER received a frame? (guards restart loops)
+        self._recovering = False                 # a background re-open is in flight
+        self._recover_attempts = 0
         self._stream = self._make_stream()
+
+    def _log(self, msg: str) -> None:
+        print(msg, flush=True)
+        try:
+            if self._on_log:
+                self._on_log(msg)
+        except Exception:
+            pass
 
     def _make_stream(self):
         return sd.InputStream(
@@ -33,26 +57,67 @@ class MicStream:
 
     def frames(self):
         """Generator yielding one int16 frame at a time. Healthy streams deliver a frame every
-        ~80 ms (even silence), so if nothing arrives for a few seconds the input stalled (e.g. the
-        audio device changed) — restart it so Vox keeps listening instead of hanging silently."""
+        ~80 ms (even in silence). If nothing arrives for a few seconds the input stalled (commonly an
+        audio-device change — opening an app that grabs audio, a Bluetooth/headphone switch): we
+        re-open the stream in the background, and if audio still doesn't return within
+        ``stall_restart_seconds`` we raise ``MicStreamDead`` so the daemon self-restarts, instead of
+        hanging silently in ``queue.get`` forever."""
         while True:
             try:
-                yield self._queue.get(timeout=3.0)
+                frame = self._queue.get(timeout=3.0)
             except queue.Empty:
-                print("⚠️  mic input stalled — restarting the audio stream…")
-                self._restart()
+                self._on_stall()
+                continue
+            self._stall_since = None
+            self._ever_healthy = True
+            self._recover_attempts = 0
+            yield frame
 
-    def _restart(self) -> None:
+    def _on_stall(self) -> None:
+        now = time.monotonic()
+        if self._stall_since is None:
+            self._stall_since = now
+        self._kick_recovery()
+        # If the mic had been working and we've now been starved past the budget, in-process recovery
+        # isn't working (PortAudio can't re-bind the changed device) → ask for a clean process restart.
+        # Guarded by _ever_healthy so a mic that NEVER produced audio (permission/config) can't loop.
+        if self._ever_healthy and now - self._stall_since >= self._stall_restart_seconds:
+            raise MicStreamDead(f"no mic audio for {now - self._stall_since:.0f}s "
+                                f"after {self._recover_attempts} re-open attempt(s)")
+
+    def _kick_recovery(self) -> None:
+        if self._recovering:
+            return  # one re-open at a time; a stuck teardown can't block the main loop (daemon thread)
+        self._recovering = True
+        self._recover_attempts += 1
+        self._log(f"⚠️  mic input stalled — re-opening the audio stream (attempt {self._recover_attempts})…")
+        threading.Thread(target=self._recover, daemon=True).start()
+
+    def _recover(self) -> None:
+        """Re-open the input stream OFF the main loop. Tearing the old stream down (Pa_StopStream →
+        CoreAudio DeviceStop) can deadlock on a device change, so we do it on a daemon thread — if it
+        wedges, the main loop is unaffected and the watchdog in _on_stall still triggers a restart."""
         try:
-            self._stream.stop()
-            self._stream.close()
-        except Exception:
-            pass
-        try:
-            self._stream = self._make_stream()
-            self._stream.start()
-        except Exception as exc:
-            print(f"⚠️  couldn't restart mic stream ({exc}); will retry…")
+            old, self._stream = self._stream, None
+            try:
+                if old is not None:
+                    old.abort()  # Pa_AbortStream — doesn't wait for buffers to drain like stop()
+                    old.close()
+            except Exception:
+                pass
+            try:
+                sd._terminate(); sd._initialize()  # re-enumerate devices after a device change
+            except Exception:
+                pass
+            try:
+                stream = self._make_stream()
+                stream.start()
+                self._stream = stream
+                self._log("🎙️  mic stream re-opened — listening again.")
+            except Exception as exc:
+                self._log(f"⚠️  couldn't re-open mic ({exc}); will retry…")
+        finally:
+            self._recovering = False
 
     def flush(self) -> None:
         """Drop buffered frames (e.g. audio captured while Vox was speaking) so the next read
@@ -68,8 +133,13 @@ class MicStream:
         return self
 
     def __exit__(self, *exc) -> None:
-        self._stream.stop()
-        self._stream.close()
+        s = self._stream
+        if s is not None:
+            try:
+                s.abort()  # abort (non-blocking), not stop() — avoids the CoreAudio teardown deadlock
+                s.close()
+            except Exception:
+                pass
 
 
 class VPIOMicStream:
@@ -99,7 +169,6 @@ class VPIOMicStream:
         # Lazy import — only on the AEC path. Any ImportError propagates to the caller's fallback.
         import AVFoundation as AV
 
-        self._AV = AV
         self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
         # Carries leftover int16 samples between tap callbacks so we can emit exact frame_samples frames.
         self._residual = np.empty(0, dtype=np.int16)
@@ -112,56 +181,79 @@ class VPIOMicStream:
         if not ok:
             raise RuntimeError(f"setVoiceProcessingEnabled failed: {err}")
 
+        # Voice processing DUCKS other audio output (it treats the session like a call) — that's why
+        # the speakers go quiet while AEC is on ("loud then softer"). Set ducking to its MINIMUM level
+        # so AEC keeps cancelling echo WITHOUT noticeably dimming playback. Guarded: older macOS lacks
+        # this API (macOS 14+), and a failure just means the (louder) default ducking stays.
+        try:
+            duck = AV.AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                False, AV.AVAudioVoiceProcessingOtherAudioDuckingLevelMin)
+            self._input.setVoiceProcessingOtherAudioDuckingConfiguration_(duck)
+        except Exception as exc:
+            print(f"⚠️  couldn't lower AEC audio ducking ({exc}); speakers may dim while AEC is on")
+
         self._in_fmt = self._input.outputFormatForBus_(0)
         if self._in_fmt is None or self._in_fmt.sampleRate() == 0:
             raise RuntimeError("VPIO input node has no valid format (mic unavailable?)")
         self._in_sr = float(self._in_fmt.sampleRate())
+        self._in_ch = max(1, int(self._in_fmt.channelCount()))
+        self._in_interleaved = bool(self._in_fmt.isInterleaved())
 
-        # Target: 16 kHz mono float32 (non-interleaved). We convert float32 -> int16 ourselves so the
-        # frames are byte-identical to sounddevice's dtype="int16" output.
-        self._target_fmt = AV.AVAudioFormat.alloc().initWithCommonFormat_sampleRate_channels_interleaved_(
-            AV.AVAudioPCMFormatFloat32, float(sample_rate), 1, False
-        )
-        self._converter = AV.AVAudioConverter.alloc().initFromFormat_toFormat_(self._in_fmt, self._target_fmt)
-        if self._converter is None:
-            raise RuntimeError("could not create AVAudioConverter for VPIO -> 16k mono")
-
+        # The input node delivers float32 at the hardware rate, and this device exposes it as MULTIPLE
+        # channels (e.g. 6ch @ 48 kHz). We take channel 0 (the primary, echo-cancelled mic) and
+        # down-sample to 16 kHz ourselves in numpy (see _resample_to_16k). The previous AVAudioConverter
+        # asked it to do 6→1 channels AND 48k→16k in ONE step, which it refused (returned status=Error →
+        # all-zero frames: the "AEC captures nothing" bug); doing it directly is simpler and robust.
         self._install_tap()
 
     def _install_tap(self) -> None:
-        AV = self._AV
-        ratio = self._sample_rate / self._in_sr
-
         def tap_block(buffer, when):
             try:
                 frames_in = buffer.frameLength()
                 if frames_in == 0:
                     return
-                cap = int(frames_in * ratio) + 16
-                out_buf = AV.AVAudioPCMBuffer.alloc().initWithPCMFormat_frameCapacity_(self._target_fmt, cap)
-                consumed = {"done": False}
-
-                def input_block(packet_count, status_ptr):
-                    if consumed["done"]:
-                        status_ptr[0] = AV.AVAudioConverterInputStatus_NoDataNow
-                        return None
-                    consumed["done"] = True
-                    status_ptr[0] = AV.AVAudioConverterInputStatus_HaveData
-                    return buffer
-
-                self._converter.convertToBuffer_error_withInputFromBlock_(out_buf, None, input_block)
-                n = out_buf.frameLength()
-                if n == 0:
+                channels = buffer.floatChannelData()
+                if channels is None:
                     return
-                ptr = out_buf.floatChannelData()[0]
-                samples = np.frombuffer(ptr.as_buffer(n * 4), dtype=np.float32, count=n)
+                # Take channel 0 (the primary, echo-cancelled mic). Non-interleaved → channel 0 is a
+                # contiguous block of `frames_in` floats; interleaved → stride by the channel count.
+                if self._in_interleaved and self._in_ch > 1:
+                    inter = np.frombuffer(channels[0].as_buffer(frames_in * self._in_ch * 4),
+                                          dtype=np.float32, count=frames_in * self._in_ch)
+                    mono = inter[0::self._in_ch].astype(np.float32)
+                else:
+                    mono = np.frombuffer(channels[0].as_buffer(frames_in * 4),
+                                         dtype=np.float32, count=frames_in).astype(np.float32)
+                mono = self._resample_to_16k(mono)
+                if mono.size == 0:
+                    return
                 # float32 [-1,1] -> int16, matching sounddevice's int16 capture.
-                i16 = np.clip(samples * 32768.0, -32768, 32767).astype(np.int16)
+                i16 = np.clip(mono * 32768.0, -32768, 32767).astype(np.int16)
                 self._emit(i16)
             except Exception as exc:  # never let an exception escape into the CoreAudio render thread
                 print(f"⚠️  VPIO tap error ({exc}); continuing…")
 
         self._input.installTapOnBus_bufferSize_format_block_(0, 4096, self._in_fmt, tap_block)
+
+    def _resample_to_16k(self, mono: np.ndarray) -> np.ndarray:
+        """Down-sample channel-0 float32 audio from the input node's rate to the target 16 kHz. For an
+        integer ratio (typically 48k→16k = 3) this box-averages each group of `factor` samples — a
+        cheap anti-aliasing decimation that's ample for speech — otherwise it linearly resamples."""
+        in_sr, target = self._in_sr, float(self._sample_rate)
+        if in_sr == target or mono.size == 0:
+            return mono
+        factor = in_sr / target
+        nearest = int(round(factor))
+        if nearest >= 1 and abs(factor - nearest) < 1e-6:  # exact integer ratio (e.g. 48k→16k = 3)
+            m = (mono.size // nearest) * nearest
+            if m == 0:
+                return np.empty(0, dtype=np.float32)
+            return mono[:m].reshape(-1, nearest).mean(axis=1).astype(np.float32)
+        n = int(round(mono.size * target / in_sr))  # non-integer ratio → linear resample
+        if n <= 0:
+            return np.empty(0, dtype=np.float32)
+        return np.interp(np.linspace(0, mono.size, n, endpoint=False),
+                         np.arange(mono.size), mono).astype(np.float32)
 
     def _emit(self, i16: np.ndarray) -> None:
         """Buffer incoming samples and slice them into exact frame_samples int16 frames."""
@@ -219,13 +311,16 @@ class VPIOMicStream:
             pass
 
 
-def open_mic_stream(cfg):
+def open_mic_stream(cfg, out=None):
     """Open the mic backend chosen by config, with a hard fallback to the sounddevice MicStream.
 
     When `cfg.audio_aec` is true, try the native VoiceProcessingIO backend (system AEC). On ANY
     failure — PyObjC missing, mic permission denied, engine/tap/convert error — log a warning and
     fall back to the sounddevice `MicStream`, so the daemon never loses its mic. Default
-    (`audio_aec` false) returns the sounddevice MicStream directly — byte-for-byte today's behavior.
+    (`audio_aec` false) returns the sounddevice MicStream directly.
+
+    `out` (the daemon's ConsoleOutput) lets MicStream log stall/recovery events to vox.log, not just
+    stdout — so a mic stall is visible after the fact instead of a silent freeze.
 
     Returns an UNSTARTED stream; the caller enters it as a context manager exactly like MicStream.
     """
@@ -236,7 +331,9 @@ def open_mic_stream(cfg):
             return stream
         except Exception as exc:
             print(f"⚠️  VPIO/AEC mic unavailable ({exc}); falling back to sounddevice mic")
-    return MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device)
+    return MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device,
+                     on_log=(out.emit if out is not None else None),
+                     stall_restart_seconds=getattr(cfg, "mic_stall_restart_seconds", 12.0))
 
 
 def rms(frame: np.ndarray) -> float:
@@ -264,24 +361,32 @@ def _smart_turn_complete(collected, cfg) -> bool | None:
     try:
         from vox import turn_detector
         audio = np.concatenate(collected)
-        return turn_detector.is_complete(audio, cfg.sample_rate)
+        threshold = float(_setting("smart_turn_threshold", getattr(cfg, "smart_turn_threshold", 0.5)))
+        return turn_detector.is_complete(audio, cfg.sample_rate, threshold)
     except Exception:
         return None  # SmartTurnUnavailable or anything else → fall back to fixed silence
 
 
-def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None):
+def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, max_seconds=None):
     """Wait for speech onset (keeping a short pre-roll), then record until trailing
     silence. Returns int16 audio, or None if no speech arrives within listen_timeout.
 
     `silence_seconds` overrides how long a pause ends the utterance (default: cfg value).
     `listen_timeout` overrides how long to wait for speech to start (default: cfg value) —
     used to be more patient when Vox has just asked the user a question.
+    `max_seconds` overrides the hard cap on one utterance (default: cfg.max_utterance_seconds) —
+    idle wake-detection passes a shorter cap so it doesn't decode long ambient monologues.
     """
     sr, fs = cfg.sample_rate, cfg.frame_samples
     sil = cfg.silence_seconds if silence_seconds is None else silence_seconds
     wait = cfg.listen_timeout_seconds if listen_timeout is None else listen_timeout
+    cap = cfg.max_utterance_seconds if max_seconds is None else max_seconds
+    # Hysteresis: onset needs the full speech_rms (below), but once we're collecting, a frame only
+    # counts as silence under this LOWER release threshold — so soft/trailing speech doesn't end the
+    # turn mid-sentence. end_rms_ratio=1.0 restores the old single-threshold behaviour.
+    end_rms = cfg.speech_rms * getattr(cfg, "end_rms_ratio", 1.0)
     silence_limit = int(sil * sr / fs)
-    max_frames = int(cfg.max_utterance_seconds * sr / fs)
+    max_frames = int(cap * sr / fs)
     wait_frames = int(wait * sr / fs)
 
     # Semantic turn-detection (loop 4): when turn_detection=="smart_turn", a trailing pause of
@@ -309,7 +414,7 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None):
     while len(collected) < max_frames:
         frame = next(frames)
         collected.append(frame)
-        if rms(frame) < cfg.speech_rms:
+        if rms(frame) < end_rms:
             silent += 1
             if smart_on:
                 if silent >= max_silent:

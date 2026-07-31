@@ -124,6 +124,23 @@ def _is_mac() -> bool:
     return sys.platform == "darwin"
 
 
+def _enable_manual_ax() -> None:
+    """Best-effort: tell the focused app to expose its full accessibility tree. Electron/Chromium
+    apps (Slack, Discord, VS Code/Cursor, Teams…) only build their web-content AX tree once an
+    assistive client sets ``AXManualAccessibility`` — without this their windows read as nearly empty.
+    Idempotent + guarded; a short settle lets a cold app build the tree before we read it."""
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to tell (first process whose frontmost is true) '
+             'to set value of attribute "AXManualAccessibility" to true'],
+            capture_output=True, timeout=4)
+        import time
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+
 def _run_osa(script: str) -> tuple[bool, str]:
     """Shell osascript once. Mirrors ``actions._osa`` failure handling."""
     try:
@@ -187,6 +204,7 @@ def snapshot() -> dict:
     """
     if not _is_mac():
         return {"error": "AX tree is only available on macOS"}
+    _enable_manual_ax()  # so Electron/Chromium apps expose their web content (else the tree is blank)
     script = _SCRIPT % {
         "vmax": VALUE_MAXLEN,
         "maxd": MAX_DEPTH,
@@ -207,6 +225,49 @@ def snapshot() -> dict:
         "capturedAt": datetime.now(timezone.utc).isoformat(),
         "tree": tree,
     }
+
+
+# Max characters of flattened tree text handed to the brain. Keeps the vision
+# prompt token-light vs an image; a clipped tree ends with a "… (clipped)" marker.
+TEXT_MAXLEN = 6000
+
+
+def _flatten(node: dict, depth: int, out: list[str]) -> None:
+    """Append one compact ``  role: title = value`` line per node, indented by depth."""
+    role = node.get("role", "?")
+    title = node.get("title", "")
+    value = node.get("value", "")
+    line = "  " * depth + role
+    if title:
+        line += f": {title}"
+    if value:
+        line += f" = {value}"
+    out.append(line)
+    for child in node.get("children", []):
+        _flatten(child, depth + 1, out)
+
+
+def snapshot_text() -> dict:
+    """Compact indented-text view of the focused app's AX tree for the brain's vision path.
+
+    Returns ``{"app", "text"}`` on success or ``{"error": str}`` (off-mac / failure /
+    empty tree) so the caller can fall back to a screenshot. Never raises. ``text`` is
+    capped at ``TEXT_MAXLEN`` chars to stay token-light vs sending an image.
+    """
+    snap = snapshot()
+    if "error" in snap:
+        return {"error": snap["error"]}
+    tree = snap.get("tree") or {}
+    lines: list[str] = []
+    _flatten(tree, 0, lines)
+    text = "\n".join(lines).strip()
+    # A genuinely empty read can rebuild to a lone placeholder root ("?") with no
+    # content — treat that as empty too so "auto" mode falls back to a screenshot.
+    if not text or text == "?":
+        return {"error": "empty AX tree"}
+    if len(text) > TEXT_MAXLEN:
+        text = text[:TEXT_MAXLEN].rstrip() + "\n… (clipped)"
+    return {"app": snap.get("app", ""), "text": text}
 
 
 if __name__ == "__main__":  # python -m vox.web.axtree — quick manual check

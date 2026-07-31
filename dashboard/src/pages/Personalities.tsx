@@ -290,6 +290,29 @@ function useUpdateCustom(onDone: () => void) {
 }
 
 // ---------------------------------------------------------------------------
+// Set a persona's voice (works for presets — the bridge stores an override).
+// ---------------------------------------------------------------------------
+
+function useSetVoice() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: ({ id, suggestedVoice }: { id: string; suggestedVoice: string }) =>
+      api.setPersonalityVoice(id, { suggestedVoice }),
+    onSuccess: (updated) => {
+      qc.invalidateQueries({ queryKey: PERSONALITIES_KEY });
+      toast({
+        variant: "success",
+        title: "Voice updated",
+        description: `${updated.name} → ${updated.suggestedVoice || "default"}`,
+      });
+    },
+    onError: () =>
+      toast({ variant: "error", title: "Couldn't update voice" }),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Delete custom persona.
 // ---------------------------------------------------------------------------
 
@@ -404,6 +427,49 @@ function DefaultCard({
 }
 
 // ---------------------------------------------------------------------------
+// Voice picker — the (now editable) pill on each card. Changes a persona's macOS
+// `say` voice; works for presets too (the bridge stores an override). The current
+// value is always offered even if it's not installed, so it can't be lost.
+// ---------------------------------------------------------------------------
+
+function VoicePicker({
+  value,
+  voices,
+  onChange,
+}: {
+  value: string;
+  voices: string[];
+  onChange: (voice: string) => void;
+}) {
+  const options =
+    value && !voices.includes(value) ? [value, ...voices] : voices;
+  return (
+    <Select
+      value={value || NO_VOICE}
+      onValueChange={(v) => onChange(v === NO_VOICE ? "" : v)}
+    >
+      <SelectTrigger
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+        aria-label="Voice"
+        className="h-7 w-auto gap-1.5 rounded-full border-border/70 bg-muted/60 px-2.5 text-[11px] font-medium text-foreground-secondary"
+      >
+        <AudioLines className="h-3 w-3 shrink-0 text-accent" />
+        <SelectValue placeholder="Set voice" />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={NO_VOICE}>Default voice</SelectItem>
+        {options.map((v) => (
+          <SelectItem key={v} value={v}>
+            {v}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Persona card.
 // ---------------------------------------------------------------------------
 
@@ -415,6 +481,8 @@ function PersonaCard({
   onView,
   onEdit,
   onDelete,
+  voices,
+  onSetVoice,
 }: {
   persona: Personality;
   active: boolean;
@@ -423,14 +491,25 @@ function PersonaCard({
   onView?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
+  voices: string[];
+  onSetVoice?: (voice: string) => void;
 }) {
   return (
-    <button
-      type="button"
+    // A div (not a <button>) so the voice <Select> can live inside it without nested-button issues;
+    // click / Enter / Space still activate the persona.
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onActivate}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onActivate();
+        }
+      }}
       aria-pressed={active}
       className={cn(
-        "group relative flex h-full w-full flex-col rounded-2xl text-left transition-all duration-200",
+        "group relative flex h-full w-full cursor-pointer flex-col rounded-2xl text-left transition-all duration-200",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
         pending && "opacity-70",
       )}
@@ -501,11 +580,12 @@ function PersonaCard({
         </div>
 
         <div className="mt-4 flex items-center justify-between gap-2">
-          {persona.suggestedVoice ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-foreground-secondary">
-              <AudioLines className="h-3 w-3 text-accent" />
-              {persona.suggestedVoice}
-            </span>
+          {persona.id !== "default" && onSetVoice ? (
+            <VoicePicker
+              value={persona.suggestedVoice || ""}
+              voices={voices}
+              onChange={onSetVoice}
+            />
           ) : (
             <span />
           )}
@@ -579,7 +659,7 @@ function PersonaCard({
           </div>
         </div>
       </Card>
-    </button>
+    </div>
   );
 }
 
@@ -1040,6 +1120,14 @@ export function Personalities() {
     ? (setActive.variables ?? null)
     : null;
 
+  const setVoice = useSetVoice();
+  const { data: voicesData } = useQuery({
+    queryKey: ["voices"],
+    queryFn: api.voices,
+    staleTime: 5 * 60_000, // installed voices rarely change
+  });
+  const voices = voicesData?.voices ?? [];
+
   const [createOpen, setCreateOpen] = React.useState(false);
   const [toEdit, setToEdit] = React.useState<Personality | null>(null);
   const [toView, setToView] = React.useState<Personality | null>(null);
@@ -1145,6 +1233,10 @@ export function Personalities() {
                       if (p.id !== activeId) setActive.mutate(p.id);
                     }}
                     onView={() => setToView(p)}
+                    voices={voices}
+                    onSetVoice={(v) =>
+                      setVoice.mutate({ id: p.id, suggestedVoice: v })
+                    }
                   />
                 </StaggerItem>
               ))}
@@ -1172,6 +1264,10 @@ export function Personalities() {
                       onView={() => setToView(p)}
                       onEdit={() => setToEdit(p)}
                       onDelete={() => setToDelete(p)}
+                      voices={voices}
+                      onSetVoice={(v) =>
+                        setVoice.mutate({ id: p.id, suggestedVoice: v })
+                      }
                     />
                   </StaggerItem>
                 ))}

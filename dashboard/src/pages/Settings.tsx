@@ -8,6 +8,7 @@ import {
   RotateCcw,
   Zap,
   ShieldCheck,
+  MessageCircle,
 } from "lucide-react";
 import { api, type Setting } from "@/lib/api";
 import { PageHeader } from "@/components/PageHeader";
@@ -44,12 +45,17 @@ const GROUP_META: Record<string, { icon: typeof Brain; blurb: string }> = {
     icon: AudioLines,
     blurb: "Speech output and interruption during a call.",
   },
+  "MCP voice": {
+    icon: MessageCircle,
+    blurb:
+      "The vox-speak MCP's heads-up voice — kept separate from the system voice so the IDE assistant sounds different from Vox. Reload the MCP server to apply.",
+  },
   Debug: {
     icon: Bug,
     blurb: "Diagnostics. Verbose — leave off unless you're tracing an issue.",
   },
 };
-const GROUP_ORDER = ["Brains", "Behavior", "Voice", "Debug"];
+const GROUP_ORDER = ["Brains", "Behavior", "Voice", "MCP voice", "Debug"];
 
 // A setting "needs a restart" when its help says so (settings_store encodes this
 // in the help text); otherwise the override takes effect on the next call.

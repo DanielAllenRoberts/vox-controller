@@ -203,11 +203,13 @@ _DEFAULT: dict = {
 # Stored shape: {"active": "<id or ''>", "custom": [Personality, ...]}.
 
 def _empty_state() -> dict:
-    return {"active": "", "custom": []}
+    return {"active": "", "custom": [], "voiceOverrides": {}}
 
 
 def _load_state() -> dict:
-    """Load the persisted ``{active, custom}`` state (empty default if missing/corrupt)."""
+    """Load the persisted ``{active, custom, voiceOverrides}`` state (empty default if missing/corrupt).
+    ``voiceOverrides`` maps a preset id → ``{suggestedVoice?, kokoroVoice?}`` so a code-defined preset
+    can have its voice changed without ever writing the preset itself."""
     if not _STORE.exists():
         return _empty_state()
     try:
@@ -219,10 +221,24 @@ def _load_state() -> dict:
         return _empty_state()
     active = data.get("active")
     custom = data.get("custom")
+    overrides = data.get("voiceOverrides")
     return {
         "active": active if isinstance(active, str) else "",
         "custom": [c for c in custom if isinstance(c, dict)] if isinstance(custom, list) else [],
+        "voiceOverrides": overrides if isinstance(overrides, dict) else {},
     }
+
+
+def _apply_overrides(p: dict, overrides: dict) -> dict:
+    """Return a copy of a preset/personality with any saved voice override merged in."""
+    merged = dict(p)
+    ov = overrides.get(p.get("id")) if isinstance(overrides, dict) else None
+    if isinstance(ov, dict):
+        if ov.get("suggestedVoice") is not None:
+            merged["suggestedVoice"] = ov["suggestedVoice"] or None
+        if ov.get("kokoroVoice") is not None:
+            merged["kokoroVoice"] = ov["kokoroVoice"] or ""
+    return merged
 
 
 def _save_state(state: dict) -> None:
@@ -262,9 +278,10 @@ def all() -> dict:  # noqa: A001 - matches the contract's API name
     with _LOCK:
         state = _load_state()
     active = state["active"] or _DEFAULT_ID
+    ov = state["voiceOverrides"]
     return {
         "active": active,
-        "presets": [dict(_DEFAULT)] + [dict(p) for p in PRESETS],
+        "presets": [dict(_DEFAULT)] + [_apply_overrides(p, ov) for p in PRESETS],
         "custom": state["custom"],
     }
 
@@ -302,7 +319,7 @@ def get_active_personality() -> dict | None:
             return None
         preset = _PRESETS_BY_ID.get(active_id)
         if preset:
-            return dict(preset)
+            return _apply_overrides(preset, state["voiceOverrides"])  # honour a saved voice change
         for c in state["custom"]:
             if c.get("id") == active_id:
                 return dict(c)
@@ -411,3 +428,26 @@ def update_custom(pid, name=None, persona=None, emoji=None, suggestedVoice=None,
             target["kokoroVoice"] = kokoroVoice.strip() or ""
         _save_state(state)
         return dict(target)
+
+
+def set_voice(pid, suggestedVoice=None, kokoroVoice=None) -> dict:
+    """Change a persona's voice — the one thing you couldn't do to a preset before. For a PRESET this
+    saves an override (presets stay code-defined); for a CUSTOM persona it edits it in place. Pass
+    ``suggestedVoice`` (macOS ``say``) and/or ``kokoroVoice``; the running TTS reads the active
+    persona's voice live, so a change applies on the next reply. Returns the updated Personality.
+    Raises ValueError (→ 400) for an unknown/void id."""
+    pid = "" if pid is None else str(pid)
+    if not pid or pid == _DEFAULT_ID:
+        raise ValueError("that persona has no voice to set")
+    if pid not in _PRESETS_BY_ID:  # custom → reuse the in-place editor (validates + persists)
+        return update_custom(pid, suggestedVoice=suggestedVoice, kokoroVoice=kokoroVoice)
+    with _LOCK:  # preset → save/merge an override
+        state = _load_state()
+        ov = dict(state["voiceOverrides"].get(pid) or {})
+        if suggestedVoice is not None:
+            ov["suggestedVoice"] = suggestedVoice.strip()
+        if kokoroVoice is not None:
+            ov["kokoroVoice"] = kokoroVoice.strip()
+        state["voiceOverrides"][pid] = ov
+        _save_state(state)
+        return _apply_overrides(_PRESETS_BY_ID[pid], state["voiceOverrides"])

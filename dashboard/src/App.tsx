@@ -3,11 +3,16 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ThemeProvider } from "@/components/layout/theme";
 import { PageTransition } from "@/components/animate/PageTransition";
 import { Overview } from "@/pages/Overview";
+import { Conversation } from "@/pages/Conversation";
+import { Board } from "@/pages/Board";
+import { Scheduler } from "@/pages/Scheduler";
 import { TokenUsage } from "@/pages/TokenUsage";
 import { Settings } from "@/pages/Settings";
 import { Personalities } from "@/pages/Personalities";
 import { AxTree } from "@/pages/AxTree";
 import { Rules } from "@/pages/Rules";
+import { Dictionary } from "@/pages/Dictionary";
+import { Commands } from "@/pages/Commands";
 import { Memory } from "@/pages/Memory";
 import { Integrations } from "@/pages/Integrations";
 import { Handbook } from "@/pages/Handbook";
@@ -23,6 +28,30 @@ export default function App() {
           element={
             <PageTransition>
               <Overview />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="conversation"
+          element={
+            <PageTransition>
+              <Conversation />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="board"
+          element={
+            <PageTransition>
+              <Board />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="scheduler"
+          element={
+            <PageTransition>
+              <Scheduler />
             </PageTransition>
           }
         />
@@ -63,6 +92,22 @@ export default function App() {
           element={
             <PageTransition>
               <Rules />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="dictionary"
+          element={
+            <PageTransition>
+              <Dictionary />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="commands"
+          element={
+            <PageTransition>
+              <Commands />
             </PageTransition>
           }
         />

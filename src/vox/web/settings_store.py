@@ -33,7 +33,41 @@ _PROVIDER_OPTIONS = [
     {"value": "claude_sdk", "label": "Claude (subscription / SDK)"},
     {"value": "anthropic", "label": "Anthropic API"},
     {"value": "openai", "label": "OpenAI-compatible (DeepSeek / Ollama / LM Studio)"},
+    {"value": "local_ai", "label": "Local AI (your own GPU / endpoint)"},
     {"value": "claude_cli", "label": "Claude CLI"},
+]
+
+# Common model ids per provider — shared by the small + big brain model dropdowns. Pick the one
+# that matches the brain's provider. (For provider "local_ai" the model comes from local_ai_model
+# in config; the Gemma entry here is just so the value displays.) Set an exotic model in config.py.
+_MODEL_OPTIONS = [
+    {"value": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5 — fast (Claude / Anthropic)"},
+    {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (Claude / Anthropic)"},
+    {"value": "claude-opus-4-8", "label": "Claude Opus 4.8 — deep (Claude / Anthropic)"},
+    {"value": "deepseek-v4-flash", "label": "DeepSeek V4 Flash — fast (OpenAI-compatible API)"},
+    {"value": "deepseek-v4-pro", "label": "DeepSeek V4 Pro — capable (OpenAI-compatible API)"},
+    {"value": "google/gemma-4-e4b", "label": "Gemma E4B — your local model (Local AI)"},
+]
+
+# Kokoro voice choices — shared by the system voice (kokoro_voice) and the MCP voice
+# (mcp_kokoro_voice). 54 voices exist; this is the common English subset.
+_KOKORO_VOICE_OPTIONS = [
+    {"value": "af_heart", "label": "af_heart — US ♀ (warm, default)"},
+    {"value": "af_bella", "label": "af_bella — US ♀"},
+    {"value": "af_nicole", "label": "af_nicole — US ♀ (soft)"},
+    {"value": "af_sarah", "label": "af_sarah — US ♀"},
+    {"value": "af_sky", "label": "af_sky — US ♀"},
+    {"value": "af_kore", "label": "af_kore — US ♀"},
+    {"value": "am_michael", "label": "am_michael — US ♂"},
+    {"value": "am_adam", "label": "am_adam — US ♂"},
+    {"value": "am_onyx", "label": "am_onyx — US ♂ (deep)"},
+    {"value": "am_puck", "label": "am_puck — US ♂"},
+    {"value": "am_fenrir", "label": "am_fenrir — US ♂"},
+    {"value": "bf_emma", "label": "bf_emma — UK ♀"},
+    {"value": "bf_isabella", "label": "bf_isabella — UK ♀"},
+    {"value": "bm_george", "label": "bm_george — UK ♂"},
+    {"value": "bm_daniel", "label": "bm_daniel — UK ♂"},
+    {"value": "bm_fable", "label": "bm_fable — UK ♂"},
 ]
 
 # Schema metadata WITHOUT the live value (value is injected from the effective
@@ -52,8 +86,10 @@ _SCHEMA_META: list[dict] = [
         "key": "small_brain_model",
         "label": "Small brain model",
         "group": "Brains",
-        "type": "text",
-        "help": "Model id for the small brain (e.g. deepseek-chat). Restart to apply.",
+        "type": "select",
+        "options": _MODEL_OPTIONS,
+        "help": "Model for the small brain — pick one that matches the provider above. Applies on "
+                "the next reply. (Need a model not listed? Set small_brain_model in config.py.)",
     },
     {
         "key": "big_brain_provider",
@@ -67,8 +103,10 @@ _SCHEMA_META: list[dict] = [
         "key": "big_brain_model",
         "label": "Big brain model",
         "group": "Brains",
-        "type": "text",
-        "help": "Model id for the big brain (e.g. claude-opus-4-8). Restart to apply.",
+        "type": "select",
+        "options": _MODEL_OPTIONS,
+        "help": "Model for the big brain — pick one that matches the provider above. Applies on the "
+                "next reply. (Need a model not listed? Set big_brain_model in config.py.)",
     },
     {
         "key": "escalate_to_big_brain",
@@ -101,7 +139,31 @@ _SCHEMA_META: list[dict] = [
         "label": "Screen vision",
         "group": "Behavior",
         "type": "toggle",
-        "help": "Let the brain screenshot and read the screen on request.",
+        "help": "Let the brain read the screen on request ('what's on my screen?').",
+    },
+    {
+        "key": "screen_vision_mode",
+        "label": "Screen vision source",
+        "group": "Behavior",
+        "type": "select",
+        "options": [
+            {"value": "auto", "label": "Auto — AX tree first, screenshot fallback"},
+            {"value": "axtree", "label": "AX tree only (no screenshot)"},
+            {"value": "screenshot", "label": "Screenshot only"},
+        ],
+        "help": "How Vox reads the screen. The AX tree is token-light structured text; a screenshot "
+                "is a vision-model image. 'AX tree only' tests the tree in isolation. Applies on the "
+                "next request.",
+    },
+    {
+        "key": "click_vision_fallback",
+        "label": "Click by looking (vision fallback)",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "When 'click X' can't be matched to an element by name, screenshot the screen with a "
+                "number on every clickable element and let the big brain point at the right one. "
+                "Handles requests a label list can't express — 'the second last message', 'the one "
+                "at 7:52pm'. Costs one vision call, only on the give-up path. Applies live.",
     },
     {
         "key": "dictation_exit_on_silence",
@@ -152,24 +214,7 @@ _SCHEMA_META: list[dict] = [
         "group": "Voice",
         "type": "select",
         "default": "af_heart",
-        "options": [
-            {"value": "af_heart", "label": "af_heart — US ♀ (warm, default)"},
-            {"value": "af_bella", "label": "af_bella — US ♀"},
-            {"value": "af_nicole", "label": "af_nicole — US ♀ (soft)"},
-            {"value": "af_sarah", "label": "af_sarah — US ♀"},
-            {"value": "af_sky", "label": "af_sky — US ♀"},
-            {"value": "af_kore", "label": "af_kore — US ♀"},
-            {"value": "am_michael", "label": "am_michael — US ♂"},
-            {"value": "am_adam", "label": "am_adam — US ♂"},
-            {"value": "am_onyx", "label": "am_onyx — US ♂ (deep)"},
-            {"value": "am_puck", "label": "am_puck — US ♂"},
-            {"value": "am_fenrir", "label": "am_fenrir — US ♂"},
-            {"value": "bf_emma", "label": "bf_emma — UK ♀"},
-            {"value": "bf_isabella", "label": "bf_isabella — UK ♀"},
-            {"value": "bm_george", "label": "bm_george — UK ♂"},
-            {"value": "bm_daniel", "label": "bm_daniel — UK ♂"},
-            {"value": "bm_fable", "label": "bm_fable — UK ♂"},
-        ],
+        "options": _KOKORO_VOICE_OPTIONS,
         "help": "Kokoro voice (used when TTS engine is Kokoro). Applies live on the next reply. 54 voices exist incl. other languages — set kokoro_voice in config.py for one not listed.",
     },
     {
@@ -219,6 +264,43 @@ _SCHEMA_META: list[dict] = [
         "type": "text",
         "help": "Decimal seconds: captured audio must be at least this long to count as a barge-in. Applies live.",
     },
+    # --- MCP voice --- the vox-speak MCP heads-up voice, kept separate from the system voice
+    # above so the IDE assistant sounds different from Vox. Reload the MCP server in your editor
+    # to pick up changes (it reads these at speak-time).
+    {
+        "key": "mcp_tts_engine",
+        "label": "MCP TTS engine",
+        "group": "MCP voice",
+        "type": "select",
+        "options": [
+            {"value": "system", "label": "Follow system engine"},
+            {"value": "say", "label": "macOS say (zero-install)"},
+            {"value": "kokoro", "label": "Kokoro (local neural)"},
+        ],
+        "help": "Engine for the vox-speak MCP's voice. 'Follow system' matches the TTS engine above; 'Kokoro' lazy-downloads on first use and falls back to say on any error. Reload the MCP server to apply.",
+    },
+    {
+        "key": "mcp_tts_voice",
+        "label": "MCP say voice",
+        "group": "MCP voice",
+        "type": "text",
+        "help": "macOS `say` voice for the MCP heads-up (e.g. Samantha, Karen, Daniel, Alex). Kept distinct from the system voice. Reload the MCP server to apply.",
+    },
+    {
+        "key": "mcp_kokoro_voice",
+        "label": "MCP Kokoro voice",
+        "group": "MCP voice",
+        "type": "select",
+        "options": _KOKORO_VOICE_OPTIONS,
+        "help": "Kokoro voice for the MCP when its engine is Kokoro (or 'Follow system' resolves to Kokoro). Reload the MCP server to apply.",
+    },
+    {
+        "key": "mcp_speak_cue",
+        "label": "MCP speak cue sound",
+        "group": "MCP voice",
+        "type": "text",
+        "help": "Path to a short sound played just before the vox-speak MCP speaks, so a spoken heads-up doesn't come out of nowhere. Blank to disable. Reload the MCP server to apply.",
+    },
     # --- Cost ---
     {
         "key": "monthly_budget_usd",
@@ -226,6 +308,92 @@ _SCHEMA_META: list[dict] = [
         "group": "Cost",
         "type": "text",
         "help": "Monthly spend budget in USD; 0 = no budget.",
+    },
+    # --- Commands (app/site-scoped command DB, idea #36) ---
+    {
+        "key": "command_db_enabled",
+        "label": "App-scoped command DB",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Resolve voice commands from the per-app command database (in front of the built-in "
+                "parser), so the same words can do different things depending on the focused app. "
+                "Off = built-in commands only. Applies live — no restart.",
+    },
+    {
+        "key": "learning_mode",
+        "label": "Command learning",
+        "group": "Commands",
+        "type": "select",
+        "options": [
+            {"value": "off", "label": "Off — never observe or learn"},
+            {"value": "suggest", "label": "Suggest — queue candidates for approval"},
+            {"value": "auto", "label": "Auto — save commands on its own (default)"},
+        ],
+        "help": "When the brain works out a command the parser didn't know, Vox saves the wiring so "
+                "it resolves instantly and for free next time (idea #24). Auto keeps it out of your "
+                "way; a wrong guess expires on its own (see probation) and one correction retires it. "
+                "Promotion is not built yet — today it only observes. Full design: "
+                "docs/plan/command-learning/. Applies live — no restart.",
+    },
+    {
+        "key": "learning_confirm",
+        "label": "Ask before saving a command",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Have Vox ask 'want me to remember that?' before saving EVERY learned command. Off by "
+                "default — it still asks on its own when a mapping looks like a leap (the words and "
+                "the thing it clicked share nothing) and the evidence is thin. Applies live.",
+    },
+    {
+        "key": "learning_min_hits",
+        "label": "Hits before learning",
+        "group": "Commands",
+        "type": "text",
+        "help": "How many times the same action must be worked out before it's saved as a command. "
+                "Counted inside the rolling window below, so three times in one afternoon counts.",
+    },
+    {
+        "key": "learning_window_days",
+        "label": "Learning window (days)",
+        "group": "Commands",
+        "type": "text",
+        "help": "The rolling window those hits must fall inside. 2 = 'three times within two days'. "
+                "Corrected (negated) uses never count toward it.",
+    },
+    {
+        "key": "learning_probation_days",
+        "label": "Probation (days)",
+        "group": "Commands",
+        "type": "text",
+        "help": "A newly learned command is a guess on trial: if it isn't used at least the number of "
+                "times below within this many days, it's deleted again. This is what makes automatic "
+                "learning safe — a command you picked up during a one-off task expires by itself.",
+    },
+    {
+        "key": "learning_probation_uses",
+        "label": "Uses to graduate probation",
+        "group": "Commands",
+        "type": "text",
+        "help": "How many times a newly learned command must actually be used (resolved from the DB) "
+                "within its probation period to be kept for good.",
+    },
+    {
+        "key": "vosk_commands_enabled",
+        "label": "Vosk command fast-lane",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Recognise CONTROL-mode commands with a fast, grammar-constrained Vosk model (built "
+                "from your command phrases) BEFORE Whisper — near-instant and mis-hear-proof for known "
+                "commands ('necks tab' → 'next tab'); anything else falls through to Whisper. Needs "
+                "the Vosk model on disk (~/.cache/vox/vosk). Applies live — watch vox.log for [vosk] "
+                "lines.",
+    },
+    {
+        "key": "command_db_log",
+        "label": "Log command DB activity",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Write every command-DB query, per-app load, and resolution to vox.log. Restart to apply.",
     },
     # --- Debug ---
     {

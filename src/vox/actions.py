@@ -64,11 +64,9 @@ def handle(text: str) -> str:
     return _run(text)
 
 
-def _run(text: str) -> str:
-    intent = parse(text)
-    if intent is None:
-        return _handoff(text)
-    name, arg = intent
+def run_intent(name: str, arg: str, _text: str | None = None) -> str:
+    """Execute a known ``(intent, arg)`` action directly via the dispatch map. Used by the command
+    DB resolver, which already has the intent+arg and must NOT re-parse. Unknown intent → handoff."""
     dispatch = {
         "navigate": _navigate, "navigate_new": _navigate_new, "search": _search, "back": _back,
         "tab": _tab, "tab_arrow": _tab_arrow, "tab_index": _tab_index,
@@ -76,13 +74,32 @@ def _run(text: str) -> str:
         "desktop_move": _desktop_move, "desktop_index": _desktop_index,
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
+        "click": click_element,
     }
-    return dispatch.get(name, lambda _: _handoff(text))(arg)
+    return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
+
+
+def _run(text: str) -> str:
+    intent = parse(text)
+    if intent is None:
+        return _handoff(text)
+    name, arg = intent
+    return run_intent(name, arg, _text=text)
 
 
 def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None."""
     t = text.lower().strip().rstrip(".!?")
+
+    # Click a labelled button / link / control by name, via the accessibility tree ("click Submit",
+    # "click the Log in button"). Checked first — "click" is distinctive. Trailing role words are
+    # stripped so "click the submit button" looks for a control labelled "submit".
+    m = re.search(r"\bclick\s+(?:on\s+)?(?:the\s+)?(.+)", t)
+    if m:
+        tgt = re.sub(r"\s+(?:button|link|icon|tab|menu|option|item|checkbox|control|toggle)$", "",
+                     m.group(1).strip())
+        if tgt:
+            return ("click", tgt)
 
     # Open a NEW tab (force fresh) — first, so "open a new youtube tab" isn't read as a switch.
     m = re.search(r"\b(?:open|go\s*to)\s+(?:a\s+)?new\s+(.+)", t)
@@ -208,9 +225,9 @@ def known_url(target: str) -> str | None:
     return None
 
 
-def _osa(script: str) -> tuple[bool, str]:
+def _osa(script: str, timeout: float = 20) -> tuple[bool, str]:
     try:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "timed out"  # never let a wedged AppleScript freeze the loop
     return r.returncode == 0, (r.stdout or r.stderr).strip()
@@ -227,16 +244,72 @@ def running_apps() -> list[str]:
     return [a.strip() for a in out.split(",") if a.strip()] if ok else []
 
 
+def frontmost_app() -> str:
+    """Name of the focused (frontmost) app — tells the brain which app you're on. "" on failure."""
+    ok, out = _osa('tell application "System Events" to get name of '
+                   '(first process whose frontmost is true)')
+    return out.strip() if ok else ""
+
+
+def _active_tab(browser: str) -> tuple[str, str]:
+    """(title, url) of the active tab of the front window. ("", "") on failure / unsupported."""
+    if browser in _CHROMIUM:
+        tab = "active tab of front window"
+    elif browser == "Safari":
+        tab = "current tab of front window"
+    else:
+        return "", ""
+    ok, out = _osa(f'tell application "{browser}"\n'
+                   f'    set AppleScript\'s text item delimiters to linefeed\n'
+                   f'    return (name of {tab}) & linefeed & (URL of {tab})\nend tell')
+    if not ok:
+        return "", ""
+    title, _, url = out.partition("\n")
+    return title.strip(), url.strip()
+
+
+def _domain(url: str) -> str:
+    """Bare host of a URL (no scheme/www), for matching generic-titled tabs by site. "" if none."""
+    host = urllib.parse.urlparse(url.strip()).netloc
+    return host[4:] if host.startswith("www.") else host
+
+
+def _now_line() -> str:
+    """'Now: <Weekday YYYY-MM-DD HH:MM> (<tz>)' in the machine's local timezone — the brain's clock."""
+    from datetime import datetime
+    now = datetime.now().astimezone()
+    return f"Now: {now.strftime('%A %Y-%m-%d %H:%M')} ({now.tzname()})"
+
+
 def environment_context() -> str:
-    """A short snapshot of the current Mac state for the executor's brain (running apps + open
-    browser tabs) so fuzzy references resolve to the right target. Best-effort; "" if unavailable."""
+    """A short snapshot of the current Mac state for the executor's brain (focused app, active tab,
+    running apps, open browser tabs + domains, and the time) so fuzzy references resolve to the right
+    target. Best-effort; each part is included only if it succeeds, "" if nothing does."""
     parts = []
+    app = frontmost_app()
+    if app:
+        parts.append(f"Focused app: {app}")
+    # Browser tab detail (active tab + the open-tabs list) is only included when the browser is the
+    # FOCUSED app — otherwise we were dumping every Arc tab on every turn, off-browser, wasting the
+    # brain's context/tokens. When you're actually on the browser it's exactly what helps tab nav.
+    on_browser = bool(app) and app.lower() == CONFIG.browser.lower()
+    if on_browser:
+        title, url = _active_tab(CONFIG.browser)
+        if title or url:
+            parts.append(f"Active tab: {title} — {url}".rstrip(" —"))
     apps = running_apps()
     if apps:
         parts.append("Running apps: " + ", ".join(apps[:40]))
-    ok, titles = _tab_titles(CONFIG.browser)
-    if ok and titles:
-        parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(t[:60] for t in titles[:25]))
+    if on_browser:
+        ok, titles = _tab_titles(CONFIG.browser)
+        if ok and titles:
+            _, urls = _tab_urls(CONFIG.browser)  # parallel to titles; surface the domain for matching
+            entries = []
+            for i, t in enumerate(titles[:25]):
+                dom = _domain(urls[i]) if i < len(urls) else ""
+                entries.append(f"{t[:60]} ({dom})" if dom else t[:60])
+            parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(entries))
+    parts.append(_now_line())
     return "\n".join(parts)
 
 
@@ -252,6 +325,287 @@ def capture_screen() -> str | None:
         os.remove(raw)
         return small
     return raw  # downscale failed — fall back to the full-res capture
+
+
+# Search the focused app's accessibility tree for a control whose label matches `target`, and
+# AXPress the nearest pressable element. Two hard-won lessons drive the design (diagnosed against
+# Slack, an Electron app — see docs/plan/issues.md):
+#   1. Electron/Chromium apps don't expose their web-content AX tree until an assistive client sets
+#      `AXManualAccessibility` on the process — so we set it first, else the sidebar/buttons simply
+#      aren't there (the old script silently found nothing).
+#   2. The matching label is often an AXStaticText with NO AXPress action; the *clickable* element is
+#      an ancestor (the AXRow/AXGroup/AXLink wrapping it). So on a match we walk UP to the nearest
+#      ancestor that supports AXPress and press that — not the label.
+# Exact name matches win over substring matches (we press the thing literally named `target` before
+# anything merely containing it). `AXScrollToVisible` first handles virtualised lists. Bounded
+# depth/breadth AND a node-visit budget, with role-gated reads, so the walk stays as fast as
+# `clickable_targets()` and can't time out before reaching a deep target (the old name+description
+# read on every node did — see docs/plan/issues.md).
+_CLICK_SCRIPT = '''
+property gPressEl : missing value
+property gLabel : ""
+property gFallback : missing value
+property gFallbackLabel : ""
+property gVisited : 0
+
+on actionNames(el)
+    try
+        tell application "System Events" to return (name of actions of el) as text
+    on error
+        return ""
+    end try
+end actionNames
+
+on pressableTarget(el, chain)
+    -- el if it can be pressed, else the nearest ancestor (deepest first) that can.
+    if my actionNames(el) contains "AXPress" then return el
+    set i to (count of chain)
+    repeat while i is greater than or equal to 1
+        set anc to item i of chain
+        if my actionNames(anc) contains "AXPress" then return anc
+        set i to i - 1
+    end repeat
+    return missing value
+end pressableTarget
+
+on search(el, depth, chain, target)
+    if depth > %(maxd)d then return false
+    set gVisited to gVisited + 1
+    if gVisited > %(budget)d then return true
+    -- Role-gate the reads: get ROLE first (cheap), and only read NAME (then DESCRIPTION, lazily,
+    -- for icon-only controls) on interactive roles. The old version read name+description on EVERY
+    -- node and timed out on deep Electron trees before reaching the target — this matches the fast
+    -- clickable_targets() walk. See docs/plan/issues.md.
+    set r to "?"
+    try
+        tell application "System Events" to set r to role of el
+    end try
+    if r is in {"AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton", "AXTabButton", "AXPopUpButton", "AXStaticText", "AXRow", "AXCell", "AXTextField", "AXHeading", "AXImage", "AXDisclosureTriangle"} then
+        set nm to ""
+        try
+            tell application "System Events" to set nm to (name of el) as text
+        end try
+        if nm is missing value then set nm to ""
+        if nm is "" then
+            try
+                tell application "System Events" to set nm to (description of el) as text
+            end try
+            if nm is missing value then set nm to ""
+        end if
+        if nm is not "" then
+            if nm is target then
+                set tgt to my pressableTarget(el, chain)
+                if tgt is not missing value then
+                    set gPressEl to tgt
+                    set gLabel to nm
+                    return true
+                end if
+            else if gFallback is missing value and (nm contains target) then
+                set t2 to my pressableTarget(el, chain)
+                if t2 is not missing value then
+                    set gFallback to t2
+                    set gFallbackLabel to nm
+                end if
+            end if
+        end if
+    end if
+    set kids to {}
+    try
+        tell application "System Events" to set kids to UI elements of el
+    end try
+    set total to count of kids
+    set n to total
+    if n > %(maxb)d then set n to %(maxb)d
+    repeat with i from 1 to n
+        if my search(item i of kids, depth + 1, chain & {el}, target) then return true
+    end repeat
+    return false
+end search
+
+set gPressEl to missing value
+set gLabel to ""
+set gFallback to missing value
+set gFallbackLabel to ""
+set gVisited to 0
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        tell p to set value of attribute "AXManualAccessibility" to true
+    end try
+end tell
+delay %(settle).1f
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        set root to front window of p
+    on error
+        set root to p
+    end try
+end tell
+my search(root, 0, {}, "%(target)s")
+if gPressEl is missing value and gFallback is not missing value then
+    set gPressEl to gFallback
+    set gLabel to gFallbackLabel
+end if
+if gPressEl is missing value then return "err" & tab & "not found"
+try
+    tell application "System Events" to perform action "AXScrollToVisible" of gPressEl
+end try
+try
+    tell application "System Events" to perform action "AXPress" of gPressEl
+    return "ok" & tab & gLabel
+on error errMsg
+    return "err" & tab & "press failed: " & errMsg
+end try
+'''
+
+
+def click_element(target: str) -> str:
+    """Find a control labelled `target` in the focused app's accessibility tree and click it
+    (AXPress the nearest pressable element). Uses the fast native AX engine (``vox.ax``, ~77 ms even
+    on a miss) so it can't freeze the voice loop or let focus drift to another app; falls back to the
+    AppleScript walk only if native AX is unavailable. Needs Accessibility permission. Never raises."""
+    t = (target or "").strip().replace("\\", " ").replace('"', " ")
+    if not t:
+        return "Click what? Try 'click Submit'."
+
+    # Native AX first — when it runs it's authoritative (a "not found" is a real, fast miss, NOT a
+    # timeout), so we do NOT retry on the slow AppleScript path.
+    try:
+        from vox import ax
+        res = ax.click(t)
+    except Exception:
+        res = None
+    if res is not None:
+        status, label = res
+        if status == "clicked":
+            return f"Clicked {label or target}."
+        try:
+            from vox import assistant
+            assistant._dbg("[click]", f"click_element({target!r}) [native] → {status}")
+        except Exception:
+            pass
+        if status == "not_found":
+            return f"I couldn't find a '{target}' to click."  # fast, authoritative miss — no slow retry
+        # status == "press_failed": native found it but the press errored → one-off AppleScript retry.
+
+    # Native AX unavailable (or a rare native press failure) → AppleScript fallback.
+    ok, out = _osa(_CLICK_SCRIPT % {"target": t, "maxd": 32, "maxb": 90, "budget": 6000, "settle": 0.6},
+                   timeout=25)
+    status, _, detail = (out or "").partition("\t")
+    if ok and status.strip() == "ok":
+        return f"Clicked {detail.strip() or target}."
+    reason = detail.strip() or status.strip() or ("timed out" if not ok else "not found")
+    try:
+        from vox import assistant
+        assistant._dbg("[click]", f"click_element({target!r}) [osa] → {reason}")
+    except Exception:
+        pass
+    return f"I couldn't find a '{target}' to click."
+
+
+# Collect the labels of on-screen elements the user could plausibly click — for giving the brain
+# VISIBILITY of what's actually on screen so it can disambiguate (e.g. realise "github" is a Slack
+# channel to CLICK, not a website to open). Same Electron AX unlock + deep walk as the click engine;
+# filtered to interactive-ish roles and capped/early-stopped so it stays bounded on huge web trees.
+_CLICKABLE_LIST_SCRIPT = '''
+property gItems : {}
+property gVisited : 0
+
+on collect(el, depth)
+    if depth > %(maxd)d then return
+    if (count of gItems) is greater than or equal to %(limit)d then return
+    set gVisited to gVisited + 1
+    if gVisited > %(budget)d then return
+    -- Read ROLE first; only read NAME for interactive roles. The tree is mostly structural
+    -- AXGroup/AXWebArea nodes — skipping their name read is what keeps this bounded on Electron.
+    set r to "?"
+    try
+        tell application "System Events" to set r to role of el
+    end try
+    if r is in {"AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXRadioButton", "AXTabButton", "AXPopUpButton", "AXStaticText", "AXRow", "AXCell", "AXTextField", "AXHeading", "AXDisclosureTriangle"} then
+        set nm to ""
+        try
+            tell application "System Events" to set nm to (name of el) as text
+        end try
+        if nm is not missing value and nm is not "" and (length of nm) is less than 60 then
+            if gItems does not contain nm then set end of gItems to nm
+        end if
+    end if
+    set kids to {}
+    try
+        tell application "System Events" to set kids to UI elements of el
+    end try
+    set total to count of kids
+    set n to total
+    if n > %(maxb)d then set n to %(maxb)d
+    repeat with i from 1 to n
+        my collect(item i of kids, depth + 1)
+    end repeat
+end collect
+
+set gItems to {}
+set gVisited to 0
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        tell p to set value of attribute "AXManualAccessibility" to true
+    end try
+end tell
+delay %(settle).1f
+tell application "System Events"
+    set p to first process whose frontmost is true
+    try
+        set root to front window of p
+    on error
+        set root to p
+    end try
+end tell
+my collect(root, 0)
+set AppleScript's text item delimiters to linefeed
+return (gItems as text)
+'''
+
+
+def clickable_targets(limit: int = 300) -> list[str]:
+    """Labels of on-screen elements the user could click in the focused app (deduped, capped).
+    Uses the fast native AX engine (``vox.ax``); falls back to the AppleScript walk only if native AX
+    is unavailable. Used to give the brain a view of what's clickable so it can disambiguate. Returns
+    ``[]`` on any failure (never raises).
+
+    Reads the FRAMED enumeration (``targets_with_frames``) rather than ``targets()``, for two reasons
+    found while diagnosing a failed "click Alex's second last message":
+      1. ``targets()`` lists elements with no on-screen frame at all — a closed menu's items are
+         zero-size, and on Slack **177 of its 190 labels** were invisible menu entries. The brain was
+         being asked to pick from things the user cannot see.
+      2. The old cap of 60, spent depth-first, never got past the sidebar: the brain was handed 60
+         channel/toolbar labels and not one message, then blamed for not finding the message.
+    Same source as the numbered overlay, so what the brain can pick == what a badge is drawn on."""
+    try:
+        from vox import ax
+        framed = ax.targets_with_frames(limit=limit)
+        res = None if framed is None else _dedupe([i["label"] for i in framed])
+    except Exception:
+        res = None
+    if res is not None:
+        return res
+
+    ok, out = _osa(_CLICKABLE_LIST_SCRIPT
+                   % {"maxd": 30, "maxb": 90, "limit": limit, "budget": 4000, "settle": 0.6},
+                   timeout=30)
+    if not ok or not out:
+        return []
+    return _dedupe(line.strip() for line in out.splitlines())
+
+
+def _dedupe(names) -> list[str]:
+    """Order-preserving de-duplication of element labels."""
+    seen, items = set(), []
+    for name in names:
+        if name and name not in seen:
+            seen.add(name)
+            items.append(name)
+    return items
 
 
 def _browser_tab_script(browser: str, url: str) -> str | None:
@@ -708,6 +1062,48 @@ def dictate(text: str) -> None:
     global _dictation_active, _dictation_new_sentence
     raw = text.strip()
     low = raw.lower().rstrip(".!?")
+
+    # Literal escape: "literally <words>" types the rest VERBATIM, so you can dictate a phrase that
+    # would otherwise be a command (e.g. "literally delete line" types the words "delete line").
+    m = re.match(r"(?i)^literally\s+(.+)$", raw)
+    if m:
+        lit = m.group(1).strip()
+        if _dictation_new_sentence and lit[:1].islower():
+            lit = lit[0].upper() + lit[1:]
+        _paste((" " if _dictation_active else "") + lit)
+        _dictation_active = True
+        _dictation_new_sentence = lit.rstrip()[-1:] in ".!?"
+        return
+
+    # Bigger deletions + undo. These match the WHOLE utterance only (like the edit keys below), so
+    # they never fire mid-sentence — say them on their own to use them, dictate them in a sentence
+    # to type them. delete word / delete N words / delete the last five words → ⌥⌫ (per word).
+    m = re.fullmatch(r"(?:delete|remove|scratch|erase)\s+(?:the\s+)?(?:last\s+)?(?:(\w+)\s+)?words?", low)
+    if m:
+        n = (_to_index(m.group(1)) if m.group(1) else 1) or 1
+        n = max(1, min(n, 50))  # cap so a mis-hear can't wipe the doc
+        _osa('tell application "System Events"\n'
+             f'repeat {n} times\nkey code 51 using {{option down}}\nend repeat\nend tell')
+        return
+    if low in ("delete line", "delete the line", "delete this line", "delete the current line",
+               "delete current line", "delete a line"):
+        _osa('tell application "System Events" to key code 51 using {command down}')  # ⌘⌫ to line start
+        _dictation_active = False
+        return
+    if low in ("delete paragraph", "delete the paragraph", "delete this paragraph", "delete a paragraph"):
+        # Select to the start of the paragraph (⌥⇧↑) then delete the selection.
+        _osa('tell application "System Events"\n'
+             'key code 126 using {option down, shift down}\nkey code 51\nend tell')
+        _dictation_active = False
+        return
+    if low in ("undo", "undo that", "undo it"):
+        _osa('tell application "System Events" to keystroke "z" using {command down}')  # ⌘Z
+        _dictation_active = False
+        return
+    if low in ("redo", "redo that", "redo it"):
+        _osa('tell application "System Events" to keystroke "z" using {command down, shift down}')  # ⌘⇧Z
+        return
+
     # spoken edit words -> (key code, modifier). "new/next line" is a SOFT newline
     # (Shift+Return) so it doesn't *send* in chat apps; "enter"/"send" is a plain Return.
     specials = {
@@ -776,6 +1172,7 @@ def edit_selection(transform) -> str:
 _FAIL_MARKERS = (
     "no app called", "no tab matching", "no window matching",
     "not sure how to do that", "isn't wired up", "there aren't",
+    "to click",  # click_element found no labelled control → escalate to the LLM + AX-tree click
 )
 
 

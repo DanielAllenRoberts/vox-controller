@@ -12,6 +12,8 @@ A **named voice assistant** that:
 
 > **Where we are (2026-06-17, day one):** M0, M1, **M2 (voice out)** and most of **M4 (LLM brain)** are done — see `features.md`. The assistant went well past the original v1 scope: provider-agnostic small/big brains, an **executor** (the LLM runs commands), screen vision, write/rewrite-at-cursor, barge-in, `small.en` accent model. **The main remaining v1 piece is M3 (modality switching — text input + the four in/out combos).** Open friction: ambient audio bleeding into the mic (no AEC yet — see `issues.md` O7). Wake is still stock Whisper phrases (custom "Hey Vox" not trained).
 
+> **Update (2026-07-16):** far beyond v1. Shipped since day one — see `features.md` for the full registry: a **web control center** (the "web UI" backlog item below, now done — 13 pages incl. Overview, Conversation, Board, Scheduler, Settings, Personalities, Commands, Memory, Handbook), **timers/alarms/reminders**, **tiered memory** + auto-capture, **personalities** (presets + custom + editable **per-persona voice**), **Kokoro** neural TTS, an **app/site command DB**, native **AX-tree clicking** + a Dragon-style **numbered click overlay** (coordinate-based, multi-display, text boxes), a **Trello-like board**, **vox-speak MCP**, **barge-in**, native **AEC** (flagged off), and **semantic turn detection**. Still open: **M3 modality switching** (text input), the click-learning loop (#52), streaming/Vosk STT (#53), custom-vocab (#54), and the `-10863` mic-stall.
+
 ## Milestones (incremental)
 
 ### M0 — Listening loop skeleton
@@ -46,6 +48,6 @@ Replace hardcoded command matching with **model-based intent classification** be
 - **Learning/logging layer** — capture every interaction for later training.
 - **Containerized agentic execution** — OpenCode-backed code tasks in a sandbox.
 - **Remote / phone interface** — local-first WebSocket; Tailscale suggested for anywhere-access.
-- **Terminal-first + web UI** — keep the whole thing runnable from the terminal (`uv run vox`), and add a local **web UI that attaches to the running daemon** to observe/control it (live transcripts, rules, logs, settings) — paperclip / OpenClaw style. The web UI is a *view onto the same process*, not a separate app.
+- ✅ **Terminal-first + web UI** — **DONE.** The **Vox Control Center** dashboard (React app served by the daemon's FastAPI bridge at `127.0.0.1:8765`) is exactly this: a live view onto the running process — conversation feed, board, rules, memory, commands, token usage, settings — while `uv run vox` stays the terminal entry point.
 - **Intent caching** — compile hot intents into local rules to cut API use.
 - **Personalized fine-tuning** — voice + command models tuned to the user.

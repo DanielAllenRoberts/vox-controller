@@ -65,6 +65,24 @@ export interface UsageSummary {
   byDay: UsageByDay[];
 }
 
+// Conversation turn — mirrors a turn from the live, EPHEMERAL feed
+// (src/vox/web/conversation.py `record_turn`). `role`: "user" (you) or
+// "assistant" (Vox). `brain` is the replying brain on assistant turns (else
+// null); `kind` tags it ("chat"|"command"|"reply") so a command can render
+// inline. `session` distinguishes concurrent sessions. Nothing is persisted —
+// this is the running session in RAM, gone on daemon restart.
+export type TurnRole = "user" | "assistant";
+
+export interface Turn {
+  id: string;
+  session: string;
+  ts: string;
+  role: TurnRole;
+  text: string;
+  brain: Brain | null;
+  kind: string | null;
+}
+
 export type SettingType = "toggle" | "select" | "text";
 
 export interface SettingOption {
@@ -104,6 +122,86 @@ export interface Rule {
   enabled: boolean;
 }
 
+// Speech-correction dictionary entry ("learn a word", idea #54). Mirrors
+// src/vox/vocab.py — "when you hear `heard`, write `write` instead". Applied to
+// Whisper's output, so it fixes homophones/proper nouns (clawed → Claude).
+export interface VocabEntry {
+  id: string;
+  heard: string;
+  write: string;
+  enabled: boolean;
+}
+
+// --- Command DB (app/site-scoped voice commands, idea #36) -----------------
+// Mirrors src/vox/web/commands.py. A `CommandContext` scopes WHEN commands
+// apply (global "Everywhere" / an app / a site); each `Command` is one action
+// (intent + arg) triggered by one or more `CommandPhrase`s. Numeric ids are the
+// SQLite primary keys (not strings, unlike Rule).
+export type ContextKind = "global" | "app" | "site";
+export type CommandSource = "builtin" | "user" | "learned";
+export type PhraseMatchType = "exact" | "contains" | "regex";
+export type IntentCategory = "action" | "mode" | "system";
+
+export interface CommandPhrase {
+  id: number;
+  text: string;
+  isPrimary: boolean;
+  matchType: PhraseMatchType;
+}
+
+export interface Command {
+  id: number;
+  intent: string;
+  arg: string | null;
+  param: string | null;
+  label: string;
+  source: CommandSource;
+  enabled: boolean;
+  priority: number;
+  phrases: CommandPhrase[];
+}
+
+export interface CommandContext {
+  id: number;
+  kind: ContextKind;
+  matchValue: string | null;
+  displayName: string;
+  priority: number;
+  enabled: boolean;
+  commands: Command[];
+}
+
+export interface CommandIntent {
+  name: string;
+  category: IntentCategory;
+  takesArg: boolean;
+  argHelp: string | null;
+  description: string;
+}
+
+export interface CommandDb {
+  contexts: CommandContext[];
+  intents: CommandIntent[];
+  summary: Record<string, number>;
+}
+
+// Scheduled job (timer / alarm / reminder) — mirrors a Job from the Vox-owned
+// scheduler (src/vox/scheduler.py), serialised camelCase by the bridge. `fireAt`
+// is an ISO LOCAL datetime (naive). `recurrence` is null for a one-shot.
+export type ReminderKind = "timer" | "alarm" | "reminder";
+// Interval reminders ("remind me every 30 minutes") are stored as `every:<seconds>`.
+export type Recurrence = "daily" | "weekdays" | "weekly" | `every:${number}` | null;
+
+export interface Reminder {
+  id: string;
+  kind: ReminderKind;
+  text: string;
+  fireAt: string;
+  recurrence: Recurrence;
+  createdAt: string;
+  enabled: boolean;
+}
+
 // Memory tier (MEMORY_DESIGN.md v1). "core" = durable, always-injected facts;
 // "daily" = dated, contextual notes recalled by relevance.
 export type MemoryTier = "core" | "daily";
@@ -117,6 +215,36 @@ export interface Memory {
   // Present on the tiered store; older /api/memory responses may omit it, so
   // pages should default to "daily" when absent.
   tier?: MemoryTier;
+}
+
+// --- Workspace board (Trello-like kanban + agent knowledge base, idea #51) --
+// Mirrors src/vox/web/board.py. A `Board` has ordered `BoardList` columns, each
+// with ordered `BoardCard`s. Numeric ids are the SQLite primary keys. `tags` is
+// a string[] (the store keeps them comma-separated). The default board
+// ("Workspace" → To Do/Doing/Done) is auto-seeded, so `id`/`name` are only null
+// if the bridge/module is unavailable.
+export interface BoardCard {
+  id: number;
+  listId: number;
+  title: string;
+  body: string;
+  tags: string[];
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BoardList {
+  id: number;
+  name: string;
+  position: number;
+  cards: BoardCard[];
+}
+
+export interface Board {
+  id: number | null;
+  name: string | null;
+  lists: BoardList[];
 }
 
 // vox-speak MCP setup block for THIS machine — mirrors GET /api/mcp/config.
@@ -280,6 +408,10 @@ export const api = {
     request<UsageEvent[]>(`/usage/recent?limit=${limit}`),
   usageSummary: () => request<UsageSummary>("/usage/summary"),
 
+  // Live, ephemeral conversation feed (the running session in RAM).
+  conversationRecent: (limit = 100) =>
+    request<Turn[]>(`/conversation/recent?limit=${limit}`),
+
   settings: () => request<Setting[]>("/settings"),
   setSetting: (key: string, value: string | boolean) =>
     request<{ ok: boolean; value: string | boolean }>("/settings", {
@@ -323,6 +455,17 @@ export const api = {
     request<{ ok: boolean }>(`/personalities/custom/${id}`, {
       method: "DELETE",
     }),
+  // Change a persona's voice — works for PRESETS too (saved as an override on the bridge).
+  setPersonalityVoice: (
+    id: string,
+    body: { suggestedVoice?: string; kokoroVoice?: string },
+  ) =>
+    request<Personality>(`/personalities/${id}/voice`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  // Installed macOS `say` voices for the picker (English). Empty off-mac.
+  voices: () => request<{ voices: string[] }>("/voices"),
 
   rules: () => request<Rule[]>("/rules"),
   addRule: (text: string) =>
@@ -337,6 +480,65 @@ export const api = {
     }),
   removeRule: (id: string) =>
     request<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
+
+  // --- Dictionary / speech corrections ("learn a word", idea #54) ----------
+  vocab: () => request<VocabEntry[]>("/vocab"),
+  addVocab: (heard: string, write: string) =>
+    request<VocabEntry>("/vocab", {
+      method: "POST",
+      body: JSON.stringify({ heard, write }),
+    }),
+  updateVocab: (
+    id: string,
+    patch: { heard?: string; write?: string; enabled?: boolean },
+  ) =>
+    request<VocabEntry>(`/vocab/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  removeVocab: (id: string) =>
+    request<{ ok: boolean }>(`/vocab/${id}`, { method: "DELETE" }),
+
+  // --- Command DB (app/site-scoped voice commands, idea #36) ---------------
+  commands: () => request<CommandDb>("/commands"),
+  setCommandEnabled: (id: number, enabled: boolean) =>
+    request<Command>(`/commands/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  setCommandContextEnabled: (id: number, enabled: boolean) =>
+    request<{ id: number; enabled: boolean }>(`/commands/contexts/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  addCommandPhrase: (
+    commandId: number,
+    text: string,
+    matchType: PhraseMatchType = "contains",
+  ) =>
+    request<CommandPhrase>(`/commands/${commandId}/phrases`, {
+      method: "POST",
+      body: JSON.stringify({ text, matchType }),
+    }),
+  removeCommandPhrase: (phraseId: number) =>
+    request<{ ok: boolean }>(`/commands/phrases/${phraseId}`, {
+      method: "DELETE",
+    }),
+
+  // --- Reminders / timers / alarms (Vox-owned scheduler, idea #16) ---------
+  reminders: () => request<Reminder[]>("/reminders"),
+  addReminder: (body: {
+    kind: ReminderKind;
+    text?: string;
+    fireAt: string;
+    recurrence?: Recurrence;
+  }) =>
+    request<Reminder>("/reminders", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  removeReminder: (id: string) =>
+    request<{ ok: boolean }>(`/reminders/${id}`, { method: "DELETE" }),
 
   // --- Memory (back-compat flat search; recalls across tiers) --------------
   memory: (query = "", limit = 50) =>
@@ -373,6 +575,43 @@ export const api = {
   revealMemory: () =>
     request<{ ok: boolean }>("/memory/reveal", { method: "POST" }),
 
+  // --- Workspace board (Trello-like kanban + agent knowledge base, idea #51) -
+  board: () => request<Board>("/board"),
+  boardSearch: (query: string, limit = 50) =>
+    request<BoardCard[]>(
+      `/board/search?query=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
+  addBoardCard: (body: {
+    list: string;
+    title: string;
+    body?: string;
+    tags?: string;
+  }) =>
+    request<BoardCard>("/board/cards", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBoardCard: (
+    id: number,
+    patch: { title?: string; body?: string; tags?: string },
+  ) =>
+    request<BoardCard>(`/board/cards/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  moveBoardCard: (id: number, toList: string, position?: number) =>
+    request<BoardCard>(`/board/cards/${id}/move`, {
+      method: "POST",
+      body: JSON.stringify({ toList, position }),
+    }),
+  removeBoardCard: (id: number) =>
+    request<{ ok: boolean }>(`/board/cards/${id}`, { method: "DELETE" }),
+  addBoardList: (name: string) =>
+    request<{ id: number; name: string; position: number }>("/board/lists", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
   axtree: () => request<AxTree | AxTreeError>("/axtree"),
 
   // Handbook catalog (the reference of what Vox can do, grouped by area).
@@ -399,4 +638,13 @@ export function usageStreamUrl(): string {
   }
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/api/usage/stream`;
+}
+
+// WebSocket URL for the live conversation feed (WS /api/conversation/stream).
+export function conversationStreamUrl(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/^http/, "ws") + "/api/conversation/stream";
+  }
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}/api/conversation/stream`;
 }

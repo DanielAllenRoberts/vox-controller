@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -118,6 +119,27 @@ def _apply_suggested_voice(mod) -> None:
         pass
 
 
+def _say_voices() -> list:
+    """The installed macOS ``say`` voices (English), parsed from ``say -v '?'`` — order preserved,
+    deduped. Empty list off-mac or if ``say`` is missing. Each line is
+    ``Name…  <locale>  # sample``; the name may contain spaces (e.g. "Bad News")."""
+    exe = shutil.which("say")
+    if exe is None:
+        return []
+    proc = subprocess.run([exe, "-v", "?"], capture_output=True, text=True, timeout=5)
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in proc.stdout.splitlines():
+        m = re.match(r"^(.+?)\s{2,}([a-z]{2}(?:[_-][A-Z]{2})?)\b", line)
+        if not m or not m.group(2).lower().startswith("en"):
+            continue
+        name = m.group(1).strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 def create_app() -> FastAPI:
     """Build and return the FastAPI app with all routes mounted."""
     app = FastAPI(title="Vox Control Center", version="0.1.0")
@@ -197,6 +219,38 @@ def create_app() -> FastAPI:
         finally:
             usage.unsubscribe(queue)
 
+    # --- Conversation (live, ephemeral RAM feed; idea #43) ---
+    @app.get("/api/conversation/recent")
+    def get_conversation_recent(limit: int = 100) -> list:
+        mod = _try_import("conversation")
+        if mod is None:
+            return []
+        try:
+            return mod.recent(limit)
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.websocket("/api/conversation/stream")
+    async def conversation_stream(ws: WebSocket) -> None:
+        await ws.accept()
+        mod = _try_import("conversation")
+        if mod is None:  # feed module absent → accept then close cleanly
+            await ws.close()
+            return
+        queue = mod.subscribe()
+        # Bind the queue to this event loop so cross-thread publish() can deliver.
+        queue._vox_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        try:
+            while True:
+                turn = await queue.get()
+                await ws.send_json(turn)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            mod.unsubscribe(queue)
+
     # --- Personalities (guarded) ---
     @app.get("/api/personalities")
     def get_personalities() -> dict:
@@ -269,6 +323,38 @@ def create_app() -> FastAPI:
         if mod is None:
             return {"ok": False}
         return {"ok": bool(mod.remove_custom(pid))}
+
+    @app.patch("/api/personalities/{pid}/voice")
+    async def set_personality_voice(pid: str, request: Request):
+        """Change a persona's voice — works for PRESETS too (saved as an override). Body:
+        ``{suggestedVoice?, kokoroVoice?}``. Applies live (the TTS reads the active persona's voice)."""
+        mod = _try_import("personalities")
+        if mod is None:
+            return _service_unavailable("personalities")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        if "suggestedVoice" not in body and "kokoroVoice" not in body:
+            return _bad_request("provide 'suggestedVoice' and/or 'kokoroVoice'")
+        try:
+            updated = mod.set_voice(pid, suggestedVoice=body.get("suggestedVoice"),
+                                    kokoroVoice=body.get("kokoroVoice"))
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not set voice: {exc}")
+        # Keep the say-engine tts_voice setting in sync if we just changed the ACTIVE persona.
+        _apply_suggested_voice(mod)
+        return updated
+
+    @app.get("/api/voices")
+    def get_voices() -> dict:
+        """Installed macOS `say` voices (English) for the persona voice picker. Guarded — returns
+        ``{voices: []}`` off-mac or on any error."""
+        try:
+            return {"voices": _say_voices()}
+        except Exception:
+            return {"voices": []}
 
     # --- Rules (guarded) ---
     @app.get("/api/rules")
@@ -343,6 +429,362 @@ def create_app() -> FastAPI:
             return _bad_request(f"could not remove rule: {exc}")
         if not removed:
             return _not_found("rule")
+        return {"ok": True}
+
+    # --- Dictionary / speech corrections ("learn a word"; guarded; src/vox/vocab.py, idea #54) ---
+    @app.get("/api/vocab")
+    def get_vocab() -> list:
+        try:
+            from .. import vocab
+            return vocab.list_entries()
+        except Exception:  # never 500 a read
+            return []
+
+    @app.post("/api/vocab")
+    async def add_vocab(request: Request):
+        try:
+            from .. import vocab
+        except Exception:
+            return _service_unavailable("vocab")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        heard = body.get("heard")
+        if not isinstance(heard, str) or not heard.strip():
+            return _bad_request("'heard' is required and must be a non-empty string")
+        write = body.get("write")
+        if write is not None and not isinstance(write, str):
+            return _bad_request("'write' must be a string")
+        try:
+            return vocab.add(heard, write or "")
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add correction: {exc}")
+
+    @app.patch("/api/vocab/{entry_id}")
+    async def patch_vocab(entry_id: str, request: Request):
+        try:
+            from .. import vocab
+        except Exception:
+            return _not_found("correction")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        patch: dict = {k: body.get(k) for k in ("heard", "write", "enabled") if k in body}
+        if not patch:
+            return _bad_request("provide at least one of 'heard', 'write', or 'enabled'")
+        if "enabled" in patch and not isinstance(patch["enabled"], bool):
+            return _bad_request("'enabled' must be a boolean")
+        try:
+            updated = vocab.update(entry_id, **patch)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not update correction: {exc}")
+        if updated is None:
+            return _not_found("correction")
+        return updated
+
+    @app.delete("/api/vocab/{entry_id}")
+    def delete_vocab(entry_id: str):
+        try:
+            from .. import vocab
+            removed = bool(vocab.remove(entry_id))
+        except Exception as exc:
+            return _bad_request(f"could not delete correction: {exc}")
+        if not removed:
+            return _not_found("correction")
+        return {"ok": True}
+
+    # --- Commands (app/site-scoped voice command DB; guarded; src/vox/web/commands.py, idea #36) ---
+    @app.get("/api/commands")
+    def get_commands() -> dict:
+        mod = _try_import("commands")
+        if mod is None:
+            return {"contexts": [], "intents": [], "summary": {}}
+        try:
+            return mod.list_all()
+        except Exception:  # never 500 a read — degrade to an empty DB view
+            return {"contexts": [], "intents": [], "summary": {}}
+
+    @app.get("/api/commands/learning")
+    def get_learning() -> dict:
+        """What Vox has taught itself, and what it's still considering (idea #24)."""
+        mod = _try_import("commands")
+        if mod is None:
+            return {"mode": "unknown", "learned": [], "candidates": []}
+        try:
+            return mod.learning()
+        except Exception:
+            return {"mode": "unknown", "learned": [], "candidates": []}
+
+    @app.post("/api/commands/candidates/{cand_id}/promote")
+    def post_promote_candidate(cand_id: int):
+        mod = _try_import("commands")
+        if mod is None:
+            raise HTTPException(status_code=503, detail="command DB unavailable")
+        row = mod.promote_candidate(cand_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="candidate not found or already promoted")
+        return row
+
+    @app.delete("/api/commands/learned/{cmd_id}")
+    def delete_learned(cmd_id: int) -> dict:
+        mod = _try_import("commands")
+        if mod is None:
+            raise HTTPException(status_code=503, detail="command DB unavailable")
+        if not mod.forget_learned(cmd_id):
+            raise HTTPException(status_code=400, detail="not a learned command")
+        return {"ok": True}
+
+    @app.patch("/api/commands/contexts/{ctx_id}")
+    async def patch_command_context(ctx_id: int, request: Request):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("context")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return _bad_request("'enabled' must be a boolean")
+        try:
+            return mod.set_context_enabled(ctx_id, enabled)
+        except ValueError:
+            return _not_found("context")
+        except Exception as exc:
+            return _bad_request(f"could not update context: {exc}")
+
+    @app.patch("/api/commands/{cmd_id}")
+    async def patch_command(cmd_id: int, request: Request):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("command")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return _bad_request("'enabled' must be a boolean")
+        try:
+            return mod.set_command_enabled(cmd_id, enabled)
+        except ValueError:
+            return _not_found("command")
+        except Exception as exc:
+            return _bad_request(f"could not update command: {exc}")
+
+    @app.post("/api/commands/{cmd_id}/phrases")
+    async def add_command_phrase(cmd_id: int, request: Request):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("command")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return _bad_request("'text' is required and must be a non-empty string")
+        match_type = body.get("matchType", "contains")
+        if match_type not in ("exact", "contains", "regex"):
+            return _bad_request("'matchType' must be exact, contains, or regex")
+        try:
+            return mod.add_phrase(cmd_id, text, match_type)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add phrase: {exc}")
+
+    @app.delete("/api/commands/phrases/{phrase_id}")
+    def remove_command_phrase(phrase_id: int):
+        mod = _try_import("commands")
+        if mod is None:
+            return _not_found("phrase")
+        try:
+            removed = bool(mod.remove_phrase(phrase_id))
+        except Exception as exc:
+            return _bad_request(f"could not remove phrase: {exc}")
+        if not removed:
+            return _not_found("phrase")
+        return {"ok": True}
+
+    # --- Workspace board (Trello-like kanban + agent knowledge base; guarded; board_store, idea #51) ---
+    @app.get("/api/board")
+    def get_board() -> dict:
+        mod = _try_import("board")
+        if mod is None:
+            return {"id": None, "name": None, "lists": []}
+        try:
+            return mod.snapshot()
+        except Exception:  # never 500 a read — degrade to an empty board
+            return {"id": None, "name": None, "lists": []}
+
+    @app.get("/api/board/search")
+    def search_board(query: str = "", limit: int = 50) -> list:
+        mod = _try_import("board")
+        if mod is None or not query.strip():
+            return []
+        try:
+            return mod.search(query.strip(), limit)
+        except Exception:
+            return []
+
+    @app.post("/api/board/cards")
+    async def create_board_card(request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _service_unavailable("board")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        title = body.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return _bad_request("'title' is required and must be a non-empty string")
+        list_name = body.get("list")
+        if not isinstance(list_name, str) or not list_name.strip():
+            return _bad_request("'list' (column name) is required")
+        try:
+            return mod.create_card(list_name, title, body.get("body") or "", body.get("tags") or "")
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add card: {exc}")
+
+    @app.patch("/api/board/cards/{card_id}")
+    async def update_board_card(card_id: int, request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _not_found("card")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        # Only forward provided fields; at least one must be present.
+        patch: dict = {}
+        for key in ("title", "body", "tags"):
+            if key in body:
+                patch[key] = body.get(key)
+        if not patch:
+            return _bad_request("provide at least one of 'title', 'body', or 'tags'")
+        if "title" in patch and (not isinstance(patch["title"], str) or not patch["title"].strip()):
+            return _bad_request("'title' must be a non-empty string")
+        try:
+            updated = mod.update_card(card_id, **patch)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not update card: {exc}")
+        if updated is None:
+            return _not_found("card")
+        return updated
+
+    @app.post("/api/board/cards/{card_id}/move")
+    async def move_board_card(card_id: int, request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _not_found("card")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        to_list = body.get("toList")
+        if to_list is None or (isinstance(to_list, str) and not to_list.strip()):
+            return _bad_request("'toList' (target column name or id) is required")
+        position = body.get("position")
+        if position is not None and not isinstance(position, int):
+            return _bad_request("'position' must be an integer when provided")
+        try:
+            moved = mod.move_card(card_id, to_list, position)
+        except Exception as exc:
+            return _bad_request(f"could not move card: {exc}")
+        if moved is None:
+            return _not_found("card or target list")
+        return moved
+
+    @app.delete("/api/board/cards/{card_id}")
+    def delete_board_card(card_id: int):
+        mod = _try_import("board")
+        if mod is None:
+            return _not_found("card")
+        try:
+            removed = bool(mod.delete_card(card_id))
+        except Exception as exc:
+            return _bad_request(f"could not delete card: {exc}")
+        if not removed:
+            return _not_found("card")
+        return {"ok": True}
+
+    @app.post("/api/board/lists")
+    async def create_board_list(request: Request):
+        mod = _try_import("board")
+        if mod is None:
+            return _service_unavailable("board")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return _bad_request("'name' is required and must be a non-empty string")
+        try:
+            return mod.create_list(name)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not add list: {exc}")
+
+    # --- Reminders / timers / alarms (guarded; src/vox/scheduler.py, idea #16) ---
+    @app.get("/api/reminders")
+    def get_reminders() -> list:
+        mod = _try_import_scheduler()
+        if mod is None:
+            return []
+        try:
+            return [_job_to_api(j) for j in mod.list_jobs()]
+        except Exception:  # never 500 a list read
+            return []
+
+    @app.post("/api/reminders")
+    async def add_reminder(request: Request):
+        mod = _try_import_scheduler()
+        if mod is None:
+            return _service_unavailable("scheduler")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        kind = body.get("kind")
+        if kind not in ("timer", "alarm", "reminder"):
+            return _bad_request("'kind' must be one of timer|alarm|reminder")
+        fire_at = body.get("fireAt")
+        if not isinstance(fire_at, str) or not fire_at.strip():
+            return _bad_request("'fireAt' (ISO local datetime) is required")
+        recurrence = body.get("recurrence")
+        # Accept the fixed words, an interval ("every:<seconds>" or "every 30 minutes"), or
+        # null/empty. The scheduler's canon is the single source of truth (None ⇒ unrecognised).
+        if recurrence not in (None, "") and mod._canon_recurrence(recurrence) is None:
+            return _bad_request("'recurrence' must be null|daily|weekdays|weekly "
+                                "or an interval like 'every:1800'")
+        try:
+            job = mod.create_job(
+                kind,
+                str(body.get("text") or ""),
+                fire_at=fire_at.strip(),
+                recurrence=recurrence or None,
+            )
+        except ValueError as exc:
+            return _bad_request(str(exc))
+        except Exception as exc:
+            return _bad_request(f"could not create reminder: {exc}")
+        return _job_to_api(job)
+
+    @app.delete("/api/reminders/{the_id}")
+    def remove_reminder(the_id: str):
+        mod = _try_import_scheduler()
+        if mod is None:
+            return _not_found("reminder")
+        try:
+            removed = bool(mod.cancel_job(the_id))
+        except Exception as exc:
+            return _bad_request(f"could not cancel reminder: {exc}")
+        if not removed:
+            return _not_found("reminder")
         return {"ok": True}
 
     # --- Memory (guarded; src/vox/memory.py) ---
@@ -590,6 +1032,29 @@ def _try_import_memory():
         return None
 
 
+def _try_import_scheduler():
+    """Guarded import of the top-level scheduler module (src/vox/scheduler.py)."""
+    try:
+        from .. import scheduler
+
+        return scheduler
+    except Exception:
+        return None
+
+
+def _job_to_api(job: dict) -> dict:
+    """Map a scheduler Job (snake_case on disk) to the dashboard's camelCase shape."""
+    return {
+        "id": job.get("id"),
+        "kind": job.get("kind"),
+        "text": job.get("text") or "",
+        "fireAt": job.get("fire_at"),
+        "recurrence": job.get("recurrence"),
+        "createdAt": job.get("created_at"),
+        "enabled": bool(job.get("enabled", True)),
+    }
+
+
 def _memory_supports_tier(mod) -> bool:
     """True if the memory module's ``add`` accepts a ``tier`` keyword (v2)."""
     try:
@@ -641,7 +1106,7 @@ def _mcp_config() -> dict:
     # server resolves the package regardless of where the editor invokes it.
     server_entry = {
         "command": "uv",
-        "args": ["run", "python", "-m", "vox.mcp.speak"],
+        "args": ["run", "python", "mcp/vox_speak_server.py"],
         "cwd": repo_root,
     }
 
@@ -666,7 +1131,7 @@ def _mcp_config() -> dict:
     claude_add = (
         "claude mcp add vox-speak "
         f"--cwd {repo_root} "
-        "-- uv run python -m vox.mcp.speak"
+        "-- uv run python mcp/vox_speak_server.py"
     )
 
     return {
@@ -868,8 +1333,87 @@ def _handbook_static() -> list:
                     "description": "Rewrite the current selection in place (brain).",
                 },
                 {
-                    "phrase": "what does this say? / read this",
-                    "description": "Screen vision — the brain screenshots and reads what's on screen.",
+                    "phrase": "what does this say? / read this / what's on my screen",
+                    "description": "Screen vision — reads what's on screen (accessibility tree first, "
+                    "screenshot fallback).",
+                },
+                {
+                    "phrase": "what app is this? / what am I looking at?",
+                    "description": "Instantly speaks the name of the app you're focused on — no brain call.",
+                },
+                {
+                    "phrase": "click Submit / click the Log in button",
+                    "description": "Press a button, link, tab or control by its label — found in the "
+                    "accessibility tree (works best in native apps & standard UI).",
+                },
+                {
+                    "phrase": "show clickable  →  “click 14”",
+                    "description": "Overlays a number on every clickable element on screen; say the "
+                    "number to press it (“click 14”, or just “14”). Also triggers "
+                    "on “click link” / “click button”. Say anything else to dismiss. "
+                    "Best in control mode, which stays listening for the number.",
+                },
+            ],
+        },
+        {
+            "title": "Commands Vox Learns",
+            "blurb": "When Vox has to work something out with the brain, it remembers the wiring — "
+            "after a few uses the same request runs instantly and for free, with no AI call. It "
+            "saves these on its own; these phrases let you take over. Everything it has learned is "
+            "reviewable, and nothing it learns can override a built-in command.",
+            "items": [
+                {
+                    "phrase": "remember that",
+                    "description": "Save what Vox just did as a command right now, without waiting "
+                    "for it to happen a few times. The best way to teach it something "
+                    "you use often but not in bursts.",
+                    "variants": ["save that as a command", "learn that", "keep that"],
+                },
+                {
+                    "phrase": "forget that",
+                    "description": "Delete the command behind what just ran, and stop it being "
+                    "re-learned for a month. Only ever removes something Vox taught "
+                    "itself — built-in commands can't be unlearned.",
+                    "variants": ["unlearn that", "delete that command"],
+                },
+                {
+                    "phrase": "no  /  that's wrong",
+                    "description": "Said straight after Vox acts, this retires the learned command "
+                    "that misfired — one correction is enough. It also stops that "
+                    "wrong mapping counting towards anything it's still considering.",
+                    "variants": ["not that", "wrong", "undo"],
+                },
+            ],
+        },
+        {
+            "title": "Timers, Alarms & Reminders",
+            "blurb": "Vox owns these — they show on the Scheduler page and you can cancel them by "
+            "voice. Reminders are spoken (with your name); timers chime; alarms do both. Spoken "
+            "numbers work (“in two minutes”), and the task can come before or after the time.",
+            "items": [
+                {
+                    "phrase": "set a timer for 5 minutes",
+                    "description": "A countdown that chimes when it's up (seconds / minutes / hours).",
+                },
+                {
+                    "phrase": "remind me to call Sam in 10 minutes",
+                    "description": "A spoken reminder after a delay.",
+                },
+                {
+                    "phrase": "remind me at 5pm to leave / remind me every day at 9 to stretch",
+                    "description": "Reminders at a clock time, optionally repeating (daily / weekdays / weekly).",
+                },
+                {
+                    "phrase": "set an alarm for 7am",
+                    "description": "An alarm at a clock time — repeats its sound and speaks.",
+                },
+                {
+                    "phrase": "what are my reminders? / what timers do I have?",
+                    "description": "Speaks a summary of everything scheduled.",
+                },
+                {
+                    "phrase": "cancel my timer / cancel my reminders",
+                    "description": "Cancels matching scheduled items.",
                 },
             ],
         },
@@ -893,6 +1437,23 @@ def _handbook_static() -> list:
                     "description": "Delete the character before the cursor.",
                 },
                 {
+                    "phrase": "delete word  /  delete the last five words",
+                    "description": "Delete whole words (⌥⌫) — one, or a count you name (up to 50).",
+                },
+                {
+                    "phrase": "delete line  /  delete paragraph",
+                    "description": "Delete back to the start of the line, or the whole paragraph.",
+                },
+                {
+                    "phrase": "undo  /  redo",
+                    "description": "Undo (⌘Z) or redo (⌘⇧Z) your last edit — e.g. after an accidental delete.",
+                },
+                {
+                    "phrase": "literally <words>",
+                    "description": "Type a phrase verbatim even when it's a command — 'literally delete line' "
+                    "types those words instead of deleting.",
+                },
+                {
                     "phrase": "tab key",
                     "description": "Press Tab — indent, or jump to the next field.",
                 },
@@ -900,17 +1461,25 @@ def _handbook_static() -> list:
         },
         {
             "title": "Modes",
-            "blurb": "Vox has three working modes plus idle. Wake into the one you want.",
+            "blurb": "The entry points share the SAME capabilities (commands, scheduler, "
+            "compose/rewrite/vision) — they differ only in how long they stay active and their "
+            "default bias.",
             "items": [
                 {
+                    "phrase": "One-shot — “Vox, …”",
+                    "description": "From idle, do a single thing then return to idle — any command, "
+                    "reminder, “write me…”, or “what can you see?”. Same powers as control.",
+                },
+                {
                     "phrase": "Control",
-                    "description": "Deterministic, hands-free app/tab/window/space control. "
-                    "Fast and keyword-driven; uncertain commands can defer to the brain.",
+                    "description": "Stays on for continuous, command-first control — app/tab/window/"
+                    "space, plus compose/rewrite/vision and the scheduler. Uncertain commands defer "
+                    "to the brain.",
                 },
                 {
                     "phrase": "Assistant",
-                    "description": "Conversational mode — ask questions, get spoken answers, "
-                    "follow-ups stay in context until you stand down.",
+                    "description": "Stays on, chat-first — conversation with spoken answers. Now also "
+                    "writes, rewrites, reads the screen and runs commands/timers mid-chat.",
                 },
                 {
                     "phrase": "Dictation",

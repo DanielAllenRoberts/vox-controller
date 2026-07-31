@@ -8,10 +8,14 @@ heads-up — "give me a shout when you're done" → it says "the workflow is fin
 Run as a stdio MCP server:
     uv run python mcp/vox_speak_server.py
 
-Wire it into your editor — see mcp/README.md. macOS only (uses `say`); on other platforms
-the tools degrade to a no-op with a clear message rather than erroring.
+Wire it into your editor — see mcp/README.md. macOS only. It speaks through Vox's own TTS
+(`vox.tts`), so it supports both the macOS `say` engine and the new neural Kokoro engine, in a
+voice that's INDEPENDENT of the Vox system voice (so you can tell the assistant apart from Vox).
+Configure via env: VOX_MCP_VOICE, VOX_MCP_TTS_ENGINE ("say"|"kokoro"|""), VOX_MCP_KOKORO_VOICE.
+Falls back to a bare `say` if the vox package isn't importable; off macOS the tools no-op.
 """
 
+import os
 import platform
 import shutil
 import subprocess
@@ -22,28 +26,99 @@ mcp = FastMCP("vox-speak")
 
 _MAX_CHARS = 1000  # keep spoken text sane
 
+# The MCP voice is INDEPENDENT of the system (Vox daemon) voice, so the assistant's heads-up
+# sounds different from Vox itself, and can use the new neural Kokoro engine too. It's controlled
+# from the dashboard (Settings → MCP voice: mcp_tts_engine / mcp_tts_voice / mcp_kokoro_voice),
+# read live from the settings store at speak-time. If the vox package isn't importable here (a
+# bare/standalone run), it falls back to these env vars, then these defaults:
+#   VOX_MCP_TTS_ENGINE   "say" | "kokoro" | "" (follow the system engine)   default ""
+#   VOX_MCP_VOICE        macOS `say` voice name                              default "Samantha"
+#   VOX_MCP_KOKORO_VOICE Kokoro voice id (af_heart, af_bella, am_michael, …) default "af_bella"
+# Defaults DIFFER from Vox's default voice ("Daniel" / "af_heart") so the two are audibly distinct.
+# The `voice` tool arg still overrides the `say` voice per call.
+_DEFAULT_SAY_VOICE = "Samantha"     # US English, present on essentially all macOS — ≠ Vox's "Daniel"
+_DEFAULT_KOKORO_VOICE = "af_bella"  # ≠ Vox's default Kokoro "af_heart"
+# A short chime played BEFORE the MCP speaks, so a spoken heads-up doesn't appear out of nowhere.
+# Resolved dashboard setting (mcp_speak_cue) → env (VOX_MCP_CUE) → this default; "" disables it.
+_DEFAULT_CUE = "/System/Library/Sounds/Tink.aiff"
 
-def _default_voice() -> str:
-    """Reuse Vox's configured TTS voice if the package is importable; else system default."""
+
+def _cue_path():
+    """Path to the pre-speech cue sound: dashboard setting → env → default. '' disables it.
+    Mirrors _mcp_voice()'s resolution so it's controllable from the same Settings page."""
     try:
-        from vox.config import CONFIG
-        return CONFIG.tts_voice or ""
+        from vox.web import settings_store
+        val = settings_store.get("mcp_speak_cue")
+        return _DEFAULT_CUE if val is None else val
     except Exception:
-        return ""
+        return os.environ.get("VOX_MCP_CUE", _DEFAULT_CUE)
+
+
+def _play_cue() -> None:
+    """Play the short cue chime and wait for it to finish, so it precedes the voice rather than
+    overlapping it. Fully guarded — a missing file / non-macOS / no `afplay` just skips silently,
+    never blocking the actual speech."""
+    path = _cue_path()
+    if not path or platform.system() != "Darwin" or not shutil.which("afplay"):
+        return
+    try:
+        subprocess.run(["afplay", path], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass
+
+
+def _mcp_voice():
+    """Resolve (engine, say_voice, kokoro_voice) for the MCP. Primary source is the dashboard
+    settings store (override → Config default), so the Settings page controls the MCP voice; if the
+    vox package isn't importable (bare run), fall back to env vars, then the built-in defaults.
+    `engine` "" means follow the system tts_engine (the "system" setting maps to "")."""
+    try:
+        from vox.web import settings_store
+        eng = settings_store.get("mcp_tts_engine")
+        return (
+            "" if eng in (None, "system") else eng,
+            settings_store.get("mcp_tts_voice") or _DEFAULT_SAY_VOICE,
+            settings_store.get("mcp_kokoro_voice") or _DEFAULT_KOKORO_VOICE,
+        )
+    except Exception:
+        return (
+            os.environ.get("VOX_MCP_TTS_ENGINE", ""),
+            os.environ.get("VOX_MCP_VOICE", _DEFAULT_SAY_VOICE),
+            os.environ.get("VOX_MCP_KOKORO_VOICE", _DEFAULT_KOKORO_VOICE),
+        )
 
 
 def _say(text: str, voice: str, rate: int) -> str:
-    if platform.system() != "Darwin" or not shutil.which("say"):
-        return "(text-to-speech unavailable: macOS `say` not found on this system)"
     text = (text or "").strip()
     if not text:
         return "(nothing to speak)"
+    text = text[:_MAX_CHARS]
+    _play_cue()  # short chime first, so the spoken heads-up doesn't come out of nowhere
+    engine, say_voice, kokoro_voice = _mcp_voice()
+    # Prefer Vox's own TTS engine (supports the neural Kokoro engine + the independent MCP voice);
+    # fall back to a bare `say` if the vox package isn't importable from this process.
+    try:
+        from vox import tts
+        tts.speak_with(
+            text,
+            engine=engine,
+            say_voice=voice or say_voice,
+            kokoro_voice=kokoro_voice,
+            rate=(rate or None),
+        )
+        return f"spoke aloud: {text[:80]!r}"
+    except Exception:
+        pass  # vox package not importable here → bare `say` fallback below
+    if platform.system() != "Darwin" or not shutil.which("say"):
+        return "(text-to-speech unavailable: Vox TTS and macOS `say` both unavailable)"
     cmd = ["say"]
-    if voice:
-        cmd += ["-v", voice]
+    v = voice or say_voice
+    if v:
+        cmd += ["-v", v]
     if rate and rate > 0:
         cmd += ["-r", str(rate)]
-    cmd.append(text[:_MAX_CHARS])
+    cmd.append(text)
     try:
         subprocess.run(cmd, check=True, timeout=60)
         return f"spoke aloud: {text[:80]!r}"
@@ -60,11 +135,12 @@ def speak(text: str, voice: str = "", rate: int = 0) -> str:
 
     Args:
         text: What to say (kept short; long text is truncated).
-        voice: Optional macOS voice name (e.g. "Daniel", "Samantha"). Defaults to Vox's
-               configured voice, else the system default.
+        voice: Optional macOS `say` voice name (e.g. "Samantha", "Daniel") to override the MCP's
+               own voice for this call. Defaults to the MCP voice (VOX_MCP_VOICE), which is kept
+               distinct from Vox's system voice.
         rate: Optional words-per-minute. 0 = the voice's natural rate.
     """
-    return _say(text, voice or _default_voice(), rate)
+    return _say(text, voice, rate)
 
 
 @mcp.tool()
@@ -75,9 +151,10 @@ def announce_done(summary: str = "The task is finished.", voice: str = "") -> st
 
     Args:
         summary: A one-line spoken summary of what finished.
-        voice: Optional macOS voice name (defaults to Vox's configured voice).
+        voice: Optional macOS `say` voice name to override the MCP voice for this call
+               (defaults to VOX_MCP_VOICE, kept distinct from Vox's system voice).
     """
-    return _say(summary, voice or _default_voice(), 0)
+    return _say(summary, voice, 0)
 
 
 if __name__ == "__main__":

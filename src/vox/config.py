@@ -32,8 +32,13 @@ class Config:
 
     # Sleep / deactivate — matched in transcribed text (no model needed; we're
     # already transcribing once a mode is active).
+    # Exit the current mode → back to idle. Includes farewells ("bye Vox", "goodbye") so they ALWAYS
+    # leave assistant mode, even when the model tagged its last reply [OPEN] (waiting for you) — a
+    # farewell is caught here, before the chat path, so it never gets sent to the brain as a turn.
     sleep_phrases: tuple[str, ...] = ("stand down", "go to sleep", "go ahead and sleep", "going to sleep",
-                                      "nevermind", "never mind", "cancel that", "forget it")
+                                      "nevermind", "never mind", "cancel that", "forget it",
+                                      "bye vox", "bye fox", "bye box", "goodbye", "good bye",
+                                      "bye bye", "see you later", "okay bye", "ok bye", "alright bye")
     sleep_spoken: str = "stand down"
 
     # Emergency stop — drop straight to idle from any mode (more forceful than "stand down").
@@ -87,12 +92,30 @@ class Config:
     sample_rate: int = 16_000
     frame_samples: int = 1280
     input_device: int | None = None  # None = system default; index from `uv run vox-diagnose`
+    # Mic-stall self-heal: a healthy input stream delivers a frame every ~80 ms even in silence, so if
+    # NO audio arrives for this long the device died (commonly an audio-device change — opening an app
+    # that grabs audio, a Bluetooth/headphone switch). Vox first re-opens the stream in the background;
+    # if audio still doesn't return within this window it does a clean self-restart (a fresh process
+    # reliably re-acquires the mic) instead of wedging silently — the "freezes after a while" bug.
+    mic_stall_restart_seconds: float = 12.0
 
     # --- Utterance capture (energy-based) ---
-    speech_rms: float = 150.0            # speech-onset threshold; calibrate via `vox-diagnose`
-    silence_seconds: float = 0.8         # trailing silence that ends a CONTROL command
-    assistant_silence_seconds: float = 1.2  # pause allowed in ASSISTANT mode before it sends
-    max_utterance_seconds: float = 8.0
+    speech_rms: float = 150.0            # speech-ONSET threshold (start capturing); calibrate via `vox-diagnose`
+    # Release threshold for ENDING a turn, as a fraction of speech_rms (hysteresis / two-threshold VAD).
+    # Once you've started talking, a frame only counts toward "silence" below this LOWER bar — so soft
+    # passages, trailing words and breaths between words don't get mistaken for a pause and cut you off
+    # mid-sentence (the "it interrupts me while I'm still speaking" report). Onset still needs the full
+    # speech_rms so background never triggers. 1.0 = old single-threshold behaviour; lower = harder to
+    # cut you off (but a noisy room can hold the turn open longer, up to max_utterance_seconds).
+    end_rms_ratio: float = 0.5
+    silence_seconds: float = 0.5         # trailing silence that ends a CONTROL command — short so commands fire fast (assistant/dictation use the longer assistant_silence_seconds below). Raise toward 0.8 if it ends mid-command.
+    assistant_silence_seconds: float = 1.8  # pause allowed in ASSISTANT mode before it sends — long enough to think mid-sentence ("um…") without it cutting you off; lower (≈1.2) is snappier, higher (≈2.2) more patient. (Also used by dictation.)
+    max_utterance_seconds: float = 15.0  # hard cap on one utterance — long enough not to cut off a full request/reminder
+    # Idle (wake-detection) has a SHORTER cap than max_utterance_seconds: a wake phrase / "Vox, …"
+    # one-shot lives at the START of the utterance, so decoding a 15s ambient monologue while idle
+    # only burns CPU and spikes RAM for nothing. Capping idle capture bounds those spikes in a talky
+    # room (the "doesn't idle well / freezes after a while" report) without affecting active modes.
+    idle_max_utterance_seconds: float = 8.0
     listen_timeout_seconds: float = 6.0  # wake/dictation re-arm interval (control mode keeps listening)
     assistant_idle_timeout_seconds: float = 4.0   # assistant chat: drop to control/idle after this silence
     # Patient wait while the model tagged its reply [OPEN] (it expects you to respond) — a safety
@@ -126,8 +149,14 @@ class Config:
     # (missing huggingface_hub, download/model/inference error) falls back to the fixed-silence path,
     # so the daemon always runs. Model (~8MB) downloads once to ~/.cache/vox/smart-turn/.
     turn_detection: str = "vad"
-    min_endpointing_delay: float = 0.5   # pause (s) before smart-turn is consulted (mirrors livekit min_delay)
+    min_endpointing_delay: float = 0.6   # pause (s) before smart-turn is consulted
     max_endpointing_delay: float = 3.0   # hard cap (s): end the turn even if smart-turn keeps saying INCOMPLETE
+    # How confident smart-turn must be you're DONE before ending the turn (sigmoid prob in [0,1]).
+    # NOTE: the smart-turn model is poorly discriminative on some setups (scores ~0.73 even on a
+    # pause), so a HIGH threshold makes it never end early and wait out max_endpointing_delay every
+    # turn (slow), while a LOW threshold ends on any pause (cuts you off). If smart_turn is unreliable
+    # for you, prefer turn_detection="vad" (fixed silence) — predictable and fast. Default is a middle.
+    smart_turn_threshold: float = 0.7
 
     # Acoustic echo cancellation (voice-upgrade loop 5 / R7): how the mic is captured.
     #   false = DEFAULT — capture via the sounddevice/PortAudio MicStream (today's behavior,
@@ -145,6 +174,11 @@ class Config:
     # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
     whisper_model: str = "small.en"   # more accurate for accents than base.en (~250MB 1-time download, ~2-3x slower STT but still <1s). Revert to "base.en" for max speed.
     whisper_compute_type: str = "int8"
+    # Cap how many CPU threads CTranslate2 uses per transcription. Left at 0 (its default), it grabs
+    # ~all physical cores, so back-to-back idle transcriptions in a talky room can saturate the whole
+    # machine and make it beachball ("freezes after a while"). A modest cap leaves cores free for the
+    # rest of the system — STT stays well under a second — so the Mac stays responsive while Vox listens.
+    whisper_cpu_threads: int = 4
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
     command_hotwords: str = (
@@ -154,6 +188,21 @@ class Config:
         "switch cursor arc safari chrome github youtube gmail spotify notion "
         "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
     )
+
+    # --- Vosk grammar command recognition — the "fast lane" (idea #53) ---------------------------
+    # When ON, a captured CONTROL-mode utterance is first run through Vosk constrained to the CURRENT
+    # command phrases (from the command DB). A confident match runs the command instantly (~5ms, no
+    # Whisper, no LLM) AND snaps mis-hears to the nearest command ("necks tab" → "next tab"). Anything
+    # Vosk can't match ("[unk]") falls through to Whisper exactly as before — a two-lane design.
+    # LAZY + GUARDED: vosk + the ~50MB model load only when this is on; any problem falls back to
+    # Whisper, so the daemon runs with or without it.
+    vosk_commands_enabled: bool = False
+    # Path to a Vosk model dir. "" = auto-find ~/.cache/vox/vosk/vosk-model-* (where the setup
+    # download puts it). Auto-download by lang needs a live cert on alphacephei.com (currently expired),
+    # so prefer a downloaded model. See the Dictionary/#53 notes.
+    vosk_model_path: str = ""
+    vosk_min_conf: float = 0.0    # 0 = accept any grammar match; raise (e.g. 0.5) to reject low-confidence snaps
+    vosk_log: bool = True         # log [vosk] grammar builds + recognitions to vox.log (visibility)
 
     # --- Brains (idea #17) --- Vox routes thinking to one of two configurable "brains":
     #   • small = fast/cheap; default for chat + command execution
@@ -167,7 +216,7 @@ class Config:
     #   Local Ollama  : provider="openai", model="llama3.1",       llm_base_url="http://localhost:11434/v1", llm_api_key_env=<any dummy>
     #   Local LM Studio: provider="openai", model="<loaded model>", llm_base_url="http://localhost:1234/v1",  llm_api_key_env=<any dummy>
     small_brain_provider: str = "openai"       # DeepSeek via its OpenAI-compatible API (trying it as the small brain)
-    small_brain_model: str = "deepseek-chat"   # back to Haiku: provider="anthropic", model="claude-haiku-4-5-20251001"
+    small_brain_model: str = "deepseek-v4-flash"   # DeepSeek's fast tier (the old "deepseek-chat" now aliases here). Haiku: provider="anthropic", model="claude-haiku-4-5-20251001"
     big_brain_provider: str = "claude_sdk"     # big/vision stays on the Claude subscription (no per-token cost)
     big_brain_model: str = "claude-opus-4-8"
     escalate_to_big_brain: bool = True   # let the small brain defer complex turns to the big brain
@@ -177,7 +226,16 @@ class Config:
     personality: str = ""
 
     llm_base_url: str = "https://api.deepseek.com"  # openai-compatible providers (DeepSeek, Ollama, LM Studio); "" for none
-    llm_api_key_env: str = "DEEPSEEK_API_KEY"   # env var holding the API key (openai/anthropic providers). "ANTHROPIC_API_KEY" for the Anthropic API
+    llm_api_key_env: str = "DEEPSEEK_API_KEY"   # env var holding the API key for the "openai" provider (DeepSeek etc.)
+    anthropic_key_env: str = "ANTHROPIC_API_KEY"  # the "anthropic" provider's OWN key env — separate from llm_api_key_env so a DeepSeek (openai) brain + a Claude/Haiku (anthropic) brain can run at once
+
+    # Local AI — a self-hosted OpenAI-compatible /v1 endpoint (LM Studio / Ollama / vLLM, e.g. a home
+    # GPU box over a Cloudflare tunnel). Point ANY brain at it by setting that brain's provider to
+    # "local_ai" (Settings dashboard or config) — it uses local_ai_model and reads the URL + key from
+    # .env by the var NAMES below (kept OUT of this public repo). Cheap, private, your own hardware.
+    local_ai_base_url_env: str = "LOCAL_AI1_URL"   # .env var holding the base URL (…/v1)
+    local_ai_key_env: str = "LOCAL_AI1"            # .env var holding the API key
+    local_ai_model: str = "google/gemma-4-e4b"     # model id the local server exposes
     llm_max_tokens: int = 800   # headroom for composing text ("write me…"); chat stays short via the prompt
 
     # LLM-as-executor (idea #12): on an uncertain command, the small brain runs Vox's own
@@ -206,6 +264,9 @@ class Config:
     # ("what does this say?"). Sends ONE downscaled frame to the cloud brain — set False to disable.
     # Needs Screen Recording permission (System Settings → Privacy & Security → Screen Recording).
     screen_vision_enabled: bool = True
+    # How the screen is "seen": "auto" = AX tree first, screenshot fallback; "axtree" = tree only
+    # (token-light text, no image); "screenshot" = image only (today's behavior). Master toggle above.
+    screen_vision_mode: str = "auto"
 
     # --- Voice output (TTS) --- macOS `say`: local, instant, no model download. Swap for a
     # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →
@@ -233,6 +294,18 @@ class Config:
     # Stays OFF by default until AEC (VoiceProcessingIO) lands.
     tts_interruptible: bool = False
 
+    # vox-speak MCP voice (idea #34) — the voice the IDE assistant uses to give you an audible
+    # heads-up via the mcp/vox_speak_server, kept SEPARATE from the system voice above so the two
+    # sound different and you can tell who's talking. Settable from the dashboard (Settings → MCP
+    # voice) or env in the MCP server config. mcp_tts_engine "system" = follow tts_engine above;
+    # "say"/"kokoro" pins it. Defaults differ from the system voice on purpose.
+    mcp_tts_engine: str = "system"        # "system" (follow tts_engine) | "say" | "kokoro"
+    mcp_tts_voice: str = "Samantha"       # macOS `say` voice for the MCP (≠ system "Daniel")
+    mcp_kokoro_voice: str = "af_bella"    # Kokoro voice for the MCP when on the kokoro engine (≠ system "af_heart")
+    # A short chime played just BEFORE the MCP speaks, so an IDE heads-up doesn't come out of
+    # nowhere (the most-used MCP flow: "tell me out loud when you're done"). "" disables it.
+    mcp_speak_cue: str = "/System/Library/Sounds/Tink.aiff"
+
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
     sound_control: str = "/System/Library/Sounds/Hero.aiff"
@@ -246,6 +319,40 @@ class Config:
     sound_thinking: str = "/System/Library/Sounds/Submarine.aiff"    # escalating to the LLM (it may take a moment)
     sound_dashboard_open: str = "/System/Library/Sounds/Blow.aiff"   # opened the dashboard
     sound_dashboard_close: str = "/System/Library/Sounds/Purr.aiff"  # closed the dashboard
+    sound_reminder: str = "/System/Library/Sounds/Glass.aiff"        # a reminder fired (soft chime before the spoken line)
+    sound_timer: str = "/System/Library/Sounds/Funk.aiff"            # a timer's up (played twice; sound-only by default)
+    sound_alarm: str = "/System/Library/Sounds/Sosumi.aiff"          # an alarm fired — repeated a few times so it's hard to miss
+    sound_alarm_repeat: int = 4                                      # how many times the alarm sound plays in a row
+
+    # --- Scheduler (idea #16) --- Vox OWNS timers / alarms / reminders so the dashboard can show
+    # and cancel them all in one place. A background thread (vox.scheduler) fires due jobs per the
+    # per-kind output policy (reminder→spoken+sound, timer→sound, alarm→both). Jobs persist to
+    # data/reminders.json (gitignored) and survive a restart. Entirely additive + guarded: a
+    # scheduler failure can never take down the voice daemon.
+    scheduler_enabled: bool = True          # run the background scheduler thread on startup
+    scheduler_poll_seconds: float = 5.0     # how often the thread wakes to fire due jobs
+    # OPTIONAL: also add a reminder to Apple Reminders (AppleScript-scriptable + iCloud-synced) so it
+    # ALSO goes off on your phone. Default OFF — turn on to mirror. (Clock isn't used: it's neither
+    # scriptable nor phone-synced.) Guarded: a mirror failure never blocks the local job.
+    apple_reminders_mirror: bool = False
+
+    # --- Focus watcher (observability; foundation for app-scoped commands, idea #36) --- A small
+    # background thread (vox.focus_watch) polls the frontmost app and logs "window in view: <App>"
+    # to vox.log whenever it CHANGES, so you can see Vox notice when you switch apps (Arc ↔ Slack).
+    # This is the focus-change detection the command DB's per-app lookup will later hook into.
+    # Entirely additive + guarded: a failure here can never take down the voice daemon.
+    focus_watch_enabled: bool = True        # run the background focus-watch thread on startup
+    focus_watch_poll_seconds: float = 1.5   # how often it checks the frontmost app
+
+    # --- Command DB (app/site-scoped voice commands, idea #36 / docs/plan/command-db.md) --- The
+    # SQLite store (data/commands.db) is loaded into memory at boot (global + mode/system commands)
+    # and per-app on focus change (vox.command_cache); matching is in-memory so the hot path never
+    # touches SQLite. `command_db_enabled` flips on the deterministic DB resolver in vox.dispatch;
+    # `command_db_log` mirrors every DB query + focus load + resolve to vox.log so you can watch it
+    # work. Both are additive + guarded. ON by default since 2026-07-31: command LEARNING (idea #24)
+    # writes into this DB, so with the resolver off Vox would learn commands and then never use them.
+    command_db_enabled: bool = True         # consult the DB resolver in dispatch
+    command_db_log: bool = True             # log every DB query / focus load / resolve to vox.log
 
 
 CONFIG = Config()

@@ -1032,6 +1032,12 @@ wheels = [
 ]
 
 [[package]]
+name = "srt"
+version = "3.5.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/b7/4a1bc231e0681ebf339337b0cd05b91dc6a0d701fa852bb812e244b7a030/srt-3.5.3.tar.gz", hash = "sha256:4884315043a4f0740fd1f878ed6caa376ac06d70e135f306a6dc44632eed0cc0", size = 28296, upload-time = "2023-03-28T02:35:44.007Z" }
+
+[[package]]
 name = "sse-starlette"
 version = "3.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1197,6 +1203,21 @@ wheels = [
 ]
 
 [[package]]
+name = "vosk"
+version = "0.3.44"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi", marker = "sys_platform == 'darwin'" },
+    { name = "requests", marker = "sys_platform == 'darwin'" },
+    { name = "srt", marker = "sys_platform == 'darwin'" },
+    { name = "tqdm", marker = "sys_platform == 'darwin'" },
+    { name = "websockets", marker = "sys_platform == 'darwin'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/19/5e8299237bc2005c3d155d3b48adba6fd6484465ad5c970302fc1d37947d/vosk-0.3.44-py3-none-macosx_10_6_universal2.whl", hash = "sha256:029d0b3d6a5cff874c575b8a5814a4cccfb37608cff52e846c02a8c67a882801", size = 4710953, upload-time = "2022-09-25T19:11:57.513Z" },
+]
+
+[[package]]
 name = "vox"
 version = "0.0.1"
 source = { editable = "." }
@@ -1217,6 +1238,7 @@ dependencies = [
     { name = "python-dotenv", marker = "sys_platform == 'darwin'" },
     { name = "sounddevice", marker = "sys_platform == 'darwin'" },
     { name = "uvicorn", extra = ["standard"], marker = "sys_platform == 'darwin'" },
+    { name = "vosk", marker = "sys_platform == 'darwin'" },
 ]
 
 [package.metadata]
@@ -1237,6 +1259,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.49.0" },
+    { name = "vosk", specifier = ">=0.3.44" },
 ]
 
 [[package]]

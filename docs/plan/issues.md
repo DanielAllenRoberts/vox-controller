@@ -15,6 +15,90 @@
 | O6 | (ongoing) | Disk space is a constraint | 🔴 | Be frugal with deps/models. `small.en` took ~590 MB. |
 | O7 | 2026-06-17 | **External audio (a video on the speakers) is transcribed and triggers commands/LLM** | 🟡 | Root cause: no echo cancellation — the mic hears *all* system + room audio. Mitigated by a single-word/filler gate before escalation, and now by **keyword-gated escalation** (`escalation_mode="keywords"`, ideas #23) — only utterances with a trigger word ("write", "vox", "make this"…) reach the brain, so ambient speech is ignored. The real fix is **AEC** (#21, native macOS Voice Processing cancels all speaker output incl. video). Headphones avoid it today. |
 | O8 | 2026-06-17 | Barge-in (interrupt the LLM) feels unreliable | 🟡 | Logic is correct, but fast Haiku calls finish before you can speak, and ambient audio floods the interrupt-listener. Firms up with AEC (#21) + reserving barge-in for slow calls. |
+| O9 | 2026-06-21 | **"Freezes after a while" / "doesn't idle well" — daemon wedges silently** | 🟡 | **Root cause (diagnosed via `sample`):** the sounddevice/PortAudio **mic stream silently dies** after an audio-device change (e.g. *opening Spotify*, a Bluetooth/headphone switch). The old `_restart()` re-opened the same stream without re-binding the device, so frames never returned and the main thread parked forever in `queue.get` — alive but deaf. Stall warnings went to **stdout, not `vox.log`**, so the log just stopped (the "silent freeze"). **Fix:** non-blocking background re-open (abort, not the deadlock-prone `stop()`; `sd._terminate/_initialize` to re-enumerate devices) **+ a watchdog** (`mic_stall_restart_seconds`, default 12s): if a *previously-working* mic stays starved, raise `MicStreamDead` → clean self-restart (fresh process reliably re-acquires the mic). Guarded by `_ever_healthy` so a never-working mic can't restart-loop. Recovery now logs to `vox.log`. **Pending the user's live acceptance test.** Separately reduced idle CPU/RAM churn: `whisper_cpu_threads` cap, `idle_max_utterance_seconds`, and a `mic.flush()` after idle transcriptions. |
+| O11 | 2026-06-24 | **~2 GB RAM while running** — heavy for a "low running" daemon meant to run on any machine | 🟡 | **Diagnosed by measurement** (see `memory-footprint.md`): it's **two model weights**, not Python. **Kokoro neural TTS ~940 MB** (lazy-loaded on first speak; only active because `data/settings.json` set `tts_engine="kokoro"`, overriding the lean `"say"` code default) + **Whisper `small.en` ~840 MB** (always resident; serves wake + transcription). All Python/numpy/FastAPI/LLM-SDK/pyobjc glue is ~180 MB combined — a language rewrite would reclaim only ~100 MB while the native-backend models (90% of RAM) stay identical. **Path to < 1 GB:** `tts_engine` `kokoro`→`say` (−940 MB, the macOS voice is free) and/or `whisper_model` `small.en`→`base.en` (−460 MB). `say`+`base.en` ≈ **~580 MB**. onnxruntime arena tuning barely helps Kokoro (−115 MB only). **Recommendation:** ship `say`+`base.en` as defaults, expose Kokoro + `small.en` as opt-in quality upgrades. **Pending the user's decision on the voice/accuracy trade.** |
+| O10 | 2026-06-23 | **Absolute reminder/alarm with a clear time still fails when the task isn't introduced by "to"** — e.g. "remind me at 3:30 PM **that** I have a meeting" → "I couldn't work out a time." | 🔴 | **Not** a time-parse failure (3:30 PM is fine). `_RE_REMIND_AT` / `_RE_ALARM_AT` only capture the task via `\s+to\s+(.+?)` anchored to `$`, so any other connector ("that", "about", "saying") or trailing text breaks the *whole* match → `parse_and_create` returns None → generic "couldn't work out a time". **✅ FIXED (2026-06-23):** broadened the task connector in both regexes via a shared `_TASK_TAIL = (?:\s+(?:to\|that\|about\|saying)\s+(.+?))?$` — kept *required* (not bare trailing text) so "set an alarm for 5 minutes" still doesn't read 5 as a clock. Verified: the reported case + `to`/`about`/`saying` connectors create reminders; alarm forms work; timer path unaffected; regression guard passes. **Also added — the robust fix (2026-06-23):** a **structured SCHEDULE path** — the brain now computes the absolute time itself (it's given `Now:`) and emits `SCHEDULE: <kind> \| <ISO when> \| <text> \| <repeat>`; the executor creates the job directly via `scheduler.create_structured()`, **skipping the fragile English re-parse**. The English regex remains as a backward-compatible fallback. So *any* phrasing now works as long as the model fills the time. **Still future (idea #50):** the AM/PM-ambiguity *follow-up question*. *Minor cosmetic:* `_confirm` still prefixes the body with "to" ("…3:45 pm **to** I have a meeting") regardless of connector — separate, low-priority. |
+
+## Click / AX support for Electron apps (2026-06-25) — 🟡 partial: core works, **latency unacceptable**
+
+**Status:** the *mechanism* works (verified live), but it's **too slow to ship** — a click that
+isn't an immediate hit can take **~50 s** to fail. All changes are **uncommitted** on `command-db`.
+
+### What was diagnosed (against Slack, an Electron app)
+The user said *"click github"* (a Slack channel) and it failed → the brain then turned it into
+*"go to github.com"*. Root causes, confirmed by probing Slack's live AX tree:
+1. **Electron/Chromium hides its web-content AX tree** until an assistive client sets
+   `AXManualAccessibility` on the process. Without it, Slack's window reads as `windows=0` / nearly
+   empty — so the old click matcher had nothing to match.
+2. **The label isn't pressable.** The "github" chat is an `AXStaticText` whose actions are only
+   `AXShowMenu`/`AXScrollToVisible` (no `AXPress`). Its **ancestor `AXRow`/`AXGroup` *do* support
+   `AXPress`** — so you must press the nearest pressable ancestor, not the label.
+3. **It's deep** (depth 23) — the old matcher capped at depth 14, never reaching it.
+4. **The LLM had no screen visibility**, so it guessed "github" was a website.
+
+### What was built (works, but slow)
+- `actions._CLICK_SCRIPT` / `click_element` rewritten: set `AXManualAccessibility` first, deep walk
+  (depth 32), match label on any role, **press the nearest `AXPress`-able ancestor**, `AXScrollToVisible`
+  first, exact-match priority. **Verified live: "click github" → Slack jumped to the github channel.**
+- `actions.clickable_targets()` — lists on-screen clickable labels (Electron-aware, node-budgeted).
+- `executor`: `_SYSTEM` now routes in-app items (channels/chats/people/sidebar) to `CLICK` not a
+  website; `_click_fuzzy()` lists clickables + lets the brain pick when the verbatim click misses;
+  CLICK branch = fast `click_element` → fuzzy fallback. `axtree.snapshot` sets `AXManualAccessibility`
+  so `LOOK`/the dashboard AX page see Electron content.
+
+### Why it's still bad — the LATENCY (the blocker)
+System Events / AppleScript AX traversal of deep Electron trees is **fundamentally slow** (~1 read
+per node, thousands of nodes). The *success* path is ~5 s; every **miss is brutal and they STACK**.
+Real example from `vox.log` — *"click on alec"* (mis-heard "alex"), 21:09:18 → 21:10:09 = **~51 s**:
+1. deterministic `click_element("alec")` in the dispatch hot path → full deep traversal, miss (~slow)
+2. escalate → executor `environment_context()` + small-brain LLM → `CLICK: alec`
+3. CLICK branch `click_element("alec")` again → full traversal, miss again
+4. `_click_fuzzy` → `clickable_targets()` enumeration **~19 s** + LLM pick → `NONE`
+5. "I couldn't find a 'alec'…"
+
+Extra problems: the **deep traversal runs in the deterministic hot path** (so even ambient "click…"
+speech blocks for seconds); **mis-transcriptions** ("alec"/"alex") should fail *fast*, not crawl;
+the fuzzy list was only 18 labels and the brain returned `NONE` (matching/coverage also weak).
+
+### Next session — fix the latency (don't add more features first)
+- **The real fix: replace AppleScript AX with `pyobjc` `AXUIElement`** — direct AX API is ~100× faster
+  and supports targeted attribute search; turns ~19 s into ~instant. **It's a dependency** (the user
+  is cautious about deps + disk) — discuss first. This is almost certainly the right call.
+- **Stop the stacking:** if the deterministic click misses, don't re-traverse in the executor *and*
+  enumerate. Read the screen **once**, decide once.
+- **Don't deep-traverse in the hot path** — keep the dispatch-level click cheap/fail-fast; do the
+  expensive Electron walk only in the (already-slow) executor path.
+- **Cache `AXManualAccessibility`** per app + drop the 0.6 s settle when already enabled.
+- **Fail fast on a clear miss** so a mis-said target returns in ~1 s, not ~50 s.
+- Then: broaden fuzzy coverage (>18 labels) and re-test breadth (Discord/Cursor/Notion/native).
+
+## External code-review triage (2026-06-19)
+
+An open-source scanner (free model) flagged ~20 items; each was **verified against the source** before acting. Verdicts:
+
+**Real bugs — FIXED:**
+| Ref | Bug | Fix |
+|---|---|---|
+| C1 | Dashboard's generated MCP config used `-m vox.mcp.speak` (no such module) — the server is `mcp/vox_speak_server.py` | `server._mcp_config()` now emits `mcp/vox_speak_server.py` (matches `mcp/README.md`) |
+| C2 | Kokoro streaming TTS: end-of-stream sentinel sent with `put_nowait` → dropped on a full queue → `play()` hangs to the backstop on long replies | `_synth_worker` now uses a blocking `put(None, timeout=5)` so the sentinel is never dropped |
+| C10 | **Daemon wedges silently after a reply, with no audio** (2026-07-28, seen on a `LOOK` answer): `_StreamingPlayer.play()` drove the sounddevice stream with `with sd.OutputStream(...)`, whose `__exit__` calls `stop()` → `Pa_StopStream`, which **waits for the buffers to drain** and deadlocks on an audio-device change. It sat *outside* the 60 s in-loop backstop, so the loop froze past every bound, printed nothing after the `🔊` line, and the process needed a kill (a graceful restart couldn't run). Same CoreAudio trap `MicStream` already documents on the input side (`audio.py:139`). | Explicit `stream.start()` + teardown via `abort()` (Pa_AbortStream — immediate, no drain), with `close()` on a daemon thread so a stuck close can't reach the voice loop. **Mitigation without the fix:** turn *Interruptible speaking* off — `speak()` then takes the robust synth→`afplay` path (own process, `timeout=60`). |
+| C9 | **Regression from the new single-instance guard:** on restart the new process could see the exiting old process's port still held and refuse to start | Restart spawns with `VOX_RESTART=1`; `main()` skips the guard once for that launch |
+
+**False positives (verified NOT bugs):**
+- *RSS "undercount"* (`stats.py`): `rss/1e6` is decimal **MB** — a valid convention, not an error (MiB would be `/1048576`).
+- *Log lines "lost" on exit* (`io/console.py`): the file is opened `buffering=1` (line-buffered) → every line flushes immediately.
+- *AX-tree parser IndexError on a depth jump* (`web/axtree.py`): the `depth <= len(stack)` guards prevent it — verified with a 0→2 jump, no error.
+- *Hardcoded US key codes* (`actions.py`): macOS `key code 51/36/48/126` are **physical-key** codes (layout-independent); `keystroke "z"` is character-based (layout-correct).
+
+**Latent / minor (valid, not urgent — not fixed):**
+- `asyncio.run()` in `_claude_sdk`/`_claude_cli` would crash if ever called from a thread with a running loop; today only the daemon thread calls it (no loop). Harden if the dashboard ever calls the brain.
+- `data/` path via `parents[N]` is brittle to restructuring (works now). Pairs with a future `VOX_DATA_DIR` env (see ideas: configurable data dir).
+- VPIO `device` param is accepted but unused (system default mic) — **documented** in the code, intentional for interface parity.
+- Kokoro model download (`tts.py`): no progress/timeout; `.part` is overwritten on retry (not accumulated). UX nicety.
+
+**Dashboard a11y/UX (valid quality improvements, batched for one `dist` rebuild):** `aria-live`/`role="log"` on toasts + Conversation feed; CommandPalette focus/`combobox` semantics + true subsequence fuzzy match; conversation auto-scroll-only-when-at-bottom; WS heartbeat; localStorage read guarded for private-browsing; Scheduler poll only when jobs exist.
+
+**Features flagged** (F1–F10) are already on our roadmap/ideas (per-app commands #36, modality M3, AEC #21, configurable data dir, memory export, wake-word training UI…) — tracked, not bugs.
 
 ## Resolved
 

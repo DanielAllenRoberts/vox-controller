@@ -46,14 +46,20 @@ _SYSTEM = (
     "keeping, append a capture directive on its own line at the very end of your reply — "
     "'MEMORY[core]: <fact>' for durable, always-relevant facts (their name, standing "
     "preferences, long-term projects, standing instructions) or 'MEMORY[daily]: <note>' for "
-    "passing, session-specific things (what you did today, one-off requests). It's stripped before "
-    "the reply is shown or spoken; never mention it. Use it sparingly and only for genuinely useful "
-    "facts — core is rare and high-signal, daily is contextual. Don't repeat things you already "
-    "remember."
+    "passing, session-specific things (what you did today, one-off requests). "
+    "Write each fact as a COMPLETE, SELF-CONTAINED sentence that a FUTURE session with NO context "
+    "could understand on its own — always state WHAT the fact is about, never just the bare answer. "
+    "After asking the user's name and hearing 'Daniel', store \"MEMORY[core]: The user's name is "
+    "Daniel\" — NEVER \"MEMORY[core]: Daniel\". Likewise \"The user prefers concise replies\", not "
+    "\"concise\"; \"The user works at Acme as a designer\", not \"Acme\". If it can't stand alone "
+    "and be understood months later, rewrite it so it can. "
+    "It's stripped before the reply is shown or spoken; never mention it. Use it sparingly and only "
+    "for genuinely useful facts — core is rare and high-signal, daily is contextual. Don't repeat "
+    "things you already remember."
 )
 
 _anthropic_client = None
-_openai_client = None
+_openai_clients = {}  # (base_url, key) -> OpenAI client — one per endpoint (DeepSeek, local model, …)
 
 
 def _dbg(label: str, content) -> None:
@@ -360,6 +366,8 @@ def complete(text: str, history=None, *, brain: str = "small", system: str = _SY
         raw = _claude_cli(text, history, model, system, brain, kind)
     elif provider == "openai":
         raw = _openai(text, history, model, system, brain, kind)
+    elif provider == "local_ai":
+        raw = _local_ai(text, history, model, system, brain, kind)
     else:
         raw = _anthropic(text, history, model, system, brain, kind)
     # Debug: dump the COMPLETE raw response, BEFORE any [OPEN]/[DONE]/[BIG]/SAY:/MEMORY[...]
@@ -405,9 +413,12 @@ def _split_signal(raw: str) -> tuple[str, bool]:
 
 
 def _anthropic(text, history, model, system, brain="small", kind="chat"):
-    key = os.environ.get(CONFIG.llm_api_key_env or "ANTHROPIC_API_KEY")
+    # The Anthropic provider has its OWN key env (ANTHROPIC_API_KEY), NOT the shared llm_api_key_env
+    # (which holds the DeepSeek key) — otherwise a Claude/Haiku brain sends the DeepSeek key → 401.
+    key_env = getattr(CONFIG, "anthropic_key_env", "ANTHROPIC_API_KEY")
+    key = os.environ.get(key_env)
     if not key:
-        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
+        return f"I need {key_env} in your .env — add it and restart Vox."
     global _anthropic_client
     if _anthropic_client is None:
         from anthropic import Anthropic
@@ -427,30 +438,56 @@ def _anthropic(text, history, model, system, brain="small", kind="chat"):
         return f"(LLM error: {exc})"
 
 
-def _openai(text, history, model, system, brain="small", kind="chat"):
-    key = os.environ.get(CONFIG.llm_api_key_env)
-    if not key:
-        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
-    global _openai_client
-    if _openai_client is None:
+def _openai_client_for(base_url, key):
+    """Cache one OpenAI client per (base_url, key) so different OpenAI-compatible endpoints (e.g.
+    DeepSeek as the small brain AND a local model as the big brain) don't clobber each other."""
+    ck = (base_url or "", key or "")
+    client = _openai_clients.get(ck)
+    if client is None:
         from openai import OpenAI
-        _openai_client = OpenAI(api_key=key, base_url=CONFIG.llm_base_url or None)
+        client = OpenAI(api_key=key or "local", base_url=base_url or None)
+        _openai_clients[ck] = client
+    return client
+
+
+def _openai_call(text, history, model, system, brain, kind, base_url, key, label="openai"):
+    """One completion against any OpenAI-compatible endpoint. `label` tags the usage record."""
+    client = _openai_client_for(base_url, key)
     msgs = ([{"role": "system", "content": system}]
             + [{"role": r, "content": c} for r, c in (history or [])]
             + [{"role": "user", "content": text}])
     t0 = time.monotonic()
     try:
-        # 45s cap (matches the SDK/anthropic paths) so a stalled DeepSeek/local call can't freeze
-        # the voice loop — the client otherwise defaults to ~10 min.
-        resp = _openai_client.with_options(timeout=45.0).chat.completions.create(
+        # 45s cap (matches the SDK/anthropic paths) so a stalled remote/local call can't freeze the
+        # voice loop — the client otherwise defaults to ~10 min.
+        resp = client.with_options(timeout=45.0).chat.completions.create(
             model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs)
         u = getattr(resp, "usage", None)
-        _record_usage("openai", model, brain, kind,
+        _record_usage(label, model, brain, kind,
                       (u.prompt_tokens, u.completion_tokens) if u else None,
                       (time.monotonic() - t0) * 1000)
         return (resp.choices[0].message.content or "").strip()
     except Exception as exc:
         return f"(LLM error: {exc})"
+
+
+def _openai(text, history, model, system, brain="small", kind="chat"):
+    key = os.environ.get(CONFIG.llm_api_key_env)
+    if not key:
+        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
+    return _openai_call(text, history, model, system, brain, kind, CONFIG.llm_base_url, key)
+
+
+def _local_ai(text, history, model, system, brain="small", kind="chat"):
+    """A self-hosted OpenAI-compatible model (LM Studio / Ollama / vLLM, e.g. a home GPU box over a
+    Cloudflare tunnel). URL + key come from .env (kept out of the repo); the model is local_ai_model."""
+    url_env = getattr(CONFIG, "local_ai_base_url_env", "LOCAL_AI1_URL")
+    base = os.environ.get(url_env, "").strip()
+    if not base:
+        return f"Set {url_env} in your .env to your local model's /v1 URL, then restart Vox."
+    key = os.environ.get(getattr(CONFIG, "local_ai_key_env", "LOCAL_AI1"), "") or "local"
+    mdl = getattr(CONFIG, "local_ai_model", "") or model
+    return _openai_call(text, history, mdl, system, brain, kind, base, key, label="local_ai")
 
 
 def _claude_sdk(text, history, model, system, brain="big", kind="chat"):
@@ -532,8 +569,8 @@ def _sdk_look(question, image_path, model, brain="small"):
     from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
     prompt = (f"Read the image file {image_path} — it's a screenshot of the user's Mac. "
-              f"Then answer concisely for text-to-speech (1-2 sentences): {question}")
-    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=8,
+              f"Read it once, then answer concisely for text-to-speech (1-2 sentences): {question}")
+    opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=12,
                               permission_mode="bypassPermissions", model=model)
 
     captured = {}
@@ -551,14 +588,20 @@ def _sdk_look(question, image_path, model, brain="small"):
 
     t0 = time.monotonic()
     try:
-        reply = asyncio.run(asyncio.wait_for(_run(), timeout=90)) or "(no response)"
+        reply = asyncio.run(asyncio.wait_for(_run(), timeout=90))
         _record_usage("claude_sdk", model, brain, "vision", captured.get("usage"),
                       (time.monotonic() - t0) * 1000)
+        if not reply:  # agent hit its turn cap without a final answer → don't blurt internals
+            _dbg("[vision]", "claude_sdk vision returned no text (likely hit max_turns)")
+            return "I couldn't make out the screen — try asking again."
         return reply
     except asyncio.TimeoutError:
-        return "(vision timed out — try again)"
+        _dbg("[vision]", "claude_sdk vision timed out after 90s")
+        return "I couldn't read the screen in time — try again."
     except Exception as exc:
-        return f"(vision error: {exc})"
+        # NEVER speak the raw error (e.g. 'Reached maximum number of turns') — log it, say something human.
+        _dbg("[vision]", f"claude_sdk vision failed: {exc}")
+        return "I couldn't read the screen just now."
 
 
 def _anthropic_look(question, image_path, model, brain="small"):
@@ -585,4 +628,5 @@ def _anthropic_look(question, image_path, model, brain="small"):
                       (time.monotonic() - t0) * 1000)
         return "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as exc:
-        return f"(vision error: {exc})"
+        _dbg("[vision]", f"anthropic vision failed: {exc}")
+        return "I couldn't read the screen just now."
