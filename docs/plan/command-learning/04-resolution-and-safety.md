@@ -72,7 +72,7 @@ Constraints that hold regardless of what gets learned:
 
 | # | Failure | Mitigation |
 |---|---|---|
-| F1 | **Mis-heard utterance is learned** ("open Alex's chat" → Alex) | Never learn from low-confidence transcripts; 2-day spread means a one-off mis-hear can't reach the bar; negative signals decrement |
+| F1 | **Mis-heard utterance is learned** ("open Alec's chat" → Alex) | Never learn from low-confidence transcripts; 2-day spread means a one-off mis-hear can't reach the bar; negative signals decrement |
 | F2 | **The LLM resolves wrongly but the action "succeeds"** (clicks the wrong thing, no error) | `success` is not enough on its own — the negative-signal window catches the undo/correction that follows. 3 negatives permanently block the action key |
 | F3 | **Learned command goes stale** (channel renamed, person left) | Execution failure marks the command; 2 consecutive failures auto-demote it (`enabled=0`) and re-open the candidate |
 | F4 | **Collision with a builtin** | Source precedence — builtin always wins. Learned rows can't shadow curated ones |

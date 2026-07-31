@@ -150,7 +150,7 @@ _CLICK_PICK_SYSTEM = (
     "elements currently clickable on screen (sidebar items, chats, channels, buttons, links, menu "
     "items, people, files…) and what the user asked for. The request came from SPEECH-TO-TEXT, so it "
     "is OFTEN MIS-TRANSCRIBED — match by how it SOUNDS, not exact spelling. A word that sounds like a "
-    "label is almost certainly that label, even if spelled differently (e.g. 'alec' or 'burn' → "
+    "label is almost certainly that label, even if spelled differently (e.g. 'alec' or 'ellis' → "
     "'Alex Fairbairn', 'get up' → 'github', 'daily report' → 'daily-report').\n"
     "Reply with EXACTLY ONE of:\n"
     "• the single best-matching label, copied VERBATIM from the list — when you're reasonably "
