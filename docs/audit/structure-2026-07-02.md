@@ -15,7 +15,7 @@ gaps are about **shipping** this as an open-source download, not hygiene.
 - `vox.log` (1.8 MB), `vox-capture.wav` (381 KB), `.env`, `.DS_Store`, `data/` — **all NOT tracked**
   (`git ls-files --error-unmatch` → NOT TRACKED; `git check-ignore` confirms the rules).
 - **Git history is clean**: `.env` / `*.wav` / `*.log` / `*.db` were never committed on any branch.
-- **No secrets in tracked files**: grep for `absolute home paths`, `employer domains`, `sk-…`/`sk-ant-`/`AKIA…` → **zero hits**.
+- **No secrets in tracked files**: grep for absolute home paths, employer domains, `sk-…`/`sk-ant-`/`AKIA…` → **zero hits**.
 - `.env` (local only) holds live keys incl. `LOCAL_AI1` / `LOCAL_AI1_URL` (a private home-GPU Cloudflare tunnel). Correctly ignored. This is exactly the value that must never slip into a commit.
 - **Residual risk (Low):** a future `git add -A` of a *new* artifact type not covered by `.gitignore`, or a `git add -f`, is the only realistic path to a leak. The `.gitignore` is currently thorough.
 
