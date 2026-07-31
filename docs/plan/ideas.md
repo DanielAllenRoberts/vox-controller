@@ -262,6 +262,18 @@ your name), timers chime, alarms do both.
 
 ## 24. Self-heal on error → a learned fix (extends #14–15)
 
+> **Status:** 🚧 **Phases 0–1 BUILT** (2026-07-31) — full framework in
+> [`command-learning/`](command-learning/README.md) (8 docs: what earns a command, variant collapse,
+> budgets/decay, resolution safety, schema+API, rollout, multi-step actions).
+> **Phase 0:** resolution is now deterministic — every match is collected and ranked
+> (context → source → match type → phrase specificity → id), and a true ambiguity falls through to
+> the LLM instead of guessing. Previously the *first* row scanned won, which with learned rows would
+> have been a silent coin-flip. **Phase 1 (shadow mode):** `command_learn.py` observes every
+> LLM-resolved action, applies the never-learn gate and promotion bar, and accumulates candidates +
+> evidence — **writing no commands**, so behaviour is unchanged. Gates:
+> `scripts/command_learning_gate{0,1}.py`. Next: dashboard Candidates view, then a week of shadow
+> data before Phase 2 (promotion) is switched on.
+
 When a control command fails the deterministic parser, instead of escalating to *answer* you, a **background** LLM resolves what you meant, **runs it** (so it works that time too), and **saves a learned phrase→action mapping** so the same phrasing fires **instantly and free** afterwards — the "patch". A **"worth patching?"** judgment decides whether the phrase is a durable command (save it) or a one-off (don't pollute the rules). Later — **task 3** — the LLM can edit actual code/config for cases an action-mapping can't fix (guarded + reviewed). The concrete shape of #14–15. **Confirmation:** when it's unsure whether a fix is worth keeping, it can *ask* — "Would you like me to save this as a skill?" — before writing the rule, so the skill set stays clean and you stay in control.
 
 ## 25. Scoped task-prompts — a different prompt per command/agent (separation of concerns)
@@ -338,6 +350,22 @@ An MCP server that lets the coding agent (Claude Code) speak through the system 
 The same phrase should mean different things depending on what's focused. "Search for X" → searches **YouTube** when it's open, the web otherwise; with **Cursor** focused, unlock Cursor-specific verbs ("new terminal", "type in the terminal", "open file"). Per-app / per-site command sets let you **reuse phrases for different purposes** and cut ambiguity — the router picks the profile from the focused app/tab (already surfaced by `actions.environment_context()`). Near-term win on the same theme: tab-switching by name is unreliable when a tab's *title* is generic (a Google Doc shows as "Untitled" / "unknown doc"), so neither the fuzzy matcher nor the brain can tie "open Google Docs" to it — enrich the context with each tab's **URL/domain** (`docs.google.com`) and the match (deterministic, or learned via #24) becomes solid. Pairs with scoped prompts (#25), the learning layer (#24), and AX-tree handles (#35).
 
 **→ Storage design (SQLite):** [`command-db.md`](command-db.md) — the `context`/`command`/`phrase`/`intent` schema (FKs, sample Arc data, runtime resolution flow) that holds per-app command sets. On the SQLite direction from #27; sets up learning (#14). *Schema is in review — no code yet.*
+
+> **Set-of-marks BUILT for native apps (2026-07-31)** — the click path now escalates to vision when
+> labels fail. Diagnosed from a real failure ("click Alex's second last message"): the brain was
+> handed 60 labels that were **entirely Slack's chrome** — sidebar, channels, toolbar, not one
+> message — so it picked the closest thing it could see (the DM sidebar row) and asked "Did you mean
+> Alex Fairbairn?". Two causes, both fixed: (a) `clickable_targets()` read `ax.targets()`, which
+> lists elements with **no on-screen frame** — on Slack **177 of its 190 labels were invisible menu
+> entries** from closed menus — and capped at 60, spent depth-first, never reaching the message list;
+> it now reads the frame-filtered `targets_with_frames` at 300, so the brain only ever sees what is
+> actually on screen, and sees the same set the overlay badges. (b) New `overlay.annotate()` draws
+> #52's numbered badges **onto a screenshot** in-memory (no on-screen flash, and it sidesteps the
+> overlay window being `NSWindowSharingNone` — screenshots can't see it), and `executor._click_by_vision`
+> asks the big brain for a badge number, then clicks that element via its real AX frame. The model
+> only picks a number, never estimates pixels, so the target stays an exact element. This is what
+> makes "the second last message" / "the one at 7:52pm" expressible at all — order and position
+> aren't in a text list. Gated by `click_vision_fallback` (default on), only on the give-up path.
 
 ## 37. Real website control — simplified DOM + expand-on-demand + screenshot grid
 
@@ -529,7 +557,7 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 
 ## 52. "Click link / click button" — numbered overlay on every clickable element (Dragon-style)
 
-> **Status:** ✅ BUILT (2026-07-16). "show clickable" / "click link" / "click button" draws a numbered blue badge on every clickable element (incl. **text boxes** — Slack compose, search fields); say the number ("click 14" / "14") to click it; any other phrase / "hide clickable" dismisses. Clicks are **coordinate-based** (`ax._click_at` via CGEvent) — reliable on web/Electron where `AXPress` silently no-ops; this also fixed the by-label path (direct + AI-escalated "click X"). The overlay runs in a **separate helper process** (`overlay.py`) so AppKit can't freeze the daemon, is `NSWindowSharingNone` (won't trip screen-capture/DRM), and **spans all displays** (Sidecar / second screens). NEXT (the learning loop, below): when "click X" can't find it → auto-show the overlay → pick a number → **save the phrase→element to the command DB** so next time it resolves directly (ties #14/#24/#36).
+> **Status:** ✅ BUILT (2026-07-16). "show clickable" / "click link" / "click button" draws a numbered blue badge on every clickable element (incl. **text boxes** — Slack compose, search fields); say the number ("click 14" / "14") to click it; any other phrase / "hide clickable" dismisses. Clicks are **coordinate-based** (`ax._click_at` via CGEvent) — reliable on web/Electron where `AXPress` silently no-ops; this also fixed the by-label path (direct + AI-escalated "click X"). The overlay runs in a **separate helper process** (`overlay.py`) so AppKit can't freeze the daemon, is `NSWindowSharingNone` (won't trip screen-capture/DRM), and **spans all displays** (Sidecar / second screens — one window per display). **Fixed 2026-07-28 — "the badges all pile up in the top-left":** not a coordinate bug (window placement, AX→Cocoa flip and AX frames all verified correct against pixels). `targets_with_frames` capped at **80** elements and the walk is depth-first, so on a big app the cap drained into whichever subtree came first — the left sidebar. On Cursor that was 69 of 80 badges on the left half with the entire editor unbadged; Slack's channel list did the same. The full walk is cheap (~70 ms for ~140 elements), so the cap is now **200** and badges cover the whole UI. Knock-on: past 99 the number no longer fit the badge ("100" drew as "10"), so `_make_badge` drops to 9pt at 3 digits (shrink the text, not the box — 3-digit numbers only appear on dense screens, where a wider badge would cover its neighbours). **Second cause, fixed 2026-07-31 — the badges came BACK to the top-left intermittently:** log analysis showed the same app returning wildly different counts (Slack **8 / 13 /** 80 / 132 / 227; Cursor **13 /** 107). The low numbers are the native window chrome alone — which lives in the top-left — because Chromium/Electron builds its web-content AX tree on demand and **tears it back down**, while `ax._enabled_pids` asserted `AXManualAccessibility` only *once per pid, forever*. That's also why killing and restarting the daemon "fixed" it: a fresh process re-asserts. `targets_with_frames` now keeps the best count seen per pid and, when a walk comes back below both 20 elements and half that baseline, re-asserts the flag and re-walks once (~0.4 s settle, only on the degraded path; a healthy walk never retries). Cap also raised 200 → 400 after measuring a busy Slack at 227. NEXT (the learning loop, below): when "click X" can't find it → auto-show the overlay → pick a number → **save the phrase→element to the command DB** so next time it resolves directly (ties #14/#24/#36).
 
 **Vision:** say **"click link"** / **"click button"** / **"show clickable"** and Vox overlays a **numbered badge on every clickable element on screen**; say **"click 14"** (or just "14") and it presses element 14 — exactly the Dragon NaturallySpeaking flow. Doubles as a **debugging/visibility tool**: you see precisely what Vox's accessibility tree exposes and where.
 
@@ -585,6 +613,85 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 **How it might work:** embed as a Python dependency, or run its MCP server and reach it via the #49 MCP bridge. Vox writes each turn/memory into a palace wing; recall does a semantic `search` at turn start alongside/instead of today's injection. Evaluate: (1) does semantic recall beat our current tiered-Markdown recall in practice; (2) the ChromaDB + embedding-model **disk/RAM cost** (~30–300 MB) against the disk-constrained target machine; (3) embed the library vs the MCP-server route.
 
 **Connects to:** #27 (local storage), #28 (tiered memory + dream consolidation + second-brain RAG), #29 (auto-capture), #49 (MCP two-way bridge). Also a candidate backend behind the board's knowledge-base role (#51).
+
+## 56. "No, that's wrong" — self-correcting clicks + a memory of what just ran
+
+> **Status:** 📋 QUEUED — the actionable task **after** the command system (#24 / `command-learning/`).
+> Much of the plumbing landed with command-learning Phase 1, so this is mostly wiring, not new
+> machinery.
+
+**Vision:** Vox clicks the wrong thing. You say **"no, that's wrong"** — and instead of shrugging, it
+(a) knows *exactly what it just clicked*, (b) undoes/re-picks on the spot, and (c) **remembers the
+miss**, so next time that phrase comes up it either avoids the thing it got wrong or asks "did you
+mean this one or that one?" rather than confidently repeating the mistake.
+
+**Three parts:**
+
+1. **The correction turn.** A negative signal right after a click is already detected —
+   `command_learn.check_negative()` (Phase 1) catches "no" / "wrong" / "undo" / a re-said phrase and
+   walks the candidate back. What's missing is the *recovery*: on a correction, re-open the click with
+   the failed target **excluded**, and go straight to the next-best candidate (or the numbered
+   overlay / vision tier) instead of starting from scratch.
+2. **A negative memory.** Today a correction only decrements a candidate. It should record the
+   **anti-mapping** — "phrase X in app Y is NOT element Z" — so the resolver actively demotes that
+   element for that phrase, and the pick prompt can tell the brain "you chose Z before and the user
+   said no". Cheap to store: `command_log` already keeps `heard_phrase` + `command_id` + `negated`.
+3. **"What did you just do?" / recent-command recall.** A voice command (and an agent-readable tool)
+   that reads back the last N resolutions: what was heard, what ran, whether it worked, whether it was
+   corrected. Feeds the brain's own context so it's more careful before repeating an action, and gives
+   you a way to ask "why did you do that?" — the audit surface the learning system needs anyway.
+
+**Plausibility: high, and cheaper than it looks.** `command_log` (built 2026-07-31) already records
+every resolution with `heard_phrase`, `resolved_by`, `success` and `negated` — so part 3 is a query
+plus a phrase, and part 2 is a column's worth of reading. Part 1 is the only real logic. The pieces
+that would have been expensive — detecting the correction, having a stable element identity to point
+at — are done.
+
+**Connects to:** #24 (this *is* the self-heal loop's negative half), #44 (mishear-frequency counter),
+#50 (clarifying questions — "which one did you mean?"), #14/#36, and `command-learning/01-promotion.md`
+(negative signals already gate promotion).
+
+## 57. Third-tier click escalation — grid overlay + coordinate clicking
+
+> **Status:** 📋 QUEUED — pairs with #56. Completes the escalation ladder started in #52/#37.
+
+**Vision:** a **third tier** for clicking, after the two that now exist:
+
+| Tier | How it picks | Built |
+|---|---|---|
+| 1 | AX tree, by label | ✅ `actions.click_element` → `_click_fuzzy` |
+| 2 | AX tree, by **numbered marks on a screenshot** (big brain picks a badge) | ✅ 2026-07-31 (#37 note) |
+| 3 | **Screenshot + coordinate grid** — no AX element required | 📋 this idea |
+
+Overlay a labelled grid (A1…N12, or numbered cells) on the screenshot, let the vision brain name the
+cell — optionally refining with a second, zoomed pass on that cell — and click the resulting point
+with `ax._click_at()`, which already synthesizes a real CGEvent click at any screen coordinate.
+
+**Why it's genuinely needed:** tiers 1 and 2 can only ever reach things the accessibility tree
+exposes. Canvas/WebGL content, custom-drawn controls, images without labels, video scrubbers, apps
+with poor AX support — none of them have an element to badge, so no amount of improving the AX path
+reaches them. Tier 3 is the only one that can click something Vox cannot *name*.
+
+**One correction to the original hunch:** the motivating theory was that AX hides elements until the
+mouse hovers them. That doesn't hold for Slack at least — our enumeration returned its hover-only
+message actions (`React with white_check_mark`, `Reply in thread`, `Forward message…`, `Save for
+later`) with no pointer anywhere near them. So hover-reveal isn't the gap; **AX-invisible content
+is**. Same conclusion, better reason — and worth knowing, because if hover *were* the problem the fix
+would be to move the mouse first, which is much cheaper than a grid.
+
+**Design notes:**
+- **Accuracy is the whole risk.** Vision models are poor at precise pixel coordinates; a grid turns a
+  regression problem into a classification one ("which cell"), and a zoom-refine pass turns a coarse
+  cell into a precise point. Worth measuring cell-hit accuracy before trusting it.
+- **Coordinate clicks can't be verified.** Tiers 1–2 click a known element and can report what it was;
+  tier 3 clicks a *point* and has no idea what it hit. So it should be last-resort, announced ("I'll
+  click here — say no if that's wrong"), and paired with #56's correction loop.
+- **Never learn a coordinate.** Pixels aren't a stable identity — the window moves and the command is
+  wrong forever. Excluded from the command DB by the same rule that excludes free-text args
+  (`command-learning/01-promotion.md`).
+
+**Connects to:** #37 (this is its screenshot-grid half, for native apps), #52 (the overlay this
+escalates from), #18 (screenshot vs AX), #56 (correction loop covers tier 3's unverifiability).
 
 ## Sequencing note
 

@@ -156,6 +156,16 @@ _SCHEMA_META: list[dict] = [
                 "next request.",
     },
     {
+        "key": "click_vision_fallback",
+        "label": "Click by looking (vision fallback)",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "When 'click X' can't be matched to an element by name, screenshot the screen with a "
+                "number on every clickable element and let the big brain point at the right one. "
+                "Handles requests a label list can't express — 'the second last message', 'the one "
+                "at 7:52pm'. Costs one vision call, only on the give-up path. Applies live.",
+    },
+    {
         "key": "dictation_exit_on_silence",
         "label": "Dictation auto-exit on silence",
         "group": "Behavior",
@@ -308,6 +318,64 @@ _SCHEMA_META: list[dict] = [
         "help": "Resolve voice commands from the per-app command database (in front of the built-in "
                 "parser), so the same words can do different things depending on the focused app. "
                 "Off = built-in commands only. Applies live — no restart.",
+    },
+    {
+        "key": "learning_mode",
+        "label": "Command learning",
+        "group": "Commands",
+        "type": "select",
+        "options": [
+            {"value": "off", "label": "Off — never observe or learn"},
+            {"value": "suggest", "label": "Suggest — queue candidates for approval"},
+            {"value": "auto", "label": "Auto — save commands on its own (default)"},
+        ],
+        "help": "When the brain works out a command the parser didn't know, Vox saves the wiring so "
+                "it resolves instantly and for free next time (idea #24). Auto keeps it out of your "
+                "way; a wrong guess expires on its own (see probation) and one correction retires it. "
+                "Promotion is not built yet — today it only observes. Full design: "
+                "docs/plan/command-learning/. Applies live — no restart.",
+    },
+    {
+        "key": "learning_confirm",
+        "label": "Ask before saving a command",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "Have Vox ask 'want me to remember that?' before saving EVERY learned command. Off by "
+                "default — it still asks on its own when a mapping looks like a leap (the words and "
+                "the thing it clicked share nothing) and the evidence is thin. Applies live.",
+    },
+    {
+        "key": "learning_min_hits",
+        "label": "Hits before learning",
+        "group": "Commands",
+        "type": "text",
+        "help": "How many times the same action must be worked out before it's saved as a command. "
+                "Counted inside the rolling window below, so three times in one afternoon counts.",
+    },
+    {
+        "key": "learning_window_days",
+        "label": "Learning window (days)",
+        "group": "Commands",
+        "type": "text",
+        "help": "The rolling window those hits must fall inside. 2 = 'three times within two days'. "
+                "Corrected (negated) uses never count toward it.",
+    },
+    {
+        "key": "learning_probation_days",
+        "label": "Probation (days)",
+        "group": "Commands",
+        "type": "text",
+        "help": "A newly learned command is a guess on trial: if it isn't used at least the number of "
+                "times below within this many days, it's deleted again. This is what makes automatic "
+                "learning safe — a command you picked up during a one-off task expires by itself.",
+    },
+    {
+        "key": "learning_probation_uses",
+        "label": "Uses to graduate probation",
+        "group": "Commands",
+        "type": "text",
+        "help": "How many times a newly learned command must actually be used (resolved from the DB) "
+                "within its probation period to be kept for good.",
     },
     {
         "key": "vosk_commands_enabled",

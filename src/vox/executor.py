@@ -9,7 +9,7 @@ LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 
 import re
 
-from vox import actions, assistant
+from vox import actions, assistant, ax
 from vox.config import CONFIG
 
 # Sentinel returned as the message (with acted=True) when the brain decides the user wants to
@@ -207,7 +207,13 @@ def _click_fuzzy(target: str) -> str:
     screen (Electron-aware) and let the BIG brain map the user's (often mis-transcribed) words to a
     real label by sound. On a confident match it clicks; when genuinely unsure it returns a 'Did you
     mean <X>?' question (a 'yes' then runs it, via _confirmed_click_target); else 'couldn't find'."""
-    labels = actions.clickable_targets()
+    # ONE enumeration drives both attempts: the labels the brain reads, and (if that fails) the
+    # numbered marks it looks at. Sharing the list also keeps badge N ↔ ax.click_index(N-1) aligned.
+    try:
+        items = ax.targets_with_frames() or []
+    except Exception:
+        items = []
+    labels = actions._dedupe([i["label"] for i in items]) or actions.clickable_targets()
     if not labels:
         return f"I couldn't find a '{target}' to click."
     listing = "\n".join(f"  - {label}" for label in labels)
@@ -217,11 +223,86 @@ def _click_fuzzy(target: str) -> str:
     raw = assistant.complete(prompt, system=_CLICK_PICK_SYSTEM, brain="big", kind="click_axtree")
     kind, label = _parse_pick(raw, labels)
     assistant._dbg("[executor]", f"click pick for {target!r} from {len(labels)} on-screen labels → {kind}:{label!r}")
-    if kind == "ask":
-        return f"Did you mean {label}?"  # acted=False question → a 'yes' next turn clicks it
     if kind == "pick":
         return actions.click_element(label)
+    # Labels alone can't express "the second last message" or "the one at 7:52pm" — order and
+    # position simply aren't in a text list. So before giving up (or guessing with a half-confident
+    # ASK), SHOW the brain the screen with a number on every clickable element and let it point.
+    seen = _click_by_vision(target, items)
+    if seen:
+        return seen
+    if kind == "ask":
+        return f"Did you mean {label}?"  # acted=False question → a 'yes' next turn clicks it
     return f"I couldn't find a '{target}' to click on the screen."
+
+
+# NB: assistant.look() takes no system prompt (it's the shared vision entry point), so the framing
+# has to travel with the question itself — without it the model just sees "which badge number?" and
+# has no idea what the badges even are.
+_CLICK_VISION_PROMPT = (
+    "This is a screenshot of the user's Mac. EVERY clickable element has a small blue badge with a "
+    "white number at its top-left corner.\n\n"
+    "The user wants to click: {target!r}\n\n"
+    "They often describe it by POSITION or CONTENT that a list of labels can't capture — 'the second "
+    "last message', 'the one sent at 7:52pm', 'the reply under Alex's photo'. Find the element they "
+    "mean and answer with ONLY the number on its badge. If the thing they describe has no badge of "
+    "its own, answer with the number of the badge sitting on it or nearest to it. If you genuinely "
+    "cannot see what they mean, answer NONE.\n\n"
+    "Reply with a bare number or NONE — no words, no punctuation."
+)
+
+
+def _click_by_vision(target: str, items) -> str | None:
+    """Vision escalation for clicking (idea #37's set-of-marks, off the back of #52).
+
+    Annotates a screenshot with the SAME numbered badges the overlay draws, asks the big brain which
+    number the user meant, and clicks that element by its real AX frame. The model only has to pick a
+    number — it never estimates pixel coordinates — so the click target stays an exact element.
+
+    Returns the click result, or None to let the caller fall back. Gated by ``click_vision_fallback``
+    (default on) since it costs a vision call, and fully guarded."""
+    if not items or not _setting("click_vision_fallback", True):
+        return None
+    if not _setting("screen_vision_enabled", CONFIG.screen_vision_enabled):
+        return None
+    try:
+        from vox import overlay
+        shot = actions.capture_screen()
+        if not shot:
+            return None
+        marked = overlay.annotate(shot, items)
+        if not marked:
+            return None
+        answer = assistant.look(_CLICK_VISION_PROMPT.format(target=target), marked, brain="big")
+        m = re.search(r"\d{1,3}", answer or "")
+        assistant._dbg("[executor]",
+                       f"click-by-vision for {target!r} over {len(items)} marks → {(answer or '').strip()!r}")
+        if not m:
+            return None
+        n = int(m.group())
+        if not 1 <= n <= len(items):
+            return None
+        res = ax.click_index(n - 1)  # badge N ↔ items[N-1], same as the overlay
+        if res and res[0] == "clicked":
+            return f"clicked {res[1]} (#{n}, found by looking at the screen)"
+        return None
+    except Exception:
+        return None
+
+
+def _observe(heard: str, intent: str, arg: str, *, success: bool) -> None:
+    """Hand a completed LLM-resolved action to the learning layer (idea #24; full design in
+    ``docs/plan/command-learning/``). This is the ONE place the learner is fed — the model resolves
+    an utterance to an action exactly as before, and the learner observes the outcome.
+
+    Phase 1 is shadow mode: it accumulates candidates and evidence, and writes no commands. Fully
+    guarded, so an observer bug can never break the action the user actually asked for."""
+    try:
+        from vox import command_cache, command_learn
+        command_learn.observe(heard, intent, arg, app=command_cache.current_app(),
+                              success=success, log=command_cache.log)
+    except Exception:
+        pass
 
 
 def execute(text: str, history=None) -> tuple[bool, str]:
@@ -319,13 +400,17 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         if not result.lower().startswith("clicked"):
             result = _click_fuzzy(target)
         assistant._dbg("[executor]", f"decision=CLICK target={target!r} → {result!r}")
+        clicked = result.lower().startswith("clicked")
+        _observe(text, "click", target, success=clicked)
         # Success → silent "did it" cue; failure → speak the "couldn't find it" so the user hears it.
-        return result.lower().startswith("clicked"), result
+        return clicked, result
 
     command = raw.splitlines()[0].strip().strip('"').rstrip(".")
-    if actions.parse(command) is None:
+    parsed = actions.parse(command)
+    if parsed is None:
         assistant._dbg("[executor]", f"decision=COMMAND {command!r} → no mapping (no-op)")
         return False, "I couldn't map that to something I can do."
     result = actions.handle(command)
     assistant._dbg("[executor]", f"decision=COMMAND {command!r} → actions.handle → {result!r}")
+    _observe(text, parsed[0], parsed[1], success=not actions.failed(result))
     return True, result

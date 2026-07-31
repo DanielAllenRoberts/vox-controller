@@ -142,9 +142,67 @@ def connect(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
     return conn
 
 
+# --- learning schema (docs/plan/command-learning/05) ---------------------------------------------
+# Additive: new tables + nullable/defaulted columns, so an existing commands.db keeps working. The
+# candidate tables are the "holding pen" — an action the LLM resolved that hasn't earned a command
+# yet. NOTHING here affects voice behaviour; that's what makes shadow mode (phase 1) possible.
+
+_LEARN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS command_candidate (
+    id             INTEGER PRIMARY KEY,
+    context_id     INTEGER NOT NULL REFERENCES context(id) ON DELETE CASCADE,
+    intent         TEXT    NOT NULL,
+    arg            TEXT,
+    action_key     TEXT    NOT NULL UNIQUE,   -- context|intent|normalize(arg) — identity, see doc 02
+    hit_count      INTEGER NOT NULL DEFAULT 0,
+    negative_count INTEGER NOT NULL DEFAULT 0,
+    distinct_days  INTEGER NOT NULL DEFAULT 0,
+    last_day       TEXT,                      -- YYYY-MM-DD of the last counted hit
+    first_seen     TEXT    NOT NULL DEFAULT (datetime('now')),
+    last_seen      TEXT    NOT NULL DEFAULT (datetime('now')),
+    blocked        INTEGER NOT NULL DEFAULT 0,
+    blocked_until  TEXT,
+    promoted_id    INTEGER REFERENCES command(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_key ON command_candidate(action_key);
+
+CREATE TABLE IF NOT EXISTS command_candidate_phrase (
+    id           INTEGER PRIMARY KEY,
+    candidate_id INTEGER NOT NULL REFERENCES command_candidate(id) ON DELETE CASCADE,
+    text         TEXT    NOT NULL,
+    hit_count    INTEGER NOT NULL DEFAULT 1,
+    last_used_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (candidate_id, text)
+);
+"""
+
+# column → DDL, added only if missing (sqlite has no ADD COLUMN IF NOT EXISTS)
+_LEARN_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "command": [("hit_count", "INTEGER NOT NULL DEFAULT 0"), ("last_used_at", "TEXT"),
+                ("fail_count", "INTEGER NOT NULL DEFAULT 0"), ("learned_at", "TEXT"),
+                ("learned_reason", "TEXT")],
+    "phrase": [("hit_count", "INTEGER NOT NULL DEFAULT 0"), ("last_used_at", "TEXT"),
+               ("source", "TEXT NOT NULL DEFAULT 'builtin'")],
+    "command_log": [("candidate_id", "INTEGER"), ("ambiguous", "INTEGER NOT NULL DEFAULT 0"),
+                    ("confidence", "REAL"), ("negated", "INTEGER NOT NULL DEFAULT 0")],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any missing learning columns. Idempotent — safe on every boot, like the seed."""
+    for table, cols in _LEARN_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in cols:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    conn.commit()
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    conn.executescript(_LEARN_SCHEMA)
     conn.commit()
+    _migrate(conn)
 
 
 def build(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
@@ -350,24 +408,425 @@ def candidate_contexts(conn, app: str | None = None, domain: str | None = None) 
     return out
 
 
+# --- ranking: which match wins when several do (docs/plan/command-learning/04) -------------------
+# The old resolver returned the FIRST phrase that matched, scanning rows in whatever order SQLite
+# handed back. With 49 curated commands collisions were designed out by hand; the moment LEARNED rows
+# exist two commands will eventually both match and the winner becomes a coin-flip — a silent wrong
+# action that's near-impossible to reproduce. So every match is collected and ranked explicitly.
+
+_CTX_RANK = {"site": 2, "app": 1, "global": 0}     # most specific context wins
+_SOURCE_RANK = {"user": 2, "builtin": 1, "learned": 0}  # a human's command always beats an inferred one
+_MATCH_RANK = {"exact": 2, "contains": 1, "regex": 0}   # precision over generality
+
+
+def match_sort_key(m: dict) -> tuple:
+    """Ranking key for one candidate match — higher sorts first. Total and deterministic: the final
+    element is the command id, so even a dead tie resolves the same way every single time."""
+    return (
+        _CTX_RANK.get(m.get("_ctx_kind"), 0),
+        _SOURCE_RANK.get(m.get("_source") or "builtin", 1),
+        _MATCH_RANK.get(m.get("match_type"), 0),
+        len(normalize(m.get("phrase") or "")),   # a longer phrase is more specific
+        -int(m.get("command_id") or 0),          # negated: lowest id wins the final tiebreak
+    )
+
+
+def rank_matches(matches: list[dict], *, ambiguity_ok: bool = False) -> dict | None:
+    """Pick the winner from all matches, or None when the top two are genuinely ambiguous.
+
+    Ambiguous = the top two point at DIFFERENT actions (intent+arg) and rank identically on every
+    criterion. Guessing there is how you get a confident wrong action, so we return None and let the
+    caller fall through to the LLM — slower, but it can't silently do the wrong thing.
+    ``ambiguity_ok`` forces a pick (used by the CLI/self-test, which wants to see what would win)."""
+    if not matches:
+        return None
+    ranked = sorted(matches, key=match_sort_key, reverse=True)
+    best = ranked[0]
+    if not ambiguity_ok and len(ranked) > 1:
+        second = ranked[1]
+        same_action = ((best.get("intent"), best.get("arg")) == (second.get("intent"), second.get("arg")))
+        if not same_action and match_sort_key(best)[:4] == match_sort_key(second)[:4]:
+            best = dict(best)
+            best["ambiguous_with"] = second.get("command_id")
+            return None if not ambiguity_ok else best
+    return best
+
+
+def collect_matches(cmds: list[dict], t: str, ctx_kind: str, ctx_value: str | None) -> list[dict]:
+    """Every (command, phrase) in ``cmds`` whose phrase matches normalized utterance ``t``."""
+    out = []
+    for c in cmds:
+        for p in c.get("phrases", []):
+            mt = p.get("match_type", "exact")
+            if _phrase_hit(p["text"], mt, t):
+                out.append({**{k: c.get(k) for k in ("intent", "arg", "param", "label")},
+                            "command_id": c["id"], "phrase_id": p.get("id"),
+                            "context": f'{ctx_kind}:{ctx_value or "*"}',
+                            "phrase": p["text"], "match_type": mt,
+                            "_ctx_kind": ctx_kind, "_source": c.get("source")})
+    return out
+
+
 def resolve(conn, text: str, *, app: str | None = None, domain: str | None = None) -> dict | None:
-    """Resolve `text` to a command the way phase-2 runtime will: walk candidate contexts highest
-    priority first; within each, try exact → contains → regex; the first hit wins. Returns a result
-    dict (intent/arg/param/label/context/phrase/match_type) or None (→ falls through to the parser)."""
+    """Resolve `text` to a command the way the phase-2 runtime does: collect every match across the
+    candidate contexts, then rank them (context → source → match type → phrase specificity → id).
+    Returns a result dict (intent/arg/param/label/context/phrase/match_type), or None when nothing
+    matched or the top two are ambiguous (→ falls through to the parser / LLM)."""
     t = normalize(text)
     if not t:
         return None
+    matches: list[dict] = []
     for ctx in candidate_contexts(conn, app=app, domain=domain):
-        cmds = commands_with_phrases(conn, ctx["id"])
-        for mt in ("exact", "contains", "regex"):
-            for c in cmds:
-                for p in c["phrases"]:
-                    if p["match_type"] == mt and _phrase_hit(p["text"], mt, t):
-                        return {**{k: c[k] for k in ("intent", "arg", "param", "label")},
-                                "command_id": c["id"],
-                                "context": f'{ctx["kind"]}:{ctx["match_value"] or "*"}',
-                                "phrase": p["text"], "match_type": mt}
+        matches += collect_matches(commands_with_phrases(conn, ctx["id"]), t,
+                                   ctx["kind"], ctx["match_value"])
+    return rank_matches(matches)
+
+
+# --- learning: the write path (docs/plan/command-learning/05) -------------------------------------
+# Phase 1 is SHADOW MODE: everything below records evidence. Nothing here creates a command or
+# changes what Vox does — promotion is deliberately not implemented yet.
+
+def action_key(context_id: int, intent: str, arg: str | None) -> str:
+    """Identity of an action — the thing that makes variant phrasings collapse onto ONE command
+    (doc 02). Keyed by what it DOES, never by the words that triggered it."""
+    return f"{context_id}|{intent}|{normalize(arg or '')}"
+
+
+def log_resolution(conn, *, heard: str, context_kind=None, context_value=None, command_id=None,
+                   intent=None, arg=None, resolved_by="llm", success=None,
+                   confidence=None, ambiguous=False, candidate_id=None) -> int:
+    """Append one row to command_log — the evidence trail. Called for EVERY resolution
+    (deterministic / db / llm alike). Returns the row id so a later negative signal can flag it."""
+    cur = conn.execute(
+        "INSERT INTO command_log (heard_phrase, context_kind, context_value, command_id, "
+        "resolved_intent, resolved_arg, resolved_by, success, confidence, ambiguous, candidate_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (heard, context_kind, context_value, command_id, intent, arg, resolved_by,
+         None if success is None else int(success), confidence, int(bool(ambiguous)), candidate_id))
+    conn.commit()
+    return cur.lastrowid
+
+
+def mark_negated(conn, log_id: int) -> None:
+    """A negative signal ("no" / undo / an immediate re-say) followed this action — flag the log row
+    and walk back the candidate it fed, so a correction can never count toward promotion (doc 01)."""
+    row = conn.execute("SELECT candidate_id, negated FROM command_log WHERE id=?", (log_id,)).fetchone()
+    if row is None or row["negated"]:
+        return
+    conn.execute("UPDATE command_log SET negated=1 WHERE id=?", (log_id,))
+    if row["candidate_id"]:
+        conn.execute("UPDATE command_candidate SET negative_count = negative_count + 1, "
+                     "hit_count = MAX(0, hit_count - 1) WHERE id=?", (row["candidate_id"],))
+    conn.commit()
+
+
+def find_by_action(conn, context_id: int, intent: str, arg: str | None) -> dict | None:
+    """THE lookup that stops variants multiplying: does a command for this ACTION already exist?
+    If it does, a new phrasing becomes an alias on it — never a second command (doc 02)."""
+    want = normalize(arg or "")
+    rows = _rows(conn, "SELECT * FROM command WHERE context_id=? AND intent=?", (context_id, intent))
+    for r in rows:
+        if normalize(r["arg"] or "") == want:
+            return r
     return None
+
+
+def note_candidate(conn, *, context_id: int, intent: str, arg: str | None, phrase: str,
+                   today: str | None = None) -> dict:
+    """Upsert the candidate for this action key, count the hit (and the DAY, which is what separates
+    a habit from saying the same thing three times because it didn't work), and cluster the phrase."""
+    from datetime import date
+    day = today or date.today().isoformat()
+    key = action_key(context_id, intent, arg)
+    row = conn.execute("SELECT * FROM command_candidate WHERE action_key=?", (key,)).fetchone()
+    if row is None:
+        conn.execute("INSERT INTO command_candidate (context_id, intent, arg, action_key, "
+                     "hit_count, distinct_days, last_day) VALUES (?,?,?,?,1,1,?)",
+                     (context_id, intent, arg, key, day))
+        cand_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    else:
+        cand_id = row["id"]
+        new_day = row["last_day"] != day
+        conn.execute("UPDATE command_candidate SET hit_count = hit_count + 1, "
+                     "distinct_days = distinct_days + ?, last_day = ?, "
+                     "last_seen = datetime('now') WHERE id=?",
+                     (1 if new_day else 0, day, cand_id))
+    p = normalize(phrase)
+    if p:
+        conn.execute("INSERT INTO command_candidate_phrase (candidate_id, text) VALUES (?,?) "
+                     "ON CONFLICT(candidate_id, text) DO UPDATE SET "
+                     "hit_count = hit_count + 1, last_used_at = datetime('now')", (cand_id, p))
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM command_candidate WHERE id=?", (cand_id,)).fetchone())
+
+
+def window_hits(conn, candidate_id: int, days: float) -> int:
+    """Clean hits for this candidate inside a ROLLING window of ``days``.
+
+    The promotion bar counts recency, not calendar days: three uses this afternoon is a habit worth
+    learning, while three uses spread over six months is not the same signal at all. Reads
+    command_log (which already timestamps every resolution) and ignores rows a correction negated."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM command_log WHERE candidate_id=? AND negated=0 "
+        "AND ts >= datetime('now', ?)", (candidate_id, f"-{float(days)} days")).fetchone()
+    return int(row[0]) if row else 0
+
+
+def note_usage(conn, command_id: int, phrase_id: int | None = None, *, success: bool = True) -> None:
+    """Bump usage on a command (and the phrase that matched) — the data decay and eviction run on.
+    On failure bump fail_count instead; a success resets it (doc 04, F3)."""
+    if success:
+        conn.execute("UPDATE command SET hit_count = hit_count + 1, last_used_at = datetime('now'), "
+                     "fail_count = 0 WHERE id=?", (command_id,))
+    else:
+        conn.execute("UPDATE command SET fail_count = fail_count + 1 WHERE id=?", (command_id,))
+    if phrase_id:
+        conn.execute("UPDATE phrase SET hit_count = hit_count + 1, last_used_at = datetime('now') "
+                     "WHERE id=?", (phrase_id,))
+    conn.commit()
+
+
+# --- promotion & upkeep (phase 2) -----------------------------------------------------------------
+
+_MAX_PHRASES_PER_COMMAND = 6
+_PHRASE_SIMILARITY = 0.85
+
+
+def score(hit_count, last_used_at) -> float:
+    """hits × recency, half-life 30 days — one explainable number for eviction, decay and phrase
+    pruning. Ten hits three months ago scores 1.25; three hits this week ~2.9. Recent-and-modest
+    beats old-and-heavy, which is what you want from something tracking how you work *now*."""
+    from datetime import datetime, timezone
+    hits = float(hit_count or 0)
+    if not last_used_at:
+        return hits * 0.5  # never used since promotion → treat as half a hit's worth of evidence
+    try:
+        seen = datetime.fromisoformat(str(last_used_at).replace(" ", "T"))
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        days = max(0.0, (datetime.now(timezone.utc) - seen).total_seconds() / 86400.0)
+    except Exception:
+        return hits
+    return hits * (0.5 ** (days / 30.0))
+
+
+def _token_similar(a: str, b: str) -> float:
+    """Token-set similarity — order-insensitive, so 'open alex chat' ≈ 'chat alex open'."""
+    import difflib
+    return difflib.SequenceMatcher(None, " ".join(sorted(a.split())),
+                                   " ".join(sorted(b.split()))).ratio()
+
+
+def attach_phrase(conn, command_id: int, phrase: str, *, source: str = "learned") -> bool:
+    """Add an alias to an EXISTING command — the other half of variant collapse (doc 02).
+
+    Applies, in order: exact-duplicate → near-duplicate → subsumption → cap+evict. Returns True only
+    if a new phrase row was written (False means it merged into one already there, which is a success
+    too — it's the whole point)."""
+    p = normalize(phrase)
+    if not p:
+        return False
+    rows = _rows(conn, "SELECT * FROM phrase WHERE command_id=?", (command_id,))
+    for r in rows:
+        existing = normalize(r["text"])
+        if existing == p or _token_similar(existing, p) >= _PHRASE_SIMILARITY:
+            conn.execute("UPDATE phrase SET hit_count = hit_count + 1, "
+                         "last_used_at = datetime('now') WHERE id=?", (r["id"],))
+            conn.commit()
+            return False
+        # Subsumption: keep the SHORTER, more general phrase of a containing pair.
+        pt, et = set(p.split()), set(existing.split())
+        if et and et < pt:      # existing is contained in the new one → existing already covers it
+            conn.execute("UPDATE phrase SET hit_count = hit_count + 1 WHERE id=?", (r["id"],))
+            conn.commit()
+            return False
+        if pt and pt < et:      # the new one is more general → replace the longer existing phrase
+            conn.execute("UPDATE phrase SET text=?, hit_count = hit_count + 1, "
+                         "last_used_at = datetime('now') WHERE id=?", (p, r["id"]))
+            conn.commit()
+            return False
+    conn.execute("INSERT INTO phrase (command_id, text, match_type, source, hit_count, last_used_at) "
+                 "VALUES (?,?, 'exact', ?, 1, datetime('now'))", (command_id, p, source))
+    # Cap: a command needing more than N ways to say it is usually a template (doc 02, phase 4).
+    rows = _rows(conn, "SELECT * FROM phrase WHERE command_id=?", (command_id,))
+    if len(rows) > _MAX_PHRASES_PER_COMMAND:
+        worst = min(rows, key=lambda r: score(r["hit_count"], r["last_used_at"]))
+        conn.execute("DELETE FROM phrase WHERE id=?", (worst["id"],))
+    conn.commit()
+    return True
+
+
+def _enforce_caps(conn, context_id: int) -> int:
+    """Evict the lowest-scoring LEARNED commands over the per-context / global caps. builtin and user
+    rows are never counted and never evicted. Returns how many were dropped."""
+    dropped = 0
+    for sql, params, cap in (
+            ("SELECT * FROM command WHERE source='learned' AND context_id=?", (context_id,),
+             int(_learn_setting("learning_max_per_context", 40))),
+            ("SELECT * FROM command WHERE source='learned'", (),
+             int(_learn_setting("learning_max_total", 300)))):
+        rows = _rows(conn, sql, params)
+        while len(rows) > cap:
+            worst = min(rows, key=lambda r: score(r["hit_count"], r["last_used_at"]))
+            conn.execute("DELETE FROM command WHERE id=?", (worst["id"],))
+            rows = [r for r in rows if r["id"] != worst["id"]]
+            dropped += 1
+    if dropped:
+        conn.commit()
+    return dropped
+
+
+def _learn_setting(key, fallback):
+    """Live dashboard override for a learning setting, else the fallback (guarded)."""
+    try:
+        from vox.web import settings_store
+        val = settings_store.get(key)
+        if val is not None:
+            return val
+    except Exception:
+        pass
+    return fallback
+
+
+def promote(conn, candidate_id: int, *, reason: str = "threshold") -> int | None:
+    """Turn a candidate into a real command (``source='learned'``) with its clustered phrases.
+
+    Returns the new command id, or None if it couldn't/shouldn't. Idempotent: an already-promoted or
+    blocked candidate is a no-op. If a command for the action appeared meanwhile, the phrases are
+    attached to THAT instead of creating a duplicate (doc 02's rule, enforced here too)."""
+    row = conn.execute("SELECT * FROM command_candidate WHERE id=?", (candidate_id,)).fetchone()
+    if row is None or row["blocked"] or row["promoted_id"]:
+        return None
+    cand = dict(row)
+    phrases = [r["text"] for r in _rows(
+        conn, "SELECT text FROM command_candidate_phrase WHERE candidate_id=? "
+              "ORDER BY hit_count DESC, id", (candidate_id,))][:_MAX_PHRASES_PER_COMMAND]
+    if not phrases:
+        return None
+
+    existing = find_by_action(conn, cand["context_id"], cand["intent"], cand["arg"])
+    if existing is not None:
+        for p in phrases:
+            attach_phrase(conn, existing["id"], p)
+        conn.execute("UPDATE command_candidate SET promoted_id=? WHERE id=?",
+                     (existing["id"], candidate_id))
+        conn.commit()
+        return existing["id"]
+
+    label = f"{cand['intent']} {cand['arg']}".strip() if cand["arg"] else cand["intent"]
+    cur = conn.execute(
+        "INSERT INTO command (context_id, intent, arg, label, source, learned_at, learned_reason) "
+        "VALUES (?,?,?,?, 'learned', datetime('now'), ?)",
+        (cand["context_id"], cand["intent"], cand["arg"], f"Learned: {label}"[:60], reason))
+    cmd_id = cur.lastrowid
+    for p in phrases:
+        attach_phrase(conn, cmd_id, p)
+    conn.execute("UPDATE command_candidate SET promoted_id=? WHERE id=?", (cmd_id, candidate_id))
+    conn.commit()
+    _enforce_caps(conn, cand["context_id"])
+    return cmd_id
+
+
+def remap(conn, command_id: int, intent: str, arg: str | None) -> dict | None:
+    """Re-point a LEARNED command at a different action, keeping its phrases ("when I say X I
+    actually mean Y" — doc 04). Refuses builtin/user rows: those are human-authored and an inferred
+    edit must never overwrite them. Returns the previous action (so it can be undone / recorded as
+    the anti-mapping), or None if it refused."""
+    row = conn.execute("SELECT * FROM command WHERE id=?", (command_id,)).fetchone()
+    if row is None or row["source"] != "learned":
+        return None
+    was = {"intent": row["intent"], "arg": row["arg"]}
+    conn.execute("UPDATE command SET intent=?, arg=?, updated_at=datetime('now'), "
+                 "learned_at=datetime('now'), learned_reason='remap', "
+                 "hit_count=0, fail_count=0, enabled=1 WHERE id=?",   # re-mapped ⇒ probation resets
+                 (intent, arg, command_id))
+    conn.commit()
+    return was
+
+
+def retire(conn, command_id: int, *, delete: bool = False, block_days: int = 0) -> bool:
+    """Demote (``enabled=0``) or delete a LEARNED command, optionally blocking its action from being
+    re-promoted (else "forget that" is undone by the next three uses). builtin/user are untouchable."""
+    row = conn.execute("SELECT * FROM command WHERE id=?", (command_id,)).fetchone()
+    if row is None or row["source"] != "learned":
+        return False
+    key = action_key(row["context_id"], row["intent"], row["arg"])
+    if block_days:
+        conn.execute("UPDATE command_candidate SET blocked=1, "
+                     "blocked_until=datetime('now', ?) WHERE action_key=?",
+                     (f"+{int(block_days)} days", key))
+    if delete:
+        conn.execute("DELETE FROM command WHERE id=?", (command_id,))
+    else:
+        conn.execute("UPDATE command SET enabled=0, updated_at=datetime('now') WHERE id=?",
+                     (command_id,))
+    conn.commit()
+    return True
+
+
+def learned_commands(conn, *, include_disabled: bool = True) -> list[dict]:
+    """Every learned command with its phrases + current score — the dashboard's review surface."""
+    where = "source='learned'" if include_disabled else "source='learned' AND enabled=1"
+    rows = _rows(conn, f"SELECT * FROM command WHERE {where} ORDER BY learned_at DESC")
+    for r in rows:
+        r["phrases"] = [p["text"] for p in _rows(
+            conn, "SELECT text FROM phrase WHERE command_id=? ORDER BY hit_count DESC", (r["id"],))]
+        r["score"] = round(score(r["hit_count"], r["last_used_at"]), 3)
+    return rows
+
+
+def decay(conn) -> dict:
+    """Nightly upkeep: probation, retirement, candidate cleanup, log trim (doc 03).
+
+    Probation is what makes automatic learning safe — a command learned during a one-off burst that
+    never gets used again deletes itself, so a wrong guess costs days rather than forever."""
+    out = {"probation_deleted": 0, "demoted": 0, "deleted": 0, "candidates_dropped": 0, "log_trimmed": 0}
+    p_days = int(_learn_setting("learning_probation_days", 14))
+    p_uses = int(_learn_setting("learning_probation_uses", 2))
+
+    # 1. Probation — learned, old enough to judge, still unproven → delete (it never earned a place).
+    cur = conn.execute(
+        "DELETE FROM command WHERE source='learned' AND learned_at IS NOT NULL "
+        "AND learned_at < datetime('now', ?) AND hit_count < ?", (f"-{p_days} days", p_uses))
+    out["probation_deleted"] = cur.rowcount or 0
+
+    # 2. Retirement — proven once, but long unused. Demote first (reversible), delete much later.
+    cur = conn.execute(
+        "UPDATE command SET enabled=0 WHERE source='learned' AND enabled=1 "
+        "AND COALESCE(last_used_at, learned_at) < datetime('now', '-60 days')")
+    out["demoted"] = cur.rowcount or 0
+    cur = conn.execute(
+        "DELETE FROM command WHERE source='learned' "
+        "AND COALESCE(last_used_at, learned_at) < datetime('now', '-180 days')")
+    out["deleted"] = cur.rowcount or 0
+
+    # 3. Candidates that never became anything, and the rolling evidence window.
+    cur = conn.execute("DELETE FROM command_candidate WHERE promoted_id IS NULL "
+                       "AND last_seen < datetime('now', '-30 days')")
+    out["candidates_dropped"] = cur.rowcount or 0
+    cur = conn.execute("DELETE FROM command_log WHERE ts < datetime('now', '-90 days')")
+    out["log_trimmed"] = cur.rowcount or 0
+    conn.commit()
+    return out
+
+
+def candidates(conn, *, limit: int = 200) -> list[dict]:
+    """Every candidate with its clustered phrases, best-evidenced first — what shadow mode has seen
+    and what the dashboard's Candidates queue renders."""
+    rows = _rows(conn, "SELECT * FROM command_candidate ORDER BY hit_count DESC, last_seen DESC "
+                       "LIMIT ?", (limit,))
+    if not rows:
+        return rows
+    ids = [r["id"] for r in rows]
+    ph = _rows(conn, "SELECT candidate_id, text, hit_count FROM command_candidate_phrase "
+                     f"WHERE candidate_id IN ({','.join('?' * len(ids))}) "
+                     "ORDER BY hit_count DESC", tuple(ids))
+    by: dict[int, list[dict]] = {}
+    for r in ph:
+        by.setdefault(r["candidate_id"], []).append({"text": r["text"], "hit_count": r["hit_count"]})
+    for r in rows:
+        r["phrases"] = by.get(r["id"], [])
+    return rows
 
 
 # --- CLI: build / inspect / test resolution ------------------------------------------------------

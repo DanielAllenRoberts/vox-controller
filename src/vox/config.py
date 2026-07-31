@@ -347,10 +347,11 @@ class Config:
     # --- Command DB (app/site-scoped voice commands, idea #36 / docs/plan/command-db.md) --- The
     # SQLite store (data/commands.db) is loaded into memory at boot (global + mode/system commands)
     # and per-app on focus change (vox.command_cache); matching is in-memory so the hot path never
-    # touches SQLite. `command_db_enabled` flips on the deterministic DB resolver in vox.dispatch
-    # (a BEHAVIOR change — kept OFF until tested live); `command_db_log` mirrors every DB query +
-    # focus load + resolve to vox.log so you can watch it work. Both are additive + guarded.
-    command_db_enabled: bool = False        # consult the DB resolver in dispatch (OFF: load+log only)
+    # touches SQLite. `command_db_enabled` flips on the deterministic DB resolver in vox.dispatch;
+    # `command_db_log` mirrors every DB query + focus load + resolve to vox.log so you can watch it
+    # work. Both are additive + guarded. ON by default since 2026-07-31: command LEARNING (idea #24)
+    # writes into this DB, so with the resolver off Vox would learn commands and then never use them.
+    command_db_enabled: bool = True         # consult the DB resolver in dispatch
     command_db_log: bool = True             # log every DB query / focus load / resolve to vox.log
 
 

@@ -567,14 +567,24 @@ return (gItems as text)
 '''
 
 
-def clickable_targets(limit: int = 60) -> list[str]:
+def clickable_targets(limit: int = 300) -> list[str]:
     """Labels of on-screen elements the user could click in the focused app (deduped, capped).
     Uses the fast native AX engine (``vox.ax``); falls back to the AppleScript walk only if native AX
     is unavailable. Used to give the brain a view of what's clickable so it can disambiguate. Returns
-    ``[]`` on any failure (never raises)."""
+    ``[]`` on any failure (never raises).
+
+    Reads the FRAMED enumeration (``targets_with_frames``) rather than ``targets()``, for two reasons
+    found while diagnosing a failed "click Alex's second last message":
+      1. ``targets()`` lists elements with no on-screen frame at all — a closed menu's items are
+         zero-size, and on Slack **177 of its 190 labels** were invisible menu entries. The brain was
+         being asked to pick from things the user cannot see.
+      2. The old cap of 60, spent depth-first, never got past the sidebar: the brain was handed 60
+         channel/toolbar labels and not one message, then blamed for not finding the message.
+    Same source as the numbered overlay, so what the brain can pick == what a badge is drawn on."""
     try:
         from vox import ax
-        res = ax.targets(limit)
+        framed = ax.targets_with_frames(limit=limit)
+        res = None if framed is None else _dedupe([i["label"] for i in framed])
     except Exception:
         res = None
     if res is not None:
@@ -585,9 +595,13 @@ def clickable_targets(limit: int = 60) -> list[str]:
                    timeout=30)
     if not ok or not out:
         return []
+    return _dedupe(line.strip() for line in out.splitlines())
+
+
+def _dedupe(names) -> list[str]:
+    """Order-preserving de-duplication of element labels."""
     seen, items = set(), []
-    for line in out.splitlines():
-        name = line.strip()
+    for name in names:
         if name and name not in seen:
             seen.add(name)
             items.append(name)

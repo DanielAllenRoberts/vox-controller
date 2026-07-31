@@ -66,6 +66,25 @@ def boot(out, cfg) -> None:
     _emit(f"  [cmddb] boot: {command_store.DEFAULT_DB.name} — {s['command']} commands / "
           f"{s['phrase']} phrases / {s['context']} contexts; {len(_BASE)} global+system loaded "
           f"into memory (resolution {'ON' if getattr(cfg, 'command_db_enabled', False) else 'off'})")
+    _decay_once()
+
+
+def _decay_once() -> None:
+    """Run learning upkeep at startup — probation, retirement, candidate + log trim. Belongs in a
+    nightly job (alongside #28's "dream" consolidation) once that exists; boot is the pragmatic slot
+    until then, and it keeps the housekeeping visible in the log. Fully guarded."""
+    try:
+        conn = command_store.connect()
+        try:
+            r = command_store.decay(conn)
+        finally:
+            conn.close()
+        if any(r.values()):
+            _emit(f"  [cmddb] upkeep: {r['probation_deleted']} failed probation, "
+                  f"{r['demoted']} demoted, {r['deleted']} retired, "
+                  f"{r['candidates_dropped']} stale candidates dropped, {r['log_trimmed']} log rows trimmed")
+    except Exception:
+        pass
 
 
 def on_focus(app: str) -> None:
@@ -136,23 +155,26 @@ def resolve(text: str, *, app: str | None = None, domain: str | None = None,
     t = command_store.normalize(text)
     if not t:
         return None
+    # Collect EVERY match, then rank once (command_store.rank_matches) — never "first row wins".
+    # See docs/plan/command-learning/04: with learned rows in the mix, first-match-wins makes a
+    # collision resolve to whichever row SQLite happened to return first.
+    matches: list[dict] = []
     pools: list[list[dict]] = []
     if app and app in _APP_CACHE:
         pools.append(_APP_CACHE[app])  # app context outranks global (priority 10 > 0)
     pools.append(_BASE)
     for pool in pools:
-        for mt in ("exact", "contains", "regex"):
-            for c in pool:
-                if actions_only and c["intent"] not in _ACTION_INTENTS:
-                    continue  # mode/system stay in the loop's hardcoded handling (safety floor)
-                for p in c["phrases"]:
-                    if p["match_type"] == mt and command_store._phrase_hit(p["text"], mt, t):
-                        hit = {k: c.get(k) for k in ("intent", "arg", "param", "label")}
-                        hit.update(command_id=c["id"],
-                                   context=f'{c.get("_ctx_kind")}:{c.get("_ctx_value") or "*"}',
-                                   phrase=p["text"], match_type=mt)
-                        return hit
-    return None
+        usable = [c for c in pool
+                  if not (actions_only and c["intent"] not in _ACTION_INTENTS)]
+        # ^ mode/system intents stay in the loop's hardcoded handling (the §8a safety floor)
+        for c in usable:
+            matches += command_store.collect_matches(
+                [c], t, c.get("_ctx_kind") or "global", c.get("_ctx_value"))
+    hit = command_store.rank_matches(matches)
+    if hit is None and len(matches) > 1:
+        log(f"  [cmddb] resolve {text!r} → AMBIGUOUS between {len(matches)} commands "
+            f"({', '.join(str(m['command_id']) for m in matches[:4])}) — falling through to the LLM")
+    return hit
 
 
 def active_phrases(app: str | None = None) -> list[str]:

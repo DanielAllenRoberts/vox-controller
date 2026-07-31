@@ -38,6 +38,14 @@ _SETTLE = 0.4        # seconds — let Electron build its web-content AX tree on
 
 _FNS = None          # lazily-bound C functions ({} once load is attempted; None until then)
 _enabled_pids = set()  # pids we've already set AXManualAccessibility on (so we settle only once)
+# Most elements we've ever enumerated for a pid. Chromium/Electron build their web-content AX tree on
+# demand and TEAR IT BACK DOWN again; because we only assert AXManualAccessibility once per pid, a
+# later walk can silently come back with just the native window chrome — which all lives in the
+# top-left, so the overlay looks like it's piling badges in the corner. Comparing against the best
+# we've seen for that app is how we notice the tree collapsed and re-assert. (Restarting the daemon
+# "fixed" it precisely because a fresh process re-enables everything.)
+_best_count: dict[int, int] = {}
+_THIN_ABSOLUTE = 20  # below this, with a healthy baseline, the tree is almost certainly chrome-only
 
 
 def _load():
@@ -271,11 +279,18 @@ def _frame(fns, el):
     return (x, y, w, h)
 
 
-def targets_with_frames(limit: int = 80):
+def targets_with_frames(limit: int = 400, _retry: bool = True):
     """Clickable elements in the focused app WITH their on-screen frames, for a numbered overlay
     (idea #52). Returns a list of ``{index, label, role, x, y, w, h}`` (frame in AX top-left-origin
     screen coords), or None if native AX is unavailable. Also caches each element's pressable ref so
-    ``click_index()`` can press it. Role-gated + deduped by (label, rounded position) like ``targets()``."""
+    ``click_index()`` can press it. Role-gated + deduped by (label, rounded position) like ``targets()``.
+
+    ``limit`` has to clear a whole app's clickables, not just the first screenful: the walk is
+    depth-first, so a low cap drains into whichever subtree comes first — in Cursor/Slack that's the
+    left sidebar (file tree / channel list), which alone exceeded the old cap of 80 and left the
+    entire content area unbadged (badges looked like they'd piled up in the top-left). A busy Slack
+    measured 227 elements, so 400 leaves real headroom; the walk costs ~70 ms whether it's capped or
+    not (``_BUDGET``'s node-visit cap dominates) and still guards a runaway tree."""
     global _LAST_TARGETS
     fns = _load()
     if not fns:
@@ -314,6 +329,18 @@ def targets_with_frames(limit: int = 80):
         walk(root, 0, [])
     except Exception:
         return None
+
+    # Did this app's web-content tree collapse out from under us? If we've previously seen far more
+    # from the same pid, re-assert AXManualAccessibility (dropping the once-per-pid memo) and walk
+    # once more. Only costs the _SETTLE wait on the rare degraded path — a healthy walk never retries.
+    pid = _frontmost_pid()
+    if pid:
+        best = _best_count.get(pid, 0)
+        if _retry and best and len(out) < min(_THIN_ABSOLUTE, best // 2):
+            _enabled_pids.discard(pid)
+            return targets_with_frames(limit, _retry=False)
+        _best_count[pid] = max(best, len(out))
+
     _LAST_TARGETS = cache
     return out
 

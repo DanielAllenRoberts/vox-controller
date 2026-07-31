@@ -27,7 +27,7 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -507,6 +507,36 @@ def create_app() -> FastAPI:
             return mod.list_all()
         except Exception:  # never 500 a read — degrade to an empty DB view
             return {"contexts": [], "intents": [], "summary": {}}
+
+    @app.get("/api/commands/learning")
+    def get_learning() -> dict:
+        """What Vox has taught itself, and what it's still considering (idea #24)."""
+        mod = _try_import("commands")
+        if mod is None:
+            return {"mode": "unknown", "learned": [], "candidates": []}
+        try:
+            return mod.learning()
+        except Exception:
+            return {"mode": "unknown", "learned": [], "candidates": []}
+
+    @app.post("/api/commands/candidates/{cand_id}/promote")
+    def post_promote_candidate(cand_id: int):
+        mod = _try_import("commands")
+        if mod is None:
+            raise HTTPException(status_code=503, detail="command DB unavailable")
+        row = mod.promote_candidate(cand_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="candidate not found or already promoted")
+        return row
+
+    @app.delete("/api/commands/learned/{cmd_id}")
+    def delete_learned(cmd_id: int) -> dict:
+        mod = _try_import("commands")
+        if mod is None:
+            raise HTTPException(status_code=503, detail="command DB unavailable")
+        if not mod.forget_learned(cmd_id):
+            raise HTTPException(status_code=400, detail="not a learned command")
+        return {"ok": True}
 
     @app.patch("/api/commands/contexts/{ctx_id}")
     async def patch_command_context(ctx_id: int, request: Request):
@@ -1322,6 +1352,36 @@ def _handbook_static() -> list:
                     "number to press it (“click 14”, or just “14”). Also triggers "
                     "on “click link” / “click button”. Say anything else to dismiss. "
                     "Best in control mode, which stays listening for the number.",
+                },
+            ],
+        },
+        {
+            "title": "Commands Vox Learns",
+            "blurb": "When Vox has to work something out with the brain, it remembers the wiring — "
+            "after a few uses the same request runs instantly and for free, with no AI call. It "
+            "saves these on its own; these phrases let you take over. Everything it has learned is "
+            "reviewable, and nothing it learns can override a built-in command.",
+            "items": [
+                {
+                    "phrase": "remember that",
+                    "description": "Save what Vox just did as a command right now, without waiting "
+                    "for it to happen a few times. The best way to teach it something "
+                    "you use often but not in bursts.",
+                    "variants": ["save that as a command", "learn that", "keep that"],
+                },
+                {
+                    "phrase": "forget that",
+                    "description": "Delete the command behind what just ran, and stop it being "
+                    "re-learned for a month. Only ever removes something Vox taught "
+                    "itself — built-in commands can't be unlearned.",
+                    "variants": ["unlearn that", "delete that command"],
+                },
+                {
+                    "phrase": "no  /  that's wrong",
+                    "description": "Said straight after Vox acts, this retires the learned command "
+                    "that misfired — one correction is enough. It also stops that "
+                    "wrong mapping counting towards anything it's still considering.",
+                    "variants": ["not that", "wrong", "undo"],
                 },
             ],
         },

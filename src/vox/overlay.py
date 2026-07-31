@@ -70,6 +70,64 @@ def hide() -> None:
         _proc = None
 
 
+def annotate(image_path: str, items, out_path: str = "/tmp/vox_marks.png") -> str | None:
+    """Draw the same numbered badges ONTO a screenshot and save it — "set of marks" for the vision
+    brain (idea #37, the escalation path off #52).
+
+    When the brain can't find a target by LABEL, a labelled list can't express "the second last
+    message" or "the one at 7:52pm" — position and order simply aren't in the text. This hands it the
+    picture instead, with a number on every clickable element, so it only has to answer "which
+    number?" and we click that element by its real AX frame. Far more reliable than asking a model
+    for raw pixel coordinates, because the click target stays a real element, not an estimate.
+
+    Draws in-memory (no on-screen flash, and it sidesteps the overlay window being
+    ``NSWindowSharingNone`` — which screenshots deliberately can't see). ``items`` are the dicts from
+    ``ax.targets_with_frames``; badge N ↔ items[N-1], matching ``show()``. Returns the written path,
+    or None if anything fails (caller falls back)."""
+    try:
+        import AppKit
+        from Foundation import NSMakeRect, NSMakePoint
+
+        img = AppKit.NSImage.alloc().initWithContentsOfFile_(image_path)
+        if img is None:
+            return None
+        rep = img.representations()[0]
+        px_w, px_h = float(rep.pixelsWide()), float(rep.pixelsHigh())
+        screen = AppKit.NSScreen.screens()[0].frame()
+        # The capture is downscaled (actions.capture_screen → sips -Z 1568) and may be Retina, so map
+        # AX points → image pixels by the ratio actually measured off the image.
+        sx, sy = px_w / float(screen.size.width), px_h / float(screen.size.height)
+
+        canvas = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(px_w, px_h))
+        canvas.lockFocus()
+        AppKit.NSGraphicsContext.currentContext().setShouldAntialias_(True)
+        img.drawInRect_fromRect_operation_fraction_(
+            NSMakeRect(0, 0, px_w, px_h), AppKit.NSZeroRect, AppKit.NSCompositingOperationCopy, 1.0)
+
+        font = AppKit.NSFont.boldSystemFontOfSize_(max(9.0, 11.0 * min(sx, sy)))
+        for n, it in enumerate(items, start=1):
+            bw, bh = 26.0 * sx, 16.0 * sy
+            # AX is top-left origin; the image canvas is bottom-left. Flip, and keep the badge inside.
+            bx = min(max(float(it["x"]) * sx, 0.0), px_w - bw)
+            by = min(max(px_h - float(it["y"]) * sy - bh, 0.0), px_h - bh)
+            AppKit.NSColor.systemBlueColor().setFill()
+            AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(bx, by, bw, bh), 3.0, 3.0).fill()
+            AppKit.NSColor.whiteColor().setStroke()
+            AppKit.NSString.stringWithString_(str(n)).drawAtPoint_withAttributes_(
+                NSMakePoint(bx + 3.0, by + 1.0),
+                {AppKit.NSFontAttributeName: font,
+                 AppKit.NSForegroundColorAttributeName: AppKit.NSColor.whiteColor()})
+        canvas.unlockFocus()
+
+        tiff = canvas.TIFFRepresentation()
+        bmp = AppKit.NSBitmapImageRep.imageRepWithData_(tiff)
+        png = bmp.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})
+        return out_path if png.writeToFile_atomically_(out_path, True) else None
+    except Exception:
+        return None
+
+
 # --- the helper child: draws the badges and runs its own NSApplication run loop ------------------
 
 def _build_window(AppKit, screen_frame):
@@ -110,7 +168,10 @@ def _make_badge(AppKit, num: int, x: float, y: float):
     tf.setBezeled_(False)
     tf.setDrawsBackground_(False)
     tf.setAlignment_(AppKit.NSTextAlignmentCenter)
-    tf.setFont_(AppKit.NSFont.boldSystemFontOfSize_(11))
+    # Smaller past 99 so a 3-digit number still fits the badge ("100" clipped to "10" at 11pt).
+    # Shrinking the text rather than widening the box keeps badges uniform and occluding less — and
+    # 3-digit numbers only show up on dense screens, where covering neighbours hurts most.
+    tf.setFont_(AppKit.NSFont.boldSystemFontOfSize_(11 if num < 100 else 9))
     tf.setTextColor_(AppKit.NSColor.whiteColor())
     tf.setWantsLayer_(True)
     layer = tf.layer()
@@ -145,22 +206,26 @@ def _run_helper(path: str, ttl: float = 45.0) -> None:
 
     screens = AppKit.NSScreen.screens()
     primary_h = screens[0].frame().size.height  # AX Y is measured from the top of the primary display
-    # Cover the UNION of every display (incl. Sidecar / second screens) so badges off the primary
-    # display aren't clipped to it.
-    frames = [s.frame() for s in screens]
-    min_x = min(f.origin.x for f in frames)
-    min_y = min(f.origin.y for f in frames)
-    max_x = max(f.origin.x + f.size.width for f in frames)
-    max_y = max(f.origin.y + f.size.height for f in frames)
-    win = _build_window(AppKit, AppKit.NSMakeRect(min_x, min_y, max_x - min_x, max_y - min_y))
-    view = win.contentView()
+    # ONE overlay window PER display — robust for Sidecar / multi-monitor. (A single window spanning
+    # displays with a negative origin renders unreliably and scatters badges to a corner.) Each window
+    # sits at its own screen's frame; a badge is placed in the window of the display it falls on.
+    windows = [(_build_window(AppKit, s.frame()), s.frame()) for s in screens]
     for b in badges:
-        # AX (global, top-left origin) → Cocoa (global, bottom-left) via the primary height, then to
-        # window-local coords by subtracting the union origin.
+        # AX (global, top-left origin) → Cocoa (global, bottom-left) via the primary height.
         gx = float(b["x"])
         gy = primary_h - float(b["y"]) - 18.0
-        view.addSubview_(_make_badge(AppKit, int(b["n"]), gx - min_x, gy - min_y))
-    win.orderFrontRegardless()
+        # Which display does this element sit on? Test its CENTRE (Cocoa global) against each frame.
+        ecx = gx + float(b.get("w", 0.0)) / 2.0
+        ecy = primary_h - float(b["y"]) - float(b.get("h", 0.0)) / 2.0
+        for win, sf in windows:
+            if (sf.origin.x <= ecx < sf.origin.x + sf.size.width
+                    and sf.origin.y <= ecy < sf.origin.y + sf.size.height):
+                # Badge at the element's top-left, in THIS display's local (window) coords.
+                win.contentView().addSubview_(
+                    _make_badge(AppKit, int(b["n"]), gx - sf.origin.x, gy - sf.origin.y))
+                break
+    for win, _sf in windows:
+        win.orderFrontRegardless()
 
     # Safety auto-dismiss — the parent normally terminates us first (on the next utterance).
     NSTimer.scheduledTimerWithTimeInterval_repeats_block_(

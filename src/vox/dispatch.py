@@ -103,9 +103,53 @@ def _command_db(text: str) -> tuple[bool, str] | None:
         arg = f" {r['arg']!r}" if r.get("arg") else ""
         command_cache.log(f"  [cmddb] resolve {text!r} [app={app}] → {r['intent']}{arg} "
                           f"via {r['context']} '{r['phrase']}'  ⇒ {'ran' if ok else 'FAILED → fall through'}")
+        _log_db_hit(text, app, r, ok)  # usage counters + evidence trail (command-learning phase 1)
         return (True, result) if ok else None
     except Exception:
         return None  # any cache/dispatch error → behave exactly as if the DB weren't there
+
+
+_REMEMBER = ("remember that", "save that as a command", "save that command", "learn that",
+             "remember this", "save this as a command", "keep that")
+_FORGET = ("forget that", "unlearn that", "forget that command", "delete that command",
+           "forget this", "undo that command")
+
+
+def _learning_phrase(t: str) -> tuple[bool, str] | None:
+    """"remember that" / "forget that" — you telling Vox what to keep (idea #24). A deliberate save
+    is better evidence than any number of repetitions, and it's the only way to capture something you
+    use weekly but never three times in two days. Returns (acted, message) or None. Guarded."""
+    try:
+        from vox import command_cache, command_learn
+        if any(_has_phrase(t, p) for p in _REMEMBER):
+            msg = command_learn.remember_that(log=command_cache.log)
+            return (False, msg or "There's nothing new to remember just yet.")
+        if any(_has_phrase(t, p) for p in _FORGET):
+            msg = command_learn.forget_that(log=command_cache.log)
+            return (False, msg or "There's nothing learned to forget just yet.")
+    except Exception:
+        return None
+    return None
+
+
+def _log_db_hit(text: str, app, r: dict, ok: bool) -> None:
+    """Record a DB-resolved command: bump its usage counters (what decay/eviction run on) and append
+    the evidence row. Fully guarded — bookkeeping must never break a command that already ran."""
+    try:
+        from vox import command_learn, command_store
+        conn = command_store.connect()
+        try:
+            command_store.note_usage(conn, r["command_id"], r.get("phrase_id"), success=ok)
+            command_store.log_resolution(
+                conn, heard=text, context_kind="app" if app else "global", context_value=app,
+                command_id=r["command_id"], intent=r["intent"], arg=r.get("arg"),
+                resolved_by="db", success=ok)
+        finally:
+            conn.close()
+        command_learn.note_db_hit(r["command_id"], text, intent=r["intent"],
+                                  arg=r.get("arg"), app=app)
+    except Exception:
+        pass
 
 
 # --- numbered clickable-element overlay (idea #52) ----------------------------
@@ -212,6 +256,21 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     if not text or not text.strip():
         return None
     t = normalize(text)
+
+    # "remember that" / "forget that" — the explicit half of command learning (idea #24). Checked
+    # BEFORE check_negative, which consumes the pending action on every utterance. Guarded.
+    lrn = _learning_phrase(t)
+    if lrn is not None:
+        return lrn
+
+    # Every utterance passes through here, so this is the one place that sees what was said AFTER an
+    # LLM-resolved action — i.e. whether the user rejected it ("no" / undo / just saying it again).
+    # Guarded: it can walk a candidate back or disable a learned command, never run anything.
+    try:
+        from vox import command_learn, command_cache
+        command_learn.check_negative(text, log=command_cache.log)
+    except Exception:
+        pass
 
     ov = _overlay(text, t)  # numbered clickable overlay (idea #52) — before the parser
     if ov is not None:

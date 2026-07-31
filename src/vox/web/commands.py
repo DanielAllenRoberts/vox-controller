@@ -172,3 +172,74 @@ def remove_phrase(phrase_id) -> bool:
     if removed:
         _refresh_cache()
     return removed
+
+
+# --- learning review (idea #24; docs/plan/command-learning/) --------------------------------------
+# The audit surface. An LLM writing into your command database is only acceptable if you can see
+# exactly what it wrote, why, and undo it — so this exposes both the learned commands and the
+# candidates that haven't earned promotion yet.
+
+def learning() -> dict:
+    """Learned commands (with evidence + score) and the pending candidates behind them."""
+    conn = _conn()
+    try:
+        learned = command_store.learned_commands(conn)
+        cands = command_store.candidates(conn, limit=100)
+        ctx = {c["id"]: c for c in command_store.list_contexts(conn)}
+    finally:
+        conn.close()
+
+    def where(cid):
+        c = ctx.get(cid) or {}
+        return c.get("match_value") or ("global" if c.get("kind") == "global" else "?")
+
+    return {
+        "mode": _learn_mode(),
+        "learned": [{
+            "id": c["id"], "intent": c["intent"], "arg": c["arg"], "label": c["label"],
+            "context": where(c["context_id"]), "phrases": c["phrases"],
+            "enabled": bool(c["enabled"]), "hits": c["hit_count"], "score": c["score"],
+            "learned_at": c["learned_at"], "reason": c["learned_reason"],
+            "last_used_at": c["last_used_at"],
+        } for c in learned],
+        "candidates": [{
+            "id": c["id"], "intent": c["intent"], "arg": c["arg"],
+            "context": where(c["context_id"]),
+            "phrases": [p["text"] for p in c["phrases"]],
+            "hits": c["hit_count"], "negatives": c["negative_count"],
+            "blocked": bool(c["blocked"]), "promoted_id": c["promoted_id"],
+            "first_seen": c["first_seen"], "last_seen": c["last_seen"],
+        } for c in cands if not c["promoted_id"]],
+    }
+
+
+def _learn_mode() -> str:
+    try:
+        from vox import command_learn
+        return command_learn.mode()
+    except Exception:
+        return "unknown"
+
+
+def promote_candidate(candidate_id) -> dict | None:
+    """Approve a candidate by hand (the 'suggest' path, and a manual override in any mode)."""
+    conn = _conn()
+    try:
+        cid = command_store.promote(conn, int(candidate_id), reason="approved")
+        row = _one_command(conn, cid) if cid else None
+    finally:
+        conn.close()
+    _refresh_cache()
+    return row
+
+
+def forget_learned(command_id, *, block_days: int = 30) -> bool:
+    """Delete a learned command and stop it coming straight back. Refuses builtin/user rows."""
+    conn = _conn()
+    try:
+        ok = command_store.retire(conn, int(command_id), delete=True, block_days=block_days)
+    finally:
+        conn.close()
+    if ok:
+        _refresh_cache()
+    return ok
