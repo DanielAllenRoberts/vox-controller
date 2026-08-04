@@ -163,6 +163,14 @@ def _log_db_hit(text: str, app, r: dict, ok: bool) -> None:
 _SHOW_CLICKABLE_PHRASES = ("show clickable", "show clickables", "click link", "click button",
                            "show numbers", "show links", "show clickable items", "show clickables")
 
+# Explicit dismissals. Kept separate from _CANCEL_PHRASES (which is only consulted while an overlay
+# is up) because these must be recognised as commands even when nothing is showing — otherwise
+# "hide clickable" one beat too late escalates to the LLM, which then tries to interpret it.
+# "hi"/"high" are real mis-hears seen in vox.log: "hide" is short and gets clipped by Whisper, and
+# unlike the show phrases these were never added to the Vosk grammar so they never got snapped back.
+_HIDE_CLICKABLE_PHRASES = ("hide clickable", "hide clickables", "hide numbers", "hide links",
+                           "hide clickable items", "hi clickable", "high clickable")
+
 _ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
          "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
          "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
@@ -207,7 +215,7 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
     """Numbered clickable-element overlay flow (idea #52). Returns (acted, msg), or None to fall
     through. Guarded — any AppKit/AX problem degrades gracefully."""
     try:
-        from vox import ax, overlay
+        from vox import overlay, targets
     except Exception:
         return None
 
@@ -218,7 +226,7 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
         n = _parse_click_number(t)
         overlay.hide()  # any utterance dismisses the overlay
         if n is not None:
-            res = ax.click_index(n - 1)  # spoken 1-based → 0-based index
+            res = targets.click_index(n - 1)  # spoken 1-based → 0-based index
             if res and res[0] == "clicked":
                 return (True, f"clicked #{n} ({res[1]})")
             if res and res[0] == "press_failed":
@@ -228,9 +236,20 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
             return (True, "hidden")
         return None  # neither a number nor a dismiss → overlay closed; handle the utterance normally
 
+    # An explicit "hide clickable" is a COMMAND, whether or not badges are currently up. Reaching
+    # here means no overlay was active (the branch above already handled that case), so this is the
+    # one-beat-too-late "hide clickable" — acknowledge it quietly instead of letting it fall through
+    # to the LLM, which has no idea what it means and answers conversationally.
+    if any(_has_phrase(t, p) for p in _HIDE_CLICKABLE_PHRASES):
+        try:
+            overlay.hide()  # no-op when nothing is showing
+        except Exception:
+            pass
+        return (True, "hidden")
+
     if is_show:  # first show, or a re-show while one's already up (overlay.show refreshes it)
         try:
-            items = ax.targets_with_frames()
+            items = targets.visible_targets()
         except Exception:
             items = None
         if not items:

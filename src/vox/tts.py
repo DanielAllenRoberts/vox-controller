@@ -137,9 +137,28 @@ def _speak_say(text: str, voice=None, rate=None) -> None:
         cmd += ["-r", str(rate)]
     cmd.append(text)
     try:
-        subprocess.run(cmd, capture_output=True, timeout=30)
+        subprocess.run(cmd, capture_output=True, timeout=_say_timeout(text, rate))
     except Exception:
         pass  # never let a TTS hiccup (or hang) break the loop
+
+
+def _say_timeout(text: str, rate=None) -> float:
+    """How long to let `say` run before assuming it has hung.
+
+    Was a flat 30s, which SILENTLY TRUNCATED any longer speech: `subprocess.run` kills the child on
+    timeout and the caller swallows the exception, so a long reply just stopped mid-word with nothing
+    in the log. ~95 words is already over 30s at the default rate, and the vox-speak MCP allows 1000
+    characters (~55s), so the cap contradicted what callers were allowed to send.
+
+    The timeout exists to catch a HUNG `say`, not to cap legitimate speech — so scale it with the
+    text and keep generous headroom."""
+    try:
+        wpm = float(rate) if rate else 175.0   # `say`'s default is ~175 wpm
+    except (TypeError, ValueError):
+        wpm = 175.0
+    words = max(1, len(str(text).split()))
+    expected = words / max(60.0, wpm) * 60.0
+    return max(30.0, expected * 2.0 + 15.0)
 
 
 # --- Kokoro (lazy) ----------------------------------------------------------------------------
@@ -211,7 +230,12 @@ def _speak_kokoro(text: str, voice=None, speed=None) -> bool:
             w.setsampwidth(2)
             w.setframerate(int(sample_rate))
             w.writeframes(pcm16.tobytes())
-        subprocess.run(["afplay", wav_path], capture_output=True, timeout=60)
+        # The wav's real duration is known exactly here, so the hang-guard can be derived rather
+        # than guessed. A flat 60s silently truncated anything longer (afplay is killed on timeout
+        # and the exception is swallowed) — the same failure the `say` path had.
+        seconds = pcm16.size / float(sample_rate or 24000)
+        subprocess.run(["afplay", wav_path], capture_output=True,
+                       timeout=max(60.0, seconds + 15.0))
         return True
     finally:
         try:

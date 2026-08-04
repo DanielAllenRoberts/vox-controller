@@ -529,6 +529,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="candidate not found or already promoted")
         return row
 
+    @app.post("/api/commands/candidates/{cand_id}/reject")
+    def post_reject_candidate(cand_id: int) -> dict:
+        """Say "never learn this" from the dashboard — blocks the candidate so it stops
+        accumulating and can't promote itself later."""
+        mod = _try_import("commands")
+        if mod is None:
+            raise HTTPException(status_code=503, detail="command DB unavailable")
+        if not mod.reject_candidate(cand_id):
+            raise HTTPException(status_code=404, detail="candidate not found")
+        return {"ok": True}
+
     @app.delete("/api/commands/learned/{cmd_id}")
     def delete_learned(cmd_id: int) -> dict:
         mod = _try_import("commands")

@@ -247,11 +247,11 @@ if __name__ == "__main__":
         _run_helper(_a.helper)
     else:
         import time
-        from vox import ax
+        from vox import targets as _t
 
         print(f"focus the app to overlay… showing in {_a.delay:.0f}s")
         time.sleep(_a.delay)
-        _targets = ax.targets_with_frames(limit=80)
+        _targets = _t.visible_targets(limit=80)  # same routing as voice: DOM on a page, AX natively
         if not _targets:
             print("no clickable elements found")
             raise SystemExit(0)

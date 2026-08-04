@@ -74,6 +74,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "desktop_move": _desktop_move, "desktop_index": _desktop_index,
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
+        "reload": _reload,
         "click": click_element,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
@@ -110,6 +111,13 @@ def parse(text: str) -> tuple[str, str] | None:
     # Browser/app: go back (⌘[).
     if re.search(r"\bgo back\b|\bnavigate back\b", t):
         return ("back", "")
+
+    # Reload the current page (⌘R). Only the CANONICAL wording is builtin — this is the command line
+    # the brain emits and the right-hand side of a `TEACH:`. "refresh" is deliberately NOT here: the
+    # user wants that mapping to come from actually teaching it, so the learning path gets exercised
+    # rather than hidden behind a hardcoded synonym.
+    if re.fullmatch(r"(?:please\s+)?reload(?:\s+(?:the\s+|this\s+)?(?:page|tab|site))?", t):
+        return ("reload", "")
 
     # Close the current tab (⌘W).
     if re.search(r"\bclose\s+(?:this\s+|the\s+|current\s+)?tabs?\b", t):
@@ -279,6 +287,45 @@ def _now_line() -> str:
     from datetime import datetime
     now = datetime.now().astimezone()
     return f"Now: {now.strftime('%A %Y-%m-%d %H:%M')} ({now.tzname()})"
+
+
+def recent_actions_block(limit: int = 6) -> str:
+    """The last few actions Vox ran, as prompt text. "" when there's nothing (or the DB is off).
+
+    Given to BOTH brains. The action layer uses it to avoid repeating or contradicting what just
+    happened; the chat brain needs it because that's where the damage showed — asked "how did you
+    refresh the page?" it denied doing it and invented a mechanism, purely because nothing in its
+    prompt said what had just run."""
+    try:
+        from vox import command_store
+        conn = command_store.connect()
+        try:
+            rows = command_store.recent_actions(conn, limit)
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = []
+    for r in reversed(rows):  # oldest first — reads as a timeline
+        ts = (r.get("ts") or "")[-8:-3]  # HH:MM
+        did = r.get("resolved_intent") or "?"
+        if r.get("resolved_arg"):
+            did += f" {r['resolved_arg']}"
+        how = {"db": "saved command", "parser": "built-in command",
+               "llm": "worked out by you"}.get(r.get("resolved_by"), r.get("resolved_by") or "?")
+        flags = ""
+        if not r.get("success"):
+            flags += " (failed)"
+        if r.get("negated"):
+            flags += " (user said this was wrong)"
+        where = f" in {r['context_value']}" if r.get("context_value") else ""
+        lines.append(f"  {ts} heard \"{r.get('heard_phrase') or ''}\"{where} → ran: {did} "
+                     f"[{how}]{flags}")
+    return ("[What Vox has just done — these ALREADY happened, you did them. Use this to answer "
+            "questions about recent actions and to understand corrections like \"that's not what I "
+            "wanted\". Never deny an action listed here.]\n" + "\n".join(lines))
 
 
 def environment_context() -> str:
@@ -469,6 +516,18 @@ def click_element(target: str) -> str:
     if not t:
         return "Click what? Try 'click Submit'."
 
+    # On a web page, ask the PAGE first. The browser's web AX tree is only intermittently exposed
+    # (collapsed in 20% of samples — see vox/webdom.py), so an AX miss here means "the tree is down"
+    # at least as often as it means "no such element". Returns None off-browser or on no match, so
+    # browser chrome and every native app still take the AX path below unchanged.
+    try:
+        from vox import targets
+        web = targets.click_label(t)
+    except Exception:
+        web = None
+    if web is not None:
+        return f"Clicked {web[1] or target}."
+
     # Native AX first — when it runs it's authoritative (a "not found" is a real, fast miss, NOT a
     # timeout), so we do NOT retry on the slow AppleScript path.
     try:
@@ -582,8 +641,8 @@ def clickable_targets(limit: int = 300) -> list[str]:
          channel/toolbar labels and not one message, then blamed for not finding the message.
     Same source as the numbered overlay, so what the brain can pick == what a badge is drawn on."""
     try:
-        from vox import ax
-        framed = ax.targets_with_frames(limit=limit)
+        from vox import targets
+        framed = targets.visible_targets(limit=limit)
         res = None if framed is None else _dedupe([i["label"] for i in framed])
     except Exception:
         res = None
@@ -933,6 +992,21 @@ def _back(_: str) -> str:
     ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
                    'tell application "System Events" to keystroke "[" using command down')
     return "Back." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't go back ({out})")
+
+
+def _reload(_: str) -> str:
+    """Reload the current page — ⌘R. There was no reload command at all until 2026-08-03, which is
+    why "refresh" could never be taught as one: the brain had to fall back to CLICKing the browser's
+    reload button, which only works while that button is in the accessibility tree.
+
+    Unlike ``_back``/``close_tab`` this does NOT activate the browser first — reload is the one the
+    user is most likely to say while the browser is already in front, and stealing focus to the
+    browser when it isn't would reload a page they weren't looking at."""
+    front = frontmost_app()
+    target = front if front in _CHROMIUM or front == "Safari" else CONFIG.browser
+    ok, out = _osa(f'tell application "{target}" to activate\n'
+                   'tell application "System Events" to keystroke "r" using command down')
+    return "Reloaded." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't reload ({out}).")
 
 
 def close_tab() -> str:

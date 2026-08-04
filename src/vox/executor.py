@@ -9,7 +9,7 @@ LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 
 import re
 
-from vox import actions, assistant, ax
+from vox import actions, assistant
 from vox.config import CONFIG
 
 # Sentinel returned as the message (with acted=True) when the brain decides the user wants to
@@ -80,6 +80,15 @@ _SYSTEM = (
     "typ'): output exactly  DICTATE  and nothing else. This hands the keyboard to the user's voice "
     "(everything they say next is typed) — it is DIFFERENT from TYPE, which composes specific text "
     "you write. When the user just wants to start dictating, DICTATE — don't write anything yourself.\n"
+    "To TEACH A NEW COMMAND — when the user asks for a phrase to mean something FROM NOW ON "
+    "('whenever I say refresh, refresh the page', 'make \"reload\" reload this tab', 'from now on X "
+    "should Y', 'save that as a command called X'): output  TEACH: <the trigger phrase> | <the Vox "
+    "command line it should run>. The right side must be one of the commands above, written exactly "
+    "as you would output it on its own — e.g.  TEACH: refresh | go back  is wrong, "
+    "TEACH: refresh | reload  is right only if 'reload' is a command. This SAVES the mapping so the "
+    "phrase works instantly every time after, with no AI. Use it whenever the user is describing a "
+    "standing rule for a phrase rather than asking for a one-off action — do NOT just reply that "
+    "you've noted it, and never claim you saved something without emitting TEACH.\n"
     "Rules:\n"
     "• Be autonomous — strongly prefer ACTING over asking. Make a sensible choice and do it; never "
     "ask for confirmation. Questions slow the user down, so only ask when you genuinely cannot "
@@ -208,9 +217,10 @@ def _click_fuzzy(target: str) -> str:
     real label by sound. On a confident match it clicks; when genuinely unsure it returns a 'Did you
     mean <X>?' question (a 'yes' then runs it, via _confirmed_click_target); else 'couldn't find'."""
     # ONE enumeration drives both attempts: the labels the brain reads, and (if that fails) the
-    # numbered marks it looks at. Sharing the list also keeps badge N ↔ ax.click_index(N-1) aligned.
+    # numbered marks it looks at. Sharing the list also keeps badge N ↔ targets.click_index(N-1) aligned.
     try:
-        items = ax.targets_with_frames() or []
+        from vox import targets
+        items = targets.visible_targets() or []
     except Exception:
         items = []
     labels = actions._dedupe([i["label"] for i in items]) or actions.clickable_targets()
@@ -224,6 +234,18 @@ def _click_fuzzy(target: str) -> str:
     kind, label = _parse_pick(raw, labels)
     assistant._dbg("[executor]", f"click pick for {target!r} from {len(labels)} on-screen labels → {kind}:{label!r}")
     if kind == "pick":
+        # Click the element we actually listed, by its index — not by re-searching for its label.
+        # The label came from THIS enumeration, so its index is exact, and for a page element that
+        # keeps the click on the in-page path instead of hoping the AX tree is up.
+        idx = next((i for i, it in enumerate(items) if it["label"] == label), None)
+        if idx is not None:
+            try:
+                from vox import targets
+                res = targets.click_index(idx)
+            except Exception:
+                res = None
+            if res and res[0] == "clicked":
+                return f"Clicked {res[1] or label}."
         return actions.click_element(label)
     # Labels alone can't express "the second last message" or "the one at 7:52pm" — order and
     # position simply aren't in a text list. So before giving up (or guessing with a half-confident
@@ -242,6 +264,8 @@ def _click_fuzzy(target: str) -> str:
 _CLICK_VISION_PROMPT = (
     "This is a screenshot of the user's Mac. EVERY clickable element has a small blue badge with a "
     "white number at its top-left corner.\n\n"
+    "There are exactly {n} badges, numbered 1 to {n}. Any other number is wrong — if you can't read "
+    "a badge clearly, answer with the nearest one you CAN read, or NONE.\n\n"
     "The user wants to click: {target!r}\n\n"
     "They often describe it by POSITION or CONTENT that a list of labels can't capture — 'the second "
     "last message', 'the one sent at 7:52pm', 'the reply under Alex's photo'. Find the element they "
@@ -273,21 +297,79 @@ def _click_by_vision(target: str, items) -> str | None:
         marked = overlay.annotate(shot, items)
         if not marked:
             return None
-        answer = assistant.look(_CLICK_VISION_PROMPT.format(target=target), marked, brain="big")
-        m = re.search(r"\d{1,3}", answer or "")
+        answer = assistant.look(
+            _CLICK_VISION_PROMPT.format(target=target, n=len(items)), marked, brain="big")
+        # LAST number wins, not the first: the model reasons out loud despite being told not to, so
+        # its answer is at the END ("...I can see 3 dialogs... badge 11" must click 11, not 3). Same
+        # hardening _parse_pick already does on the label path.
+        nums = re.findall(r"\d{1,3}", answer or "")
+        m = nums[-1] if nums else None
         assistant._dbg("[executor]",
                        f"click-by-vision for {target!r} over {len(items)} marks → {(answer or '').strip()!r}")
         if not m:
             return None
-        n = int(m.group())
+        n = int(m)
         if not 1 <= n <= len(items):
+            # Out of range means it read a badge that isn't there (seen live: "153" over 35 marks).
+            # Trusting it would click an arbitrary element, so give up and let the caller fall back.
+            assistant._dbg("[executor]", f"click-by-vision: badge {n} out of range 1..{len(items)}")
             return None
-        res = ax.click_index(n - 1)  # badge N ↔ items[N-1], same as the overlay
+        from vox import targets
+        res = targets.click_index(n - 1)  # badge N ↔ items[N-1], same as the overlay
         if res and res[0] == "clicked":
             return f"clicked {res[1]} (#{n}, found by looking at the screen)"
         return None
     except Exception:
         return None
+
+
+def _teach(phrase: str, action: str) -> str:
+    """"Whenever I say X, do Y" → a real command in the DB, scoped to the focused app (idea #24).
+
+    The missing third way to learn. Until now Vox could learn by REPETITION (3 hits) or by
+    "remember that" AFTER an action — but there was no way to say up front "from now on X means Y",
+    which is the most natural way to ask. Without it the request fell through to the chat brain,
+    which can only talk: seen live, it replied "I've saved that as a standing rule" having saved
+    nothing at all.
+
+    Saved as ``source='user'``, deliberately: you asked for it explicitly, so it must NOT expire
+    under probation the way an auto-learned guess does. Refuses to shadow a builtin phrase, the same
+    way ``remap()`` does, so teaching can't quietly break a shipped command."""
+    if not phrase or not action:
+        return "Tell me both parts — like 'whenever I say refresh, reload the page'."
+    parsed = actions.parse(action)
+    if parsed is None:
+        return f"I don't know how to {action}, so I can't map {phrase!r} to it yet."
+    intent, arg = parsed
+    try:
+        from vox import command_cache, command_store
+        conn = command_store.build()
+        try:
+            # Guard against shadowing a shipped command. Checked against the PHRASE TABLE directly,
+            # across every context: resolve() only searches the global set plus the focused app, so
+            # it silently misses an app-scoped builtin (it let "next tab" be re-pointed at "go back").
+            clash = conn.execute(
+                "SELECT c.label, c.intent FROM command c JOIN phrase p ON p.command_id=c.id "
+                "WHERE lower(p.text)=lower(?) AND c.source='builtin' LIMIT 1", (phrase,)).fetchone()
+            if clash:
+                return (f"'{phrase}' is already a built-in command "
+                        f"({clash['label'] or clash['intent']}), so I've left it alone.")
+            app = command_cache.current_app()
+            ctx = command_store._ensure_context(
+                conn, "app", app, app, 10) if app else command_store._ensure_context(
+                conn, "global", None, "Everywhere", 0)
+            cid = command_store._add_command(
+                conn, ctx, intent, f"{phrase.title()} (taught)", [phrase], arg=arg)
+            conn.execute("UPDATE command SET source='user' WHERE id=?", (cid,))
+            conn.commit()
+        finally:
+            conn.close()
+        command_cache.refresh()
+    except Exception as exc:
+        assistant._dbg("[teach]", f"failed to save {phrase!r} → {intent}/{arg}: {exc}")
+        return "I couldn't save that command just now."
+    where = f"in {app}" if app else "everywhere"
+    return f"Got it — saying '{phrase}' {where} will now {action}."
 
 
 def _observe(heard: str, intent: str, arg: str, *, success: bool) -> None:
@@ -325,6 +407,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
 
     ctx = actions.environment_context()
     prompt = f"{text}\n\n[Current Mac state — use this to pick the right app/tab]\n{ctx}" if ctx else text
+    # What just ran, so a correction ("no, that's not what I wanted — it should do X") has something
+    # to refer to, and so the brain doesn't redo an action it just did.
+    recent = actions.recent_actions_block()
+    if recent:
+        prompt = f"{prompt}\n\n{recent}"
     raw = assistant.complete(prompt, history, system=_SYSTEM, brain="small").strip()
     if not raw:
         return False, assistant.respond(text, history)
@@ -392,6 +479,12 @@ def execute(text: str, history=None) -> tuple[bool, str]:
             msg = None
         assistant._dbg("[executor]", f"decision=SCHEDULE {body!r} → {msg!r}")
         return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
+    if upper.startswith("TEACH:"):
+        body = raw.split(":", 1)[1].strip()
+        phrase, _, action = body.partition("|")
+        msg = _teach(phrase.strip(), action.strip())
+        assistant._dbg("[executor]", f"decision=TEACH {phrase.strip()!r} → {action.strip()!r} :: {msg!r}")
+        return False, msg
     if upper.startswith("CLICK:"):
         target = raw.split(":", 1)[1].strip()
         # Fast path: the targeted AXPress finder (Electron-aware, early-exit). Only if it can't find

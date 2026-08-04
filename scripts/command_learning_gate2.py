@@ -49,15 +49,24 @@ def say(phrase, intent="click", arg="standup-notes", app="Slack"):
 
 base_cmds = conn.execute("SELECT COUNT(*) FROM command").fetchone()[0]
 
-# --- 1. auto-promotion on the third use, same day ---------------------------------------------------
-print("\n1. auto-save after 3 uses in one day")
-r1, r2, r3 = say("open my standup notes"), say("pull up standup notes"), say("show standup notes")
-check("1st use → candidate only", not r1.get("promoted"), r1.get("bar"))
-check("2nd use → still a candidate", not r2.get("promoted"), r2.get("bar"))
-check("3rd use → PROMOTED", bool(r3.get("promoted")), f"command #{r3.get('promoted')}")
-cmd_id = r3.get("promoted")
+# --- 1. saved on first use, usable immediately -------------------------------------------------------
+# Design as of 2026-08-03: the LLM works something out ONCE, it's saved and usable straight away, and
+# every use after that skips the LLM. `learning_min_hits` is the bar for SAVING; permanence is earned
+# separately through probation (step 8). Paying for the same resolution three times before it becomes
+# usable was the exact cost this feature exists to remove.
+print("\n1. saved on the first use, usable immediately")
+r1 = say("open my standup notes")
+cmd_id = r1.get("promoted")
+check("1st use → SAVED", bool(cmd_id), f"command #{cmd_id}")
 row = conn.execute("SELECT * FROM command WHERE id=?", (cmd_id,)).fetchone() if cmd_id else None
 check("saved as source='learned'", row is not None and row["source"] == "learned")
+check("counts the creating use as 1", row is not None and row["hit_count"] == 1,
+      f"hit_count={row['hit_count'] if row is not None else '?'}")
+# further phrasings attach as aliases to the SAME command (step 3 proves it in detail)
+r2, r3 = say("pull up standup notes"), say("show standup notes")
+check("later phrasings don't create rival commands",
+      not r2.get("promoted") and not r3.get("promoted"),
+      f"alias_of={r2.get('alias_of')}/{r3.get('alias_of')}")
 check("a focus-dependent intent (click) is APP-scoped",
       row is not None and conn.execute("SELECT match_value FROM context WHERE id=?",
                                        (row["context_id"],)).fetchone()["match_value"] == "Slack")
@@ -92,14 +101,18 @@ check("attached as an alias to the same command", r4.get("alias_of") == cmd_id)
 check("the new phrase resolves too",
       (cs.resolve(conn, "bring up the standup notes", app="Slack") or {}).get("command_id") == cmd_id)
 
-# --- 4. "remember that" — explicit, bar bypassed -----------------------------------------------------
+# --- 4. "remember that" ------------------------------------------------------------------------------
+# Now mostly redundant by design: saving happens on the first use, so by the time you could say
+# "remember that" it is usually already saved and this just confirms so. It still matters as the
+# manual override for anything the auto-path declined (suggest mode, or `learning_confirm` on).
 print("\n4. 'remember that'")
-say("open the pricing sheet", intent="navigate", arg="pricing-sheet")   # 1 hit only
+say("open the pricing sheet", intent="navigate", arg="pricing-sheet")   # already saves on this use
 msg = command_learn.remember_that()
 explicit = conn.execute("SELECT * FROM command WHERE source='learned' AND arg='pricing-sheet'").fetchone()
-check("saved on one use when asked", explicit is not None, msg or "")
-check("recorded as an explicit save",
-      explicit is not None and explicit["learned_reason"] == "explicit")
+check("the command exists after asking", explicit is not None, msg or "")
+check("asking again is harmless (no duplicate)",
+      conn.execute("SELECT COUNT(*) FROM command WHERE source='learned' AND arg='pricing-sheet'")
+      .fetchone()[0] == 1)
 
 # --- 5. "forget that" --------------------------------------------------------------------------------
 print("\n5. 'forget that'")
@@ -113,6 +126,22 @@ for _ in range(4):
 check("stays gone even after 4 more uses",
       conn.execute("SELECT COUNT(*) FROM command WHERE source='learned' AND arg='pricing-sheet'"
                    ).fetchone()[0] == 0)
+
+# --- 5b. "remember that" as the override when the auto-path declined ---------------------------------
+# Kept AFTER "forget that": both act on the last observed action, so testing them against the same
+# command in sequence would have them fight over `_last`.
+print("\n5b. 'remember that' overrides a withheld save")
+_mode = command_learn.mode
+command_learn.mode = lambda: "suggest"
+say("open the burndown chart", intent="navigate", arg="burndown")
+held = conn.execute("SELECT * FROM command WHERE source='learned' AND arg='burndown'").fetchone()
+check("suggest mode withholds the save", held is None)
+command_learn.mode = _mode
+msg2 = command_learn.remember_that()
+taken = conn.execute("SELECT * FROM command WHERE source='learned' AND arg='burndown'").fetchone()
+check("'remember that' takes it anyway", taken is not None, msg2 or "")
+check("recorded as an explicit save",
+      taken is not None and taken["learned_reason"] == "explicit")
 
 # --- 6. one "no" retires a learned command that misfired ---------------------------------------------
 print("\n6. correction retires a learned command")

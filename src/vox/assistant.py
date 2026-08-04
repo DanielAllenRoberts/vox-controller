@@ -119,6 +119,19 @@ def _active_persona() -> str:
     return CONFIG.personality or ""
 
 
+def _recent_actions_block() -> str:
+    """What Vox has just done, for the chat brain's system prompt. "" if unavailable.
+
+    Guarded like the others: a missing/broken command DB returns "" and the brain behaves exactly
+    as before. Lives here rather than inline so the chat path and the action path share one
+    renderer (``actions.recent_actions_block``)."""
+    try:
+        from vox import actions
+        return (actions.recent_actions_block() or "").strip()
+    except Exception:
+        return ""
+
+
 def _rules_block() -> str:
     """The user's enabled custom rules, rendered for the system prompt.
 
@@ -324,8 +337,10 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     persona = _active_persona()
     system = _SYSTEM if not persona else \
         f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {persona}"
-    # Layer the user's dashboard rules + relevant memories on top (both guarded → no-op if absent).
-    for block in (_rules_block(), _memory_block(text)):
+    # Layer the user's dashboard rules + relevant memories + what Vox just did (all guarded →
+    # no-op if absent). The recent-actions block is what stops the chat brain denying or inventing
+    # its own behaviour — it has no other way to know an action ran.
+    for block in (_rules_block(), _memory_block(text), _recent_actions_block()):
         if block:
             system = f"{system}\n\n{block}"
     raw = complete(text, history, brain=brain, system=system)

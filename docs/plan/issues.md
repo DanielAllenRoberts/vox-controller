@@ -17,7 +17,162 @@
 | O8 | 2026-06-17 | Barge-in (interrupt the LLM) feels unreliable | 🟡 | Logic is correct, but fast Haiku calls finish before you can speak, and ambient audio floods the interrupt-listener. Firms up with AEC (#21) + reserving barge-in for slow calls. |
 | O9 | 2026-06-21 | **"Freezes after a while" / "doesn't idle well" — daemon wedges silently** | 🟡 | **Root cause (diagnosed via `sample`):** the sounddevice/PortAudio **mic stream silently dies** after an audio-device change (e.g. *opening Spotify*, a Bluetooth/headphone switch). The old `_restart()` re-opened the same stream without re-binding the device, so frames never returned and the main thread parked forever in `queue.get` — alive but deaf. Stall warnings went to **stdout, not `vox.log`**, so the log just stopped (the "silent freeze"). **Fix:** non-blocking background re-open (abort, not the deadlock-prone `stop()`; `sd._terminate/_initialize` to re-enumerate devices) **+ a watchdog** (`mic_stall_restart_seconds`, default 12s): if a *previously-working* mic stays starved, raise `MicStreamDead` → clean self-restart (fresh process reliably re-acquires the mic). Guarded by `_ever_healthy` so a never-working mic can't restart-loop. Recovery now logs to `vox.log`. **Pending the user's live acceptance test.** Separately reduced idle CPU/RAM churn: `whisper_cpu_threads` cap, `idle_max_utterance_seconds`, and a `mic.flush()` after idle transcriptions. |
 | O11 | 2026-06-24 | **~2 GB RAM while running** — heavy for a "low running" daemon meant to run on any machine | 🟡 | **Diagnosed by measurement** (see `memory-footprint.md`): it's **two model weights**, not Python. **Kokoro neural TTS ~940 MB** (lazy-loaded on first speak; only active because `data/settings.json` set `tts_engine="kokoro"`, overriding the lean `"say"` code default) + **Whisper `small.en` ~840 MB** (always resident; serves wake + transcription). All Python/numpy/FastAPI/LLM-SDK/pyobjc glue is ~180 MB combined — a language rewrite would reclaim only ~100 MB while the native-backend models (90% of RAM) stay identical. **Path to < 1 GB:** `tts_engine` `kokoro`→`say` (−940 MB, the macOS voice is free) and/or `whisper_model` `small.en`→`base.en` (−460 MB). `say`+`base.en` ≈ **~580 MB**. onnxruntime arena tuning barely helps Kokoro (−115 MB only). **Recommendation:** ship `say`+`base.en` as defaults, expose Kokoro + `small.en` as opt-in quality upgrades. **Pending the user's decision on the voice/accuracy trade.** |
+| O12 | 2026-08-03 | **Duplicate labels: "click rescrape" silently clicks the FIRST match** | 🔴 | A page with several identically-labelled controls (e.g. a Rescrape button per row) has no disambiguation: `targets.click_label()` takes `next(... == t)` and `ax.click()` likewise stops at its first hit, so you get whichever is first in document order, with no signal that others existed. **Intended fix:** when >1 element matches, show the numbered overlay **filtered to just those matches** ("I found 4 'Rescrape' buttons — say a number") — badges are the only sane disambiguator when the labels are identical. **Better half, now cheap via the DOM:** walk up to each match's nearest row/container and append its text, turning duplicates into "Rescrape — Takealot" / "Rescrape — Makro". That makes the prompt meaningful *and* lets "click rescrape for takealot" resolve directly, skipping the question. Not possible on the AX path. |
 | O10 | 2026-06-23 | **Absolute reminder/alarm with a clear time still fails when the task isn't introduced by "to"** — e.g. "remind me at 3:30 PM **that** I have a meeting" → "I couldn't work out a time." | 🔴 | **Not** a time-parse failure (3:30 PM is fine). `_RE_REMIND_AT` / `_RE_ALARM_AT` only capture the task via `\s+to\s+(.+?)` anchored to `$`, so any other connector ("that", "about", "saying") or trailing text breaks the *whole* match → `parse_and_create` returns None → generic "couldn't work out a time". **✅ FIXED (2026-06-23):** broadened the task connector in both regexes via a shared `_TASK_TAIL = (?:\s+(?:to\|that\|about\|saying)\s+(.+?))?$` — kept *required* (not bare trailing text) so "set an alarm for 5 minutes" still doesn't read 5 as a clock. Verified: the reported case + `to`/`about`/`saying` connectors create reminders; alarm forms work; timer path unaffected; regression guard passes. **Also added — the robust fix (2026-06-23):** a **structured SCHEDULE path** — the brain now computes the absolute time itself (it's given `Now:`) and emits `SCHEDULE: <kind> \| <ISO when> \| <text> \| <repeat>`; the executor creates the job directly via `scheduler.create_structured()`, **skipping the fragile English re-parse**. The English regex remains as a backward-compatible fallback. So *any* phrasing now works as long as the model fills the time. **Still future (idea #50):** the AM/PM-ambiguity *follow-up question*. *Minor cosmetic:* `_confirm` still prefixes the body with "to" ("…3:45 pm **to** I have a meeting") regardless of connector — separate, low-priority. |
+
+## Spoken replies cut off mid-word after ~30s — ✅ fixed (2026-08-03)
+
+**Symptom:** the vox-speak MCP voice "randomly" stopped mid-sentence on longer messages, twice.
+
+**Cause:** `tts._speak_say` ran `subprocess.run(cmd, timeout=30)`. On timeout `subprocess.run`
+**kills the child**, and the caller's `except Exception: pass` swallowed it — so speech longer than
+30 seconds was truncated mid-word with nothing logged anywhere. At `say`'s ~175 wpm that's about
+**90 words**. Worse, the MCP server allows `_MAX_CHARS = 1000` (~160 words ≈ 55s), so the layer
+above explicitly permitted text the TTS layer would silently cut in half.
+
+**Fix:** the timeout is a guard against a HUNG `say`, not a cap on legitimate speech, so it now
+scales with the text (`_say_timeout`: expected duration × 2 + 15s, floor 30s). The Kokoro path had
+the same bug with a flat 60s `afplay` cap; there the wav's exact duration is known, so it's derived
+(`duration + 15s`, floor 60s).
+
+Measured: a 95-word message needed ~33s and got 30s (truncated) → now 80s. The MCP's own 1000-char
+maximum needed ~55s → now 125s.
+
+## "Whenever I say X do Y" had nowhere to go — ✅ TEACH built (2026-08-03)
+
+Asked *"vox whenever I say refresh I want you to refresh the browser that I'm on"*, Vox replied
+**"I've saved that as a standing rule."** It had saved **nothing** — the rules store held 0 rules;
+all that happened was a `MEMORY[core]` note. Three separate faults behind it:
+
+1. **No teach verb.** The executor had `CLICK` / `TYPE` / `EDIT` / `SCHEDULE` / `LOOK` / `DICTATE`
+   and nothing for "from now on X means Y", so it returned an **empty** response and the request
+   fell through to the chat brain — which can only talk, and was agreeable about it. **Fixed:** a
+   `TEACH: <phrase> | <command>` directive writes a real `source='user'` command (no probation — you
+   asked for it explicitly), scoped to the focused app, and refuses to shadow a builtin.
+2. **There was no reload command at all.** `parse("reload")` and `parse("refresh the page")` both
+   returned `None` — Vox could only refresh by CLICKing the browser's reload button, which is why it
+   worked once and then didn't. **Fixed:** a `reload` intent (⌘R), matching only the CANONICAL
+   wording ("reload" / "reload the page").
+   **"refresh" is deliberately NOT a builtin synonym.** Hardcoding it was tried and backed out on
+   the user's call: it hides the very thing we want to exercise, since the point is to prove the LLM
+   can add commands. "refresh" must therefore be TAUGHT — `TEACH: refresh | reload` — which makes it
+   a real `source='user'` row that then reaches the Vosk grammar via `active_phrases()` by itself.
+   The capability is kept because TEACH needs a valid right-hand side to map onto; without a `reload`
+   command there is nothing to teach "refresh" to mean.
+3. **New intents could never be used.** `command.intent` is a foreign key into the `intent` table,
+   which was only ever populated by `seed()` — and `seed()` no-ops on a non-empty DB. So `reload`
+   existed in code, parsed fine, and any attempt to save it as a command died with
+   `FOREIGN KEY constraint failed`. **Fixed:** `_sync_intents()` now runs every boot from `_migrate`.
+
+**The one-word rule was NOT the blocker,** contrary to first read: in `loop.py`,
+`dispatch.try_deterministic()` (which includes the command DB) runs *before* `_looks_like_noise`, so
+a registered one-word command fires deterministically. The gate only stops one-word utterances
+reaching the LLM — i.e. it blocks one-word *learning*, not one-word *commands*. It needs no change.
+
+**Related, still open:** when the executor returns nothing, the chat brain answers — and its prompt
+says *"If asked to do something you can't do from here, briefly say how they'd do it by voice"*.
+That's what produced "click on github" → *"That's not a command I know. Say 'go to GitHub'"* when
+the tab was open and `CLICK`/`navigate` were both available. The chat brain describes actions it
+cannot perform, and has now three times claimed or implied an action it didn't take. Needs its own
+fix: it should never claim to have saved/done anything, and an empty executor reply should retry
+rather than fall through to chat.
+
+## Set-of-marks vision click (tier 2): real track record — 🔴 fires, but not yet trustworthy
+
+Built 2026-07-31 (#37/#52). Its **entire** history in `vox.log`, checked 2026-08-03:
+
+| When | Attempts | Outcome |
+|---|---|---|
+| 2026-07-31 14:22–14:25 | 9 | **All failed on `502 Bad Gateway` (cloudflare)** from the vision API — a 3-minute transient outage, not a design fault. The logic never ran. |
+| 2026-08-03 14:36 | 1 | Fired properly — and **clicked the wrong button**. |
+
+That single real firing: the label tier gave up (`click pick for 'Later' … → none:None`), vision was
+asked for `'Later'`, answered *"the 'Later' button appears to have badge number **11**"*, and the
+click returned **`clicked Got it (#11 …)`** — the wrong branch of a Cursor "update available" dialog.
+
+**Two concrete bugs, both cheap:**
+
+1. **No label sanity check.** `click_index` returns the label it clicked, so we *knew* badge 11 said
+   "Got it" while the user asked for "Later" — and clicked regardless. When the request is a plain
+   label (not a positional description like "the second last message") and the chosen badge's label
+   doesn't resemble it, that's a detectable miss: reject, or confirm ("I can see Got it — is that
+   the one?"). This is the guard that makes the tier safe to trust.
+2. **First-number-wins parsing.** `_click_by_vision` does `re.search(r"\d{1,3}", answer)`. The model
+   reasons out loud despite being told to reply with a bare number, so any digit earlier in the
+   prose — "I can see 3 dialogs…" — would be clicked instead of the real answer. `_parse_pick` was
+   already hardened for exactly this (it scans from the LAST line up); this path wasn't.
+
+**Note for #57 (tier 3, grid + raw coordinates):** tier 2 knows what it clicked and *still* got it
+wrong. Tier 3 cannot know — it clicks a point. Fixing these guards first is what makes tier 3 safe
+to attempt, and is why #56's correction loop is its real prerequisite.
+
+## "hide clickable" escalated to the LLM (2026-08-03) — ✅ fixed
+
+**Symptom:** saying "hide clickable" often went to the brain instead of dismissing the overlay.
+
+**Root cause — an asymmetry, in two places.** (1) `loop._fast_lane_extra_phrases` deliberately adds
+`dispatch._SHOW_CLICKABLE_PHRASES` to the Vosk grammar precisely so mis-hears snap to the real
+phrase — but the **hide** phrases were never added. "hide" is short and Whisper clips it: `vox.log`
+shows `'hi clickable'` and `'high clickable'`, neither of which contains "hide", so the cancel test
+missed and the utterance escalated. (2) The dismissal was only ever checked inside the
+`overlay.is_active()` branch, so saying it a beat after the overlay had gone (any utterance dismisses
+it, and the helper self-terminates after 45s) also fell through.
+
+**Fix:** a `_HIDE_CLICKABLE_PHRASES` tuple (canonical forms + the two observed mis-hears), added to
+the Vosk grammar alongside the show phrases, and handled in `_overlay()` **regardless of overlay
+state** — a late "hide clickable" is acknowledged quietly rather than interpreted. "hide the
+sidebar" still falls through to the real sidebar command.
+
+## Command DB: "open slack" opened the website, and phrases fired inside sentences (2026-08-03) — ✅ fixed
+
+Two bugs, found from one user report ("I said open Slack and it kept opening the browser").
+
+**1. The site seed froze the app-vs-site decision.** `seed()` built the `navigate` commands from
+`actions._SITE_ALIASES` with **`arg=url`** — the already-resolved URL. `actions._navigate()` checks
+`_app_exists()` *before* `known_url()`, so the parser had always preferred the installed app; the DB
+answered with a URL and that check never ran. Enabling `command_db_enabled` therefore regressed
+"open slack" from the Slack app to slack.com — and the same for every installed app in the alias
+table (here: Slack, Spotify, Claude, Notion, Trello). **Fix:** seed `arg=name` and let `_navigate()`
+decide at runtime, which also makes it correct per-machine. `_migrate_site_args()` rewrites the 25
+already-seeded rows (idempotent, exact-URL scoped so learned/user rows are untouched). To force the
+site over an installed app, say the domain — "go to slack.com".
+
+**2. `contains` phrases matched inside any sentence.** `_phrase_hit` did a bare `p in t`. Seen live:
+*"i said open slack and then you"* — the user **describing the bug to the agent** — matched the
+seeded phrase "open slack" and navigated the browser. All 150 seeded phrases are `contains`, so this
+was reachable from any of them. **Fix:** word-bounded match (so "open x" can't fire on "open xcode")
+plus a budget of 3 extra words, beyond which it falls through to the LLM — the right place to judge
+conversational speech. "please open slack for me" still resolves; a sentence that merely mentions a
+phrase no longer does. All three learning gates still pass (150/150 seeded phrases resolve).
+
+**Learning-trial note:** the same episode produced candidate #4 = `app_cycle 'slack'` with the phrase
+*"opened a web browser instead of the actual app"* — the user's complaint sentence captured as a
+command. Nothing was promoted (`learned: 0`, the never-learn gate held), but narration aimed at the
+agent is reaching the learner. Candidates #3 and #4 were blocked.
+
+## Browser web-content AX tree collapses intermittently (2026-08-03) — 🟡 mitigated by routing around it
+
+**Symptom:** `show clickable` on a website badged only the browser toolbar — `vox.log` shows Arc
+returning 8/8/8/8/13/13 targets while Slack returned 121-132 and Cursor 107.
+
+**Root cause (measured, 85 samples of live browsing):** Chromium builds its web-content AX tree on
+demand and **tears it back down**. `AXWebArea` was absent in **47%** of samples, in runs of 25-35s;
+on one heavy page (a data table) **80%** of samples. While collapsed the entire page reads as ~12
+elements of native window chrome. It is **not** a settle-time issue — the tree was verified stable
+at 193 elements across an 11-second sampling series when up, and re-asserting `AXManualAccessibility`
+then re-walking does not revive it when down.
+
+**Why the existing rescue never helped:** `ax.targets_with_frames` retries when a walk comes back
+below `min(20, best//2)` for that pid. For a browser whose *best ever* reading was itself a collapsed
+13, the threshold is 6 — unreachable. The rescue only ever protected apps that had been healthy once.
+
+**Fix:** don't depend on it. `vox/webdom.py` reads page elements from the DOM via the browser's
+AppleScript `execute javascript`, and `vox/targets.py` routes browsers to that path (native apps are
+untouched and still use AX). The DOM returned correct targets on 43/43 samples including every
+AX-down one. See ideas.md #37 for the full measurements and the two design traps found on the way.
+
+**Residual:** needs "Allow JavaScript from Apple Events" per browser (Arc on by default; Chrome and
+Safari need the one-off Developer-menu setting, else it falls back to AX). iframes aren't enumerated.
 
 ## Click / AX support for Electron apps (2026-06-25) — 🟡 partial: core works, **latency unacceptable**
 

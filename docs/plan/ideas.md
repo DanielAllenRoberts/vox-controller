@@ -369,6 +369,46 @@ The same phrase should mean different things depending on what's focused. "Searc
 
 ## 37. Real website control — simplified DOM + expand-on-demand + screenshot grid
 
+> **Status: ✅ slice 1 BUILT (2026-08-03) — the simplified DOM, as the source of truth for page
+> elements.** `src/vox/webdom.py` (enumerate + click via the browser's AppleScript
+> `execute javascript`) and `src/vox/targets.py` (routes: DOM for pages, AX for native apps). No CDP,
+> no extension, no new dependency — this entry assumed browser automation was needed and it wasn't.
+>
+> **Why it was needed — measured, not assumed.** Correlating every `show clickable` in `vox.log`
+> with the focused app showed Slack 121/132/100, Cursor 107, Logic Pro 200 — and **Arc 8, 8, 8, 8,
+> 13, 13, never once healthy**. An 85-sample watcher over live browsing found the cause: Chromium
+> builds its web-content AX tree on demand and **tears it back down**, so `AXWebArea` was absent in
+> **47% of samples**, in runs of 25-35s. On one heavy page (a data table) it was down **37 of 46
+> samples — 80%**. Collapsed, the whole page reads as ~12 elements of browser chrome, which is
+> exactly the 8/13 in the logs. The DOM returned correct targets on **43 of 43** samples, including
+> every one taken while AX was down. Re-asserting `AXManualAccessibility` and re-walking (the
+> existing rescue in `ax.targets_with_frames`) does **not** bring it back, so it is not a settle-time
+> problem — and that rescue could never fire for a browser anyway, since it compares against the
+> per-pid best and Arc's best was itself a collapsed 13.
+>
+> **Verified live by voice (2026-08-03).** On the same Wikipedia page that returned **15** targets
+> minutes earlier on the old build: `'show clickable'` → **96 targets**, `'click 37'` →
+> `clicked #37 (Talk)`, then `'show clickable'` → **71** on the page it had just navigated to. So
+> enumeration, badge placement, the spoken-number click and re-enumeration after navigation all work
+> end to end. Badge positions were also checked visually against a rendered screenshot — which,
+> unlike AX hit-testing, doesn't depend on the very tree that's flaky.
+>
+> **Two things worth knowing.** (a) Arc's own shell UI is web-based, so it exposes a full-window
+> `AXWebArea` *before* the tab's; taking the first one put every badge off by the sidebar width. The
+> page's web area is now identified by **matching its size to the DOM viewport**, which is
+> self-validating — no match means we don't trust it. (b) Merging browser chrome into the list was
+> tried and dropped: in a fullscreen window the web view covers the whole window, so no geometric
+> rule separates native chrome from page content. Chrome doesn't need badges — `go back`, `next tab`,
+> `close tab`, `show tabs`, `profile N` are already deterministic commands.
+>
+> **Setup caveat:** the browser must allow JavaScript from Apple Events. Arc allows it out of the
+> box; **Chrome and Safari need it enabled once** (View/Develop → Allow JavaScript from Apple
+> Events) or the call fails and Vox falls back to AX. Also: `querySelectorAll` doesn't cross iframe
+> boundaries, so embedded frames aren't enumerated yet.
+>
+> **Still to build from this entry:** the expand-on-demand tool (2) and the screenshot grid (3, =
+> idea #57).
+
 Interacting with web pages needs more than the macOS a11y tree. The mature web-agent stack: (1) **simplify the DOM** to a compact list of interactive/labelled elements (or HTML→Markdown for reading) — raw HTML is far too much context; (2) a **progressive-disclosure tool** so the model can *expand* a specific region only when it needs the detail; (3) **screenshot + numbered marks** ("set-of-marks": overlay numbered boxes on clickable elements, the model picks a number) as visual grounding / fallback. Combine: simplified-DOM/a11y as the cheap primary, the expand-tool for depth, the screenshot-grid for visual cases. Needs browser automation (CDP / the browser's own a11y / an extension) beyond System Events. Builds on #35; connects to in-browser tab/profile control (#4) and the learned-click macros of #24/#35.
 
 ## 38. A third "coding" brain — hand coding tasks off to a code model

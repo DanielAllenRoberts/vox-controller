@@ -195,12 +195,15 @@ def learning() -> dict:
 
     return {
         "mode": _learn_mode(),
+        "thresholds": _thresholds(),
+        "aliases": _learned_aliases(),
         "learned": [{
             "id": c["id"], "intent": c["intent"], "arg": c["arg"], "label": c["label"],
             "context": where(c["context_id"]), "phrases": c["phrases"],
             "enabled": bool(c["enabled"]), "hits": c["hit_count"], "score": c["score"],
             "learned_at": c["learned_at"], "reason": c["learned_reason"],
             "last_used_at": c["last_used_at"],
+            **_probation(c),
         } for c in learned],
         "candidates": [{
             "id": c["id"], "intent": c["intent"], "arg": c["arg"],
@@ -209,8 +212,85 @@ def learning() -> dict:
             "hits": c["hit_count"], "negatives": c["negative_count"],
             "blocked": bool(c["blocked"]), "promoted_id": c["promoted_id"],
             "first_seen": c["first_seen"], "last_seen": c["last_seen"],
+            "bar": _bar_reason(c),
         } for c in cands if not c["promoted_id"]],
     }
+
+
+def _learned_aliases() -> list[dict]:
+    """Phrases the learner attached to an EXISTING command (the variant collapse, doc 02).
+
+    These were invisible until now: the page counts learned *commands*, and when the learner sees a
+    new way of saying something Vox already does it attaches the phrase to that command instead of
+    creating a duplicate — the better outcome, and the one that left the dashboard reporting
+    "0 learned" while it had in fact been learning. Read live: `phrase.source='learned'` on a command
+    that isn't itself learned."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT p.id, p.text, p.hit_count, c.id AS command_id, c.label, c.intent, c.arg "
+            "FROM phrase p JOIN command c ON c.id = p.command_id "
+            "WHERE p.source='learned' AND c.source <> 'learned' ORDER BY p.id DESC").fetchall()
+        return [{"id": r["id"], "text": r["text"], "hits": r["hit_count"],
+                 "command_id": r["command_id"], "label": r["label"],
+                 "intent": r["intent"], "arg": r["arg"]} for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def _thresholds() -> dict:
+    """The live tuning knobs, so the UI can explain *why* something hasn't been saved yet rather
+    than leaving the user to guess (or read the code)."""
+    from vox import command_store as cs
+    return {
+        "min_hits": int(cs._learn_setting("learning_min_hits", 3)),
+        "window_days": float(cs._learn_setting("learning_window_days", 2)),
+        "probation_days": int(cs._learn_setting("learning_probation_days", 14)),
+        "probation_uses": int(cs._learn_setting("learning_probation_uses", 2)),
+        "max_negatives": int(cs._learn_setting("learning_max_negatives", 3)),
+    }
+
+
+def _probation(c) -> dict:
+    """Is this learned command still unproven? `decay()` deletes a learned row that's older than
+    `learning_probation_days` and still under `learning_probation_uses` hits — so "on probation"
+    means exactly: inside that window, and not yet at the use count that makes it permanent."""
+    from datetime import datetime, timedelta
+    t = _thresholds()
+    uses_left = max(0, t["probation_uses"] - int(c["hit_count"] or 0))
+    if not c["learned_at"] or uses_left == 0:
+        return {"probation": False, "probation_days_left": None, "probation_uses_left": 0}
+    try:
+        learned_at = datetime.fromisoformat(str(c["learned_at"]))
+        days_left = (learned_at + timedelta(days=t["probation_days"]) - datetime.utcnow()).days
+    except Exception:
+        days_left = None
+    return {"probation": True, "probation_days_left": days_left, "probation_uses_left": uses_left}
+
+
+def _bar_reason(c) -> str:
+    """The human reason this candidate has or hasn't earned promotion — reuses the SAME predicate
+    the learner uses, so the UI can never disagree with the actual decision."""
+    try:
+        from vox import command_learn
+        ok, why = command_learn.clears_bar(dict(c))
+        return ("ready — " if ok else "") + why
+    except Exception:
+        return ""
+
+
+def reject_candidate(candidate_id) -> bool:
+    """Reject a candidate from the UI: block it so it stops accumulating AND can't come back on its
+    own. Without this the only ways to say "no, never" were a voice correction or raw SQL."""
+    conn = _conn()
+    try:
+        cur = conn.execute("UPDATE command_candidate SET blocked=1 WHERE id=?", (int(candidate_id),))
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
 
 
 def _learn_mode() -> str:

@@ -13,6 +13,7 @@ import {
   AlarmClock,
   KanbanSquare,
   SpellCheck,
+  GraduationCap,
   type LucideIcon,
 } from "lucide-react";
 
@@ -37,6 +38,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: "/rules", label: "Rules", icon: ScrollText },
   { to: "/dictionary", label: "Dictionary", icon: SpellCheck },
   { to: "/commands", label: "Commands", icon: TerminalSquare },
+  { to: "/learning", label: "Learned", icon: GraduationCap },
   { to: "/memory", label: "Memory", icon: Brain },
   { to: "/integrations", label: "Integrations", icon: Plug },
   { to: "/handbook", label: "Handbook", icon: BookOpen },

@@ -228,11 +228,17 @@ def _fast_lane_extra_phrases(cfg) -> list[str]:
         out.append(f"open {a}")     # launch/focus the app
     # The numbered-overlay triggers live in dispatch (not the command DB), so add them here — this
     # puts "show clickable" on the fast lane and lets it snap mis-hears ("hard clickable" → the real
-    # phrase) instead of escalating to the LLM.
+    # phrase) instead of escalating to the LLM. The HIDE phrases need it just as much: only the show
+    # half was listed here, so "hide clickable" fell through to Whisper, which clips the short word
+    # to "hi"/"high" — and those reached the LLM. Seen repeatedly in vox.log.
     try:
-        out += list(dispatch._SHOW_CLICKABLE_PHRASES)
+        out += list(dispatch._SHOW_CLICKABLE_PHRASES) + list(dispatch._HIDE_CLICKABLE_PHRASES)
     except Exception:
         pass
+    # Reload lives in the code parser, so active_phrases() (which reads the DB) doesn't include it.
+    # Only the canonical wording — a phrase TAUGHT for it lands in the command DB and reaches the
+    # grammar through active_phrases() on its own.
+    out += ["reload", "reload the page"]
     return out
 
 

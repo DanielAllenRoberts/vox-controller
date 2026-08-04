@@ -104,9 +104,56 @@ learned command via `note_db_hit()` + `check_negative()`; `decay()` at daemon bo
    **globally**; everything focus-dependent (click, tab, window, sidebar) stays app-scoped, which is
    what keeps a bad learn's blast radius small.
 
-**Still to do:** the dashboard page itself (the API is live; `Commands.tsx` needs the Learned /
-Candidates views), and the spoken confirm — today a `should_confirm` hit *withholds* the save and logs
-it rather than asking aloud, and `remember that` is the manual way to take it.
+**Dashboard — ✅ BUILT 2026-08-03** as its own page (`/learning`, nav "Learned"), not a tab on
+`Commands.tsx`: the learned set is a different thing from the curated command DB and mixing them
+made both harder to read. Groups by **app** (Everywhere first, then alphabetically) and within each
+app by stage — **Saved · Probation · Learning · Blocked** — with per-row phrases, hit counts, first/
+last heard, and Save / reject / forget actions. The API gained `thresholds`, a per-candidate `bar`
+(the reason from `clears_bar` itself, so the UI can never disagree with the actual decision),
+probation days/uses remaining, and a new `POST /api/commands/candidates/{id}/reject` — previously
+there was no way to say "never learn this" short of a voice correction or raw SQL.
+
+**Still to do:** the spoken confirm — today a `should_confirm` hit *withholds* the save and logs it
+rather than asking aloud, and `remember that` is the manual way to take it.
+
+> **Doc correction (2026-08-03):** the Phase 1 gate note below says "3 hits in one day is *not*
+> ready, 3 across two days is". That is no longer how it works — `command_learn.clears_bar` uses N
+> clean hits in a **rolling window** and explicitly rejects calendar-day spreading ("three uses this
+> afternoon is a real habit, and making someone wait for tomorrow is the kind of friction that makes
+> a feature feel dead"). The code is the newer, deliberate design; the gate text is stale.
+
+## ⚠️ Design change — save on first use (2026-08-03, user decision)
+
+**The threshold no longer gates USABILITY, only PERMANENCE.** Previously a mapping had to be
+re-derived by the LLM 3 times before it became a command — so the user paid three LLM round-trips
+for the same resolution, which is precisely the cost this feature exists to remove. The user's call,
+verbatim: *"If I say refresh page three times in a day, I don't want three LLM calls. If it's a
+candidate, it must be usable. This is not debatable — this is about user experience."*
+
+**The workflow now:**
+
+| Step | What happens |
+|---|---|
+| 1st use | LLM works it out → **saved immediately, usable**, counted as 1 use |
+| 2nd, 3rd use | Resolves from the DB. **No LLM.** Counter climbs |
+| 3 uses within 10 days | Cemented — survives decay permanently |
+| Not enough uses in 10 days | Deleted. It never earned its place |
+
+Delivered by settings, not new machinery: `learning_min_hits=1` (save on first resolution),
+`learning_probation_uses=3` + `learning_probation_days=10` (the bar for permanence). Two code
+changes were needed: `promote()` now starts `hit_count` at **1** (the resolution that created the
+command *is* a use — starting at 0 made it invisible and put everything one use further away), and
+the "leap" check in `should_confirm` no longer **withholds** a save, it only logs
+(`looks_like_a_leap`) — under an eager model minimal evidence is the normal case, and withholding
+meant the user said a phrase that visibly did nothing.
+
+**What makes this safe** is no longer repetition but correction: probation deletes an unproven
+command, one "no" retires a misfiring one, and — new — the brains can now SEE recent actions
+(`actions.recent_actions_block`), so a conversational correction has something to refer to. The user
+identified that dependency themselves: eager learning is only safe if you can say "that's not what I
+wanted" and be understood, which was impossible while the brain had no idea what had just run.
+
+Gates 1 and 2 were rewritten to assert this design; all three pass.
 
 ## Phase 2 (original plan) — Suggest mode: promotion with a human in the loop
 
