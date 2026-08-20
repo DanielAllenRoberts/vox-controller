@@ -595,6 +595,31 @@ The vox-speak MCP (#34) only does **output** (TTS). But the MCP server can `impo
 
 **Connects to:** #27 (SQLite/Markdown storage direction), `command-db.md` (SQLite schema precedent), #43 (live conversation viewer), #49 (MCP two-way bridge — could expose the board over MCP later).
 
+> **Voice/AI control BUILT 2026-08-04.** The board was previously invisible to the brain — a grep of
+> `executor`/`actions`/`dispatch`/`assistant` found not one reference, so Vox could not see or change
+> it at all. Two halves now:
+>
+> **Seeing** — `actions.board_block()` puts a compact snapshot (lists, card ids + titles, other board
+> names, capped at 40 cards) into the action-layer prompt, so "what's on my board?" is answered
+> directly with no round-trip, and a card the user names can be resolved precisely.
+>
+> **Changing** — a `BOARD: <verb> | <arg> | <arg>` directive, same shape as `SCHEDULE:`:
+> `add_card` · `move_card` · `update_card` · `note` (append to a card's body) · `delete_card` ·
+> `add_list` · `add_board`. Cards are addressed by **title, not id** — voice never produces an id —
+> through `board_store.find_card()`, which matches exact → substring → fuzzy, and strips the words
+> people wrap names in ("the AC Direct **card**", which otherwise failed both the substring test and
+> the fuzzy threshold).
+>
+> **Store gaps filled to make it possible:** `create_board` did not exist *at all* — the only
+> `INSERT INTO board` in the codebase was inside `seed()`, so exactly one board could ever exist even
+> though the schema was multi-board throughout. Added with `rename_list` / `delete_list` too (lists
+> were add-only). New boards get To Do / Doing / Done seeded, since an empty board can't hold a card.
+>
+> **Not done:** the new store functions aren't exposed over HTTP yet, so the dashboard still can't
+> create a board or rename a list — the Board page needs that plus the drag-and-drop still on the
+> original NEXT. And the MCP route (idea #49) is untouched: this gives **Vox's own brain** the board,
+> not external agents like Claude Code. That's the natural follow-on and shares all of the store work.
+
 ## 52. "Click link / click button" — numbered overlay on every clickable element (Dragon-style)
 
 > **Status:** ✅ BUILT (2026-07-16). "show clickable" / "click link" / "click button" draws a numbered blue badge on every clickable element (incl. **text boxes** — Slack compose, search fields); say the number ("click 14" / "14") to click it; any other phrase / "hide clickable" dismisses. Clicks are **coordinate-based** (`ax._click_at` via CGEvent) — reliable on web/Electron where `AXPress` silently no-ops; this also fixed the by-label path (direct + AI-escalated "click X"). The overlay runs in a **separate helper process** (`overlay.py`) so AppKit can't freeze the daemon, is `NSWindowSharingNone` (won't trip screen-capture/DRM), and **spans all displays** (Sidecar / second screens — one window per display). **Fixed 2026-07-28 — "the badges all pile up in the top-left":** not a coordinate bug (window placement, AX→Cocoa flip and AX frames all verified correct against pixels). `targets_with_frames` capped at **80** elements and the walk is depth-first, so on a big app the cap drained into whichever subtree came first — the left sidebar. On Cursor that was 69 of 80 badges on the left half with the entire editor unbadged; Slack's channel list did the same. The full walk is cheap (~70 ms for ~140 elements), so the cap is now **200** and badges cover the whole UI. Knock-on: past 99 the number no longer fit the badge ("100" drew as "10"), so `_make_badge` drops to 9pt at 3 digits (shrink the text, not the box — 3-digit numbers only appear on dense screens, where a wider badge would cover its neighbours). **Second cause, fixed 2026-07-31 — the badges came BACK to the top-left intermittently:** log analysis showed the same app returning wildly different counts (Slack **8 / 13 /** 80 / 132 / 227; Cursor **13 /** 107). The low numbers are the native window chrome alone — which lives in the top-left — because Chromium/Electron builds its web-content AX tree on demand and **tears it back down**, while `ax._enabled_pids` asserted `AXManualAccessibility` only *once per pid, forever*. That's also why killing and restarting the daemon "fixed" it: a fresh process re-asserts. `targets_with_frames` now keeps the best count seen per pid and, when a walk comes back below both 20 elements and half that baseline, re-asserts the flag and re-walks once (~0.4 s settle, only on the degraded path; a healthy walk never retries). Cap also raised 200 → 400 after measuring a busy Slack at 227. NEXT (the learning loop, below): when "click X" can't find it → auto-show the overlay → pick a number → **save the phrase→element to the command DB** so next time it resolves directly (ties #14/#24/#36).
@@ -693,7 +718,15 @@ at — are done.
 
 ## 57. Third-tier click escalation — grid overlay + coordinate clicking
 
-> **Status:** 📋 QUEUED — pairs with #56. Completes the escalation ladder started in #52/#37.
+> **Status:** ✅ BUILT 2026-08-13 as `vox/agent.py` — but **not** as the grid overlay below. Anthropic's
+> computer-use tool (`computer_20251124`) does coordinate clicking natively, and it's *trained* for
+> it rather than being a general vision model asked to guess pixels — which was this idea's main
+> risk. Its `zoom` action is the zoom-refine pass described here. Measured against real AX frames as
+> ground truth on this Mac: **1.1px error**, so the grid-as-classification workaround wasn't needed.
+> The build also went further than this idea: because the tool runs in a loop (screenshot → act →
+> screenshot), it added the *multi-step* tier Vox never had, not just a third way to click.
+> Gated behind `agent_enabled` (off by default), capped, Esc/"stop"-abortable, with an app denylist.
+> The design notes below still stand — especially "never learn a coordinate" and "announce it".
 
 **Vision:** a **third tier** for clicking, after the two that now exist:
 
@@ -732,6 +765,114 @@ would be to move the mouse first, which is much cheaper than a grid.
 
 **Connects to:** #37 (this is its screenshot-grid half, for native apps), #52 (the overlay this
 escalates from), #18 (screenshot vs AX), #56 (correction loop covers tier 3's unverifiability).
+
+## 58. Let the brain QUERY its own commands (and everything else) instead of being force-fed
+
+> **Status:** 📋 IDEA — noted 2026-08-07, not scheduled.
+
+**The gap:** the LLM only knows the static command list hardcoded in `executor._SYSTEM`. The actual
+**command DB — 50 commands / 152 phrases, including everything learned or taught — is invisible to
+it.** `command_cache.active_phrases()` reads the DB but feeds only the Vosk grammar
+(`loop.py:257`), never a prompt. So the day after teaching "refresh page", the brain still has no
+idea that command exists.
+
+Mostly harmless, because the DB resolves *before* the brain is called — by then the DB has already
+missed, so knowing the phrases wouldn't change the action. It hurts in three places:
+
+1. **"What commands do I have?"** — it can only recite the static list, omitting everything you
+   taught, and confidently, since nothing tells it the list is partial.
+2. **`TEACH:` collisions** — the model can't see that a phrase is already taught. `_teach` catches
+   it at execution ("Changed X from Y to Z"), so nothing breaks, but the model is guessing.
+3. **Editing by reference** — "change the refresh command" needs to know a refresh command exists.
+
+**Don't solve it by injecting the list.** 152 phrases is ~400–600 tokens on *every* action-layer
+call to serve perhaps one utterance in fifty — the worst always-on block we could add, and the same
+context-bloat problem already flagged for the board (~1340 tokens at its cap) and the open-tabs list
+(~317 whenever the browser is focused). See [`prompts.md`](../prompts.md) for the measured budget.
+
+**Do it as a query instead.** A read tool the brain calls only when it needs the answer — e.g.
+`ASK: commands` / `ASK: commands matching <x>` — returning the list at that moment. Costs nothing
+until used, scales to a DB of any size, and generalises: the same mechanism could serve the board,
+the tab list, the calendar (#2 in [`todo.md`](todo.md)) and the AX tree, replacing several
+always-attached blocks with one on-demand lookup.
+
+**The catch worth thinking about:** Vox is *translate-to-command*, not native function-calling — one
+utterance, one line, one action. A query tool needs a **second round-trip** (ask → answer → act),
+which is a real change to the executor's shape and adds latency to the turn. Two ways out: allow a
+bounded second call only when the first output is an `ASK:`, or keep a relevance test that attaches
+the right block up front. The first is more general; the second is cheaper and closer to what
+exists today.
+
+**Connects to:** #49 (MCP two-way bridge — the same "let the agent look things up" shape), #36
+(context-aware profiles), the need-based-context item in `todo.md`, and the v2 prompt work in
+[`prompt-v2-draft.md`](../prompt-v2-draft.md).
+
+## 59. Give the MCP control of the board (extends #49/#51)
+
+**Vision:** expose the workspace board (#51) as **MCP tools**, so the IDE assistant (Claude Code /
+Cursor) can read and write the same board you drive by voice and see in the dashboard. Claude
+finishes a task → it moves the card to Done itself. You say "what am I working on?" → Vox reads back
+a board Claude has been keeping current. One board, three ways in: voice, dashboard, coding agent.
+
+**Why it's nearly free:** `board_store.py` is already a plain SQLite module with the whole surface
+this needs — `board_snapshot`, `search`, `add_card`, `move_card`, `update_card`, `delete_card`,
+`add_list`, `list_boards`, `summary`, plus `find_card` for fuzzy "the proxy card" lookups. The MCP
+server (`mcp/vox_speak_server.py`) already imports from `vox.*`, and #49 established the pattern:
+each tool is a thin wrapper over a module that exists. No daemon, no mic, no new storage — unlike
+the two-way-voice tools in #49, **nothing here contends for the microphone**, so it's one of the
+cheapest items on that list.
+
+**Sketch:** `board_read(board?)` → snapshot; `board_search(query)`; `board_add(list, title, body?)`;
+`board_move(card, to_list)`; `board_update(card, …)`. Card references should accept a fuzzy title,
+not just an id, since the caller is an LLM — `find_card` already does that.
+
+**Worth deciding up front:**
+- **Write scope.** Read + add + move is the safe core. `delete_card` / `delete_list` from an agent is
+  the one that can silently lose work — consider leaving deletes out of the MCP surface entirely, or
+  gating them behind a confirm.
+- **Attribution.** If Claude and Vox and you are all moving cards, the board should record *who*
+  moved it, or "why is this in Done?" becomes unanswerable. There's no actor column today.
+- **Board bloat vs. the prompt budget.** #58 measured the board at ~1340 tokens at its cap in Vox's
+  own prompt. On the MCP side that's not an always-on cost — it's a tool the agent calls when it
+  cares — which is exactly the on-demand shape #58 argues for. Good precedent to reuse.
+
+**Connects to:** #49 (the MCP bridge this slots into), #51 (the board itself), #58 (query-don't-inject),
+#34 (the existing vox-speak MCP).
+
+## 60. Presence-aware reminders — hold them until you're actually there (extends #16)
+
+**Vision:** Vox knows whether you're **at the machine**. A reminder that fires while you're away is
+spoken to an empty room and then gone — the one moment it mattered is missed. Instead: if you're
+idle when it fires, **hold it**, and deliver the moment you come back (first mouse move, keypress,
+or spoken command). "Remind me at 3" becomes "remind me at 3, or the next time I'm here."
+
+**Why it's nearly free:** macOS already tracks this, and Vox already imports Quartz —
+
+```python
+Quartz.CGEventSourceSecondsSinceLastEventType(
+    Quartz.kCGEventSourceStateHIDSystemState, Quartz.kCGAnyInputEventType)   # → seconds idle
+```
+
+Verified working here: zero dependencies, no permission prompt, no polling cost worth measuring.
+The scheduler (`vox/scheduler.py`) already owns firing and already has an output policy, so this is
+a gate in front of `_fire()` plus a small "deferred" queue, not new machinery.
+
+**Worth deciding:**
+- **What's the idle threshold?** A few minutes of no HID input is "away"; 30 seconds isn't. Probably
+  a setting, defaulting to something like 3–5 minutes.
+- **What's the catch-up rule?** On return, speak them all, or collapse to "you missed three
+  reminders while you were away"? Batching is kinder for a long absence.
+- **Does a stale reminder still matter?** A "stand up and stretch" from four hours ago is noise;
+  "call Sam" isn't. Possibly an expiry per reminder, or just drop timers and keep reminders.
+- **Idle ≠ absent.** Watching a video or reading counts as idle to the HID clock. That argues for a
+  generous threshold and for delivering on return rather than suppressing outright.
+
+**Also useful beyond reminders:** the same signal tells the daemon when nobody's listening — a cheap
+input to "should I speak this now?", and a natural guard for the agent tier (#57), which should
+probably not be driving the screen while the user is away from it.
+
+**Connects to:** #16 (the scheduler this gates), #48 (meetings — presence is a signal there too),
+#57 (agent tier safety).
 
 ## Sequencing note
 

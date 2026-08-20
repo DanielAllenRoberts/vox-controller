@@ -45,7 +45,15 @@ _enabled_pids = set()  # pids we've already set AXManualAccessibility on (so we 
 # we've seen for that app is how we notice the tree collapsed and re-assert. (Restarting the daemon
 # "fixed" it precisely because a fresh process re-enables everything.)
 _best_count: dict[int, int] = {}
-_THIN_ABSOLUTE = 20  # below this, with a healthy baseline, the tree is almost certainly chrome-only
+_THIN_ABSOLUTE = 20  # below this the tree is almost certainly chrome-only
+# pids we've already spent one cold re-assert on (no healthy baseline to compare against). Without
+# this, an app that really does have <20 clickables would re-settle on every single enumeration.
+_cold_retried: set[int] = set()
+# pids whose window-less retry we've already paid for. Cleared as soon as the app exposes a window
+# again, so this bounds the cost of a permanently-broken app without disarming real recoveries.
+_blind_spent: set[int] = set()
+_RETRY_SETTLE = 1.5  # Electron rebuilds its whole web-content tree on a re-assert; _SETTLE is too
+                     # short for that, and reading early looks the same as reading nothing.
 
 
 def _load():
@@ -110,8 +118,13 @@ def _label_of(fns, el, role):
     return "text box" if role in _TEXT_INPUT_ROLES else None
 
 
-def _app_root(fns):
-    """The frontmost app's AX root, with web content enabled (settles once per app). Or None."""
+def _app_root(fns, settle: float | None = None):
+    """The frontmost app's AX root, with web content enabled (settles once per app). Or None.
+
+    ``settle`` overrides the wait after asserting AXManualAccessibility. The retry path passes a
+    longer one: Electron rebuilds its whole web-content tree from scratch, and 0.4s is enough for a
+    first touch on a warm app but not for a rebuild — coming back too early reads the half-built
+    tree and looks identical to "there's nothing here"."""
     pid = _frontmost_pid()
     if not pid:
         return None
@@ -124,9 +137,33 @@ def _app_root(fns):
             fns["AXUIElementSetAttributeValue"](app, "AXManualAccessibility", True)
         except Exception:
             pass
-        time.sleep(_SETTLE)  # first touch only — the tree needs a moment to build
+        budget = _SETTLE if settle is None else settle
+        # POLL, don't sleep the whole budget. The wait exists because the tree needs a moment to
+        # build, not because it needs a fixed amount of time — most apps are ready far sooner than
+        # the worst case, and a flat sleep charges every app the slowest app's price. Measured:
+        # "show clickable" went 1s → 3s when the budget went to 1.5s, for no benefit once the tree
+        # was already up. Polling returns as soon as there's something to read.
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            if _attr(fns, app, "AXWindows"):
+                break
         _enabled_pids.add(pid)
     return app
+
+
+def _has_windows(fns, app) -> bool:
+    """Does this app expose ANY AX window? A frontmost app that reports none has a collapsed tree —
+    everything we can still read is the menu bar, which lives on the application element itself.
+
+    This is the difference between "an app with few controls" and "an app whose content is missing",
+    which a raw element count can't tell apart. Obsidian sitting at exactly 9 elements — File, Edit,
+    View… — read as a stable, healthy little tree to the count-based check, so it was never retried
+    and the click-by-vision fallback kept picking menu-bar badges for sidebar targets."""
+    try:
+        return bool(_attr(fns, app, "AXWindows"))
+    except Exception:
+        return True  # unknown → don't trigger a retry on a guess
 
 
 def _pressable(fns, el, chain):
@@ -279,7 +316,7 @@ def _frame(fns, el):
     return (x, y, w, h)
 
 
-def targets_with_frames(limit: int = 400, _retry: bool = True):
+def targets_with_frames(limit: int = 400, _retry: bool = True, _settle: float | None = None):
     """Clickable elements in the focused app WITH their on-screen frames, for a numbered overlay
     (idea #52). Returns a list of ``{index, label, role, x, y, w, h}`` (frame in AX top-left-origin
     screen coords), or None if native AX is unavailable. Also caches each element's pressable ref so
@@ -295,7 +332,7 @@ def targets_with_frames(limit: int = 400, _retry: bool = True):
     fns = _load()
     if not fns:
         return None
-    root = _app_root(fns)
+    root = _app_root(fns, _settle)
     if root is None:
         return None
     out, cache, seen, n = [], [], set(), [0]
@@ -330,15 +367,43 @@ def targets_with_frames(limit: int = 400, _retry: bool = True):
     except Exception:
         return None
 
-    # Did this app's web-content tree collapse out from under us? If we've previously seen far more
-    # from the same pid, re-assert AXManualAccessibility (dropping the once-per-pid memo) and walk
-    # once more. Only costs the _SETTLE wait on the rare degraded path — a healthy walk never retries.
+    # Did this app's web-content tree collapse out from under us? Re-assert AXManualAccessibility
+    # (dropping the once-per-pid memo) and walk once more. There are TWO ways to be too thin to be
+    # real, and the second one is why "show clickables" could stay broken for a whole session:
+    #
+    #   RELATIVE — we've seen far more from this pid before, so the tree collapsed since.
+    #   ABSOLUTE — we've never seen a healthy tree for this pid AT ALL. The relative test can't catch
+    #     this: `best` is 0, so `best and …` short-circuits and no retry ever fires. An app whose
+    #     tree happened to be down the FIRST time the daemon touched it (Electron builds web content
+    #     on demand — Obsidian and Slack both enumerate zero windows in that state) then stayed
+    #     un-enumerable until the daemon was restarted, which is what made this look intermittent.
+    #
+    # The absolute arm is tried at most ONCE per pid: an app that genuinely has only a handful of
+    # clickable elements must not pay the _SETTLE wait on every single enumeration.
     pid = _frontmost_pid()
     if pid:
         best = _best_count.get(pid, 0)
-        if _retry and best and len(out) < min(_THIN_ABSOLUTE, best // 2):
+        thin = len(out) < _THIN_ABSOLUTE
+        # NO WINDOWS is the decisive tell and outranks the count heuristics: a frontmost app that
+        # exposes zero AX windows is definitively broken, not merely sparse, so this arm re-arms
+        # every walk rather than being spent once. The count arms stay for the cases where windows
+        # ARE exposed but the web content inside them collapsed.
+        blind = not _has_windows(fns, root)
+        if not blind:
+            _blind_spent.discard(pid)  # it recovered — re-arm the blind retry for next time
+        collapsed = (blind and pid not in _blind_spent) or \
+                    ((thin and len(out) < best // 2) if best
+                     else (thin and pid not in _cold_retried))
+        if _retry and collapsed:
+            if blind:
+                # Pay the rebuild wait once per broken episode, not on every walk: an app that
+                # stays window-less would otherwise add _RETRY_SETTLE to every enumeration and
+                # still come back empty. Cleared above the moment windows reappear.
+                _blind_spent.add(pid)
+            elif not best:
+                _cold_retried.add(pid)   # count-based cold guess: spend it once, never repeat
             _enabled_pids.discard(pid)
-            return targets_with_frames(limit, _retry=False)
+            return targets_with_frames(limit, _retry=False, _settle=_RETRY_SETTLE)
         _best_count[pid] = max(best, len(out))
 
     _LAST_TARGETS = cache

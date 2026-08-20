@@ -186,7 +186,10 @@ class Config:
         # this list on noise; a "vox …" hallucination then falsely fires the idle one-shot, so "vox"
         # is OUT. "switch" stays (else mis-heard as "search"); it can't fire the one-shot (no "vox").
         "switch cursor arc safari chrome github youtube gmail spotify notion "
-        "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
+        "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma "
+        # Apps in daily use here that were missing, so "open obsidian" / "open whatsapp" paid a full
+        # Whisper pass every time (both show up in scripts/perf_report.py's grammar-candidate list).
+        "obsidian whatsapp"
     )
 
     # --- Vosk grammar command recognition — the "fast lane" (idea #53) ---------------------------
@@ -267,6 +270,31 @@ class Config:
     # How the screen is "seen": "auto" = AX tree first, screenshot fallback; "axtree" = tree only
     # (token-light text, no image); "screenshot" = image only (today's behavior). Master toggle above.
     screen_vision_mode: str = "auto"
+
+    # --- Agent tier (idea #57) --- multi-step GUI control via Anthropic's computer-use tool:
+    # screenshot → decide → click at a coordinate → look again. The LAST rung of the click ladder
+    # (DB → AX label → AX badge → here), and the only one that reaches canvas/WebGL/unlabelled
+    # controls the accessibility tree can't see. Also the only path that can do SEVERAL steps for
+    # one request. Everything else in Vox stays single-shot.
+    # OFF by default: it clicks and types on your live desktop, so you opt in from the dashboard.
+    agent_enabled: bool = False
+    # Must be a model that supports the computer_20251124 tool — Haiku 4.5 does NOT, so this is a
+    # separate setting rather than reusing big_brain_model. Always uses the "anthropic" provider
+    # (anthropic_key_env), since computer use is an API tool, not a subscription feature.
+    # Sonnet 5 over Opus 5 deliberately: $3/$15 per MTok vs $5/$25, and a screenshot loop is
+    # token-heavy (~2.8k image tokens PER STEP at 1920px), so the model choice dominates the bill.
+    # Measured on the first Opus runs here: ~$0.035/step, i.e. ~$0.35 for a 10-step task.
+    agent_model: str = "claude-sonnet-5"
+    agent_max_steps: int = 15        # hard cap on tool round-trips in one run (runaway guard)
+    agent_max_seconds: float = 180.0  # wall-clock ceiling for one run
+    # Width the screenshot is sent at. The tool's declared display size MUST match the image we
+    # actually send or every coordinate is skewed. 1920 = native here (scale 1.0, most accurate);
+    # 1280 is the docs' cost-saving baseline. Height follows the display's aspect ratio.
+    agent_capture_width: int = 1920
+    agent_effort: str = "medium"     # output_config.effort: low | medium | high | xhigh | max
+    # Apps where a stray coordinate click is worst (shell access / destructive). While one of these
+    # is frontmost the agent refuses raw coordinate clicks — the AX-label path still works.
+    agent_denied_apps: tuple[str, ...] = ("Terminal", "iTerm2", "iTerm", "Cursor", "Warp", "System Settings")
 
     # --- Voice output (TTS) --- macOS `say`: local, instant, no model download. Swap for a
     # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →

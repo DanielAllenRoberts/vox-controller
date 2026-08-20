@@ -150,7 +150,105 @@ def resolve_list(conn: sqlite3.Connection, name: str, board_id: int | None = Non
     return row["id"] if row else None
 
 
+def find_card(conn: sqlite3.Connection, needle: str | int,
+              board: str | int | None = None) -> dict | None:
+    """Resolve a card the way a PERSON refers to it: an id, an exact title, or a partial/fuzzy one.
+
+    Voice never yields a card id — you say "move the AC Direct card to doing". Exact title first,
+    then a substring, then the closest fuzzy match (mis-hears are the norm here, same reason the
+    click matcher is fuzzy). Ambiguity resolves to the shortest matching title, which is the most
+    specific one. Returns the card dict, or None."""
+    if isinstance(needle, int) or (isinstance(needle, str) and needle.strip().isdigit()):
+        return _card_row(conn, int(needle))
+    text = _strip_noise(needle)
+    if not text:
+        return None
+    board_id = resolve_board(conn, board)
+    rows = _rows_for_board(conn, board_id)
+    low = text.lower()
+    exact = [r for r in rows if r["title"].strip().lower() == low]
+    if exact:
+        return _card_dict(exact[0])
+    part = [r for r in rows if low in r["title"].lower() or r["title"].lower() in low]
+    if part:
+        return _card_dict(min(part, key=lambda r: len(r["title"])))
+    import difflib
+    best, score = None, 0.0
+    for r in rows:
+        s = difflib.SequenceMatcher(None, low, r["title"].lower()).ratio()
+        if s > score:
+            best, score = r, s
+    return _card_dict(best) if best is not None and score >= 0.6 else None
+
+
+def _strip_noise(text) -> str:
+    """Drop the words people wrap a card's name in when speaking — "the AC Direct **card**".
+    Without this the wrapper word breaks both the substring test and the fuzzy ratio, and a card
+    the user named perfectly clearly comes back as not-found."""
+    import re
+    t = (text or "").strip()
+    t = re.sub(r"^\s*(?:the|my|that|this)\s+", "", t, flags=re.I)
+    t = re.sub(r"\s+(?:card|task|ticket|item|one)\s*$", "", t, flags=re.I)
+    return t.strip()
+
+
+def _rows_for_board(conn: sqlite3.Connection, board_id: int | None):
+    return conn.execute(
+        "SELECT c.* FROM card c JOIN board_list l ON l.id = c.list_id WHERE l.board_id = ?",
+        (board_id,)).fetchall() if board_id is not None else []
+
+
 # --- write API (used by the web layer + agent tools) ---------------------------------------------
+
+def create_board(conn: sqlite3.Connection, name: str, lists: list[str] | None = None) -> dict:
+    """Create a board. Until now the ONLY board that could exist was the one `seed()` made, so
+    "make me a board for X" was impossible even though the schema was always multi-board (every
+    list carries a board_id and `resolve_board` already took a name).
+
+    Seeds the same To Do / Doing / Done columns as the default board unless `lists` says otherwise —
+    an empty board can't hold a card, so creating one without columns just fails on the next step."""
+    if not (isinstance(name, str) and name.strip()):
+        raise ValueError("board name is required")
+    try:
+        cur = conn.execute("INSERT INTO board (name) VALUES (?)", (name.strip(),))
+    except sqlite3.IntegrityError:
+        raise ValueError(f"a board named {name.strip()!r} already exists")
+    board_id = cur.lastrowid
+    for i, ln in enumerate(lists if lists is not None else ["To Do", "Doing", "Done"]):
+        if ln and ln.strip():
+            conn.execute("INSERT INTO board_list (board_id, name, position) VALUES (?,?,?)",
+                         (board_id, ln.strip(), i))
+    conn.commit()
+    row = conn.execute("SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
+    return dict(row)
+
+
+def rename_list(conn: sqlite3.Connection, list_id: int, name: str) -> dict | None:
+    """Rename a column. Returns the updated list, or None if it doesn't exist."""
+    if not (isinstance(name, str) and name.strip()):
+        raise ValueError("list name is required")
+    row = _list_row(conn, int(list_id))
+    if row is None:
+        return None
+    try:
+        conn.execute("UPDATE board_list SET name = ? WHERE id = ?", (name.strip(), int(list_id)))
+    except sqlite3.IntegrityError:
+        raise ValueError(f"a list named {name.strip()!r} already exists on this board")
+    _touch_board(conn, row.get("board_id"))
+    conn.commit()
+    return _list_row(conn, int(list_id))
+
+
+def delete_list(conn: sqlite3.Connection, list_id: int) -> bool:
+    """Delete a column AND its cards (the FK cascades). Returns False if it didn't exist."""
+    row = _list_row(conn, int(list_id))
+    if row is None:
+        return False
+    conn.execute("DELETE FROM board_list WHERE id = ?", (int(list_id),))
+    _touch_board(conn, row.get("board_id"))
+    conn.commit()
+    return True
+
 
 def add_list(conn: sqlite3.Connection, name: str, board: str | int | None = None) -> dict:
     """Create a column at the end of a board. Raises ValueError on a blank/duplicate name."""

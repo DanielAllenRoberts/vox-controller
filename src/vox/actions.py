@@ -289,6 +289,42 @@ def _now_line() -> str:
     return f"Now: {now.strftime('%A %Y-%m-%d %H:%M')} ({now.tzname()})"
 
 
+def board_block(max_cards: int = 40) -> str:
+    """The workspace board as compact prompt text, or "" if empty/unavailable (idea #51).
+
+    Given to the action layer so the brain can both ANSWER about the board ("what's in my to-do?")
+    and resolve a card the user names ("move the AC Direct card to doing") without a round-trip.
+    Card ids are included because they're the unambiguous handle when two titles look alike.
+    Capped: a long board would otherwise crowd out the rest of the prompt."""
+    try:
+        from vox import board_store
+        conn = board_store.build()
+        try:
+            snap = board_store.board_snapshot(conn)
+            names = [b["name"] for b in board_store.list_boards(conn)]
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    lists = (snap or {}).get("lists") or []
+    if not lists:
+        return ""
+    shown, lines = 0, []
+    for l in lists:
+        cards = l.get("cards") or []
+        lines.append(f"  {l['name']} ({len(cards)}):")
+        for c in cards:
+            if shown >= max_cards:
+                lines.append("    …more not shown")
+                break
+            lines.append(f"    #{c['id']} {c['title']}")
+            shown += 1
+    other = [n for n in names if n != (snap or {}).get("name")]
+    extra = f" Other boards: {', '.join(other)}." if other else ""
+    return (f"[Workspace board \"{(snap or {}).get('name', 'Workspace')}\" — the user's task board."
+            f"{extra} Use BOARD: to change it]\n" + "\n".join(lines))
+
+
 def recent_actions_block(limit: int = 6) -> str:
     """The last few actions Vox ran, as prompt text. "" when there's nothing (or the DB is off).
 

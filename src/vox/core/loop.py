@@ -166,6 +166,25 @@ def _is_abort(text: str, cfg) -> bool:
     return any(p in t for p in cfg.abort_phrases)
 
 
+_AGENT_STOP = ("stop", "cancel", "stop it", "cancel that", "never mind", "nevermind", "abort")
+
+
+def _is_agent_stop(text: str) -> bool:
+    """True when an agent run is in flight and the user just told it to stop.
+
+    Deliberately only consulted while a run is live — "stop" means other things the rest of the
+    time (sleep, abort), and we don't want to change any of those. Guarded so a missing/broken
+    agent module can never affect the command path."""
+    try:
+        from vox import agent
+        if not agent.is_running():
+            return False
+        t = normalize(text)
+        return any(t == p or t.startswith(p + " ") for p in _AGENT_STOP)
+    except Exception:
+        return False
+
+
 def _is_assistant(text: str, cfg) -> bool:
     t = normalize(text)
     return any(p in t for p in cfg.assistant_phrases)
@@ -215,6 +234,38 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     return text
 
 
+# Control phrases that must work INSIDE dictation. Dictation can't use the command grammar (you're
+# typing arbitrary prose, so a constrained grammar would mangle it), which is why it went straight to
+# Whisper — and that made the one phrase you need most, "stop typing", the slowest thing in the app:
+# a full Whisper pass on top of dictation's longer silence wait. Recognising JUST these against a
+# tiny grammar first is cheap (~5ms), and anything that isn't one of them still falls through to
+# Whisper untouched, so dictated text is unaffected.
+_DICTATION_CONTROL_PHRASES = (
+    "stop typing", "stop dictation", "stop dictating", "enter", "new line", "new paragraph",
+)
+
+
+def _dictation_control(audio, cfg) -> str | None:
+    """Vosk-match an utterance against the dictation control phrases only. Returns the phrase on a
+    confident match, else None so the caller runs Whisper as before. Fully guarded."""
+    if not _setting("vosk_commands_enabled", getattr(cfg, "vosk_commands_enabled", False)):
+        return None
+    try:
+        from vox import command_cache
+        from vox.stt import vosk_recognizer
+        log = command_cache.log if getattr(cfg, "vosk_log", True) else None
+        r = vosk_recognizer.recognize(audio, list(_DICTATION_CONTROL_PHRASES), cfg.sample_rate,
+                                      model_path=getattr(cfg, "vosk_model_path", ""), log=None)
+        min_conf = float(_setting("vosk_min_conf", getattr(cfg, "vosk_min_conf", 0.0)))
+        if r and r["conf"] >= min_conf:
+            if log:
+                log(f"  [vosk] ⚡ dictation control {r['text']!r} conf {r['conf']} → FAST LANE")
+            return r["text"]
+    except Exception:
+        pass
+    return None
+
+
 def _fast_lane_extra_phrases(cfg) -> list[str]:
     """Put common PARAMETERISED app commands on the Vosk fast lane by enumerating known apps — they
     live in the code parser (not the command DB), so ``active_phrases`` doesn't include them. Vosk
@@ -239,6 +290,15 @@ def _fast_lane_extra_phrases(cfg) -> list[str]:
     # Only the canonical wording — a phrase TAUGHT for it lands in the command DB and reaches the
     # grammar through active_phrases() on its own.
     out += ["reload", "reload the page"]
+    # MODE-SWITCH phrases. These live in the code parser too, so nothing was putting them on the
+    # grammar — and they are among the most-spoken things in the whole app. Measured over vox.log
+    # (scripts/perf_report.py): "go to sleep" 50x, "stop typing" 61x, "enter" 71x, "start typing"
+    # 24x — every one paying a full Whisper pass to recognise two short words. They're a closed set,
+    # so there's no reason for them to be on the slow lane at all.
+    for attr in ("sleep_phrases", "dictate_phrases", "control_phrases", "assistant_phrases",
+                 "open_dashboard_phrases", "close_dashboard_phrases"):
+        out += [p for p in (getattr(cfg, attr, ()) or ())]
+    out += list(_DICTATION_CONTROL_PHRASES)
     return out
 
 
@@ -411,6 +471,16 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
             if not text:
                 continue
+        # An agent run (idea #57) works the screen for up to a minute on its own thread. While one
+        # is in flight a plain "stop" should cancel IT and leave us in control mode — not drop Vox
+        # to idle, which is what the same word means the rest of the time.
+        if _is_agent_stop(text):
+            from vox import agent
+            agent.abort()
+            sounds.play(cfg.sound_abort)
+            out.emit("🛑 Stopping the agent.")
+            pending = []
+            continue
         if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
             sounds.play(cfg.sound_abort)
             out.emit("🛑 Stopped.")
@@ -661,6 +731,17 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
             sounds.play(cfg.sound_dictate_stop)
             out.emit("✎ Stopped typing.")
             return return_to
+        # Check the control phrases BEFORE paying for Whisper — "stop typing" is the phrase you say
+        # most in dictation and it was the slowest to land.
+        ctrl = _dictation_control(audio, cfg)
+        if ctrl in ("stop typing", "stop dictation", "stop dictating"):
+            sounds.play(cfg.sound_dictate_stop)
+            out.emit("✎ Stopped typing.")
+            return return_to
+        if ctrl in ("enter", "new line", "new paragraph"):
+            actions.dictate("\n\n" if ctrl == "new paragraph" else "\n")
+            out.emit(f"  typed: {ctrl}")
+            continue
         text = _transcribe(transcriber, audio, cfg, out)
         if not text:
             continue

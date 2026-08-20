@@ -808,13 +808,21 @@ def promote(conn, candidate_id: int, *, reason: str = "threshold") -> int | None
     return cmd_id
 
 
-def remap(conn, command_id: int, intent: str, arg: str | None) -> dict | None:
-    """Re-point a LEARNED command at a different action, keeping its phrases ("when I say X I
-    actually mean Y" — doc 04). Refuses builtin/user rows: those are human-authored and an inferred
-    edit must never overwrite them. Returns the previous action (so it can be undone / recorded as
-    the anti-mapping), or None if it refused."""
+def remap(conn, command_id: int, intent: str, arg: str | None,
+          *, allow_user: bool = False) -> dict | None:
+    """Re-point a command at a different action, keeping its phrases ("when I say X I actually mean
+    Y" — doc 04). Returns the previous action (so it can be undone / recorded as the anti-mapping),
+    or None if it refused.
+
+    ``builtin`` rows are never touchable — they're what Vox ships with.
+
+    ``user`` rows (taught explicitly via TEACH) are refused by default, because the caller is
+    usually an INFERRED correction and a guess must not silently rewrite something the user
+    authored. Set ``allow_user`` when the user is explicitly asking to change it — "when I say
+    refresh, use reload instead" — which is exactly when editing their own command is the point."""
     row = conn.execute("SELECT * FROM command WHERE id=?", (command_id,)).fetchone()
-    if row is None or row["source"] != "learned":
+    allowed = ("learned", "user") if allow_user else ("learned",)
+    if row is None or row["source"] not in allowed:
         return None
     was = {"intent": row["intent"], "arg": row["arg"]}
     conn.execute("UPDATE command SET intent=?, arg=?, updated_at=datetime('now'), "

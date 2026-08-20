@@ -37,6 +37,8 @@ _SYSTEM = (
     "parser couldn't handle what the user just said. Turn it into ONE Vox command, or a short reply.\n"
     "Commands (output the command line verbatim, nothing else):\n"
     "  open <app or website>          ·  go to <website>             ·  search <query>\n"
+    "  reload  (reload the current page — ALWAYS prefer this over clicking a reload button, which\n"
+    "           only exists on some pages and breaks on the next one)\n"
     "  go to my <name> tab            ·  next tab / previous tab     ·  go back  ·  close tab\n"
     "  next window / previous window  ·  swipe left / swipe right    ·  profile <number>\n"
     "  <app> window  (switch to / cycle an app's windows, e.g. 'Cursor window')\n"
@@ -58,6 +60,13 @@ _SYSTEM = (
     "CLICK: <its name> — do NOT treat an in-app name as a website (e.g. on Slack, 'go to the github "
     "chat' is  CLICK: github , NOT opening github.com). Vox finds and clicks the exact control (and can "
     "list what's on screen if your first guess misses) in a separate step — just pass the target.\n"
+    "For a task that needs SEVERAL steps on screen, or a target with no label (a spot in a video, a "
+    "drawing, a map, an unlabelled icon): output  AGENT: <the task in one sentence>. This hands over "
+    "to a slower tier that can see the screen, act, look again, and repeat. Use it ONLY when one "
+    "command genuinely can't do the job — e.g. 'find the total on this invoice and put it in the "
+    "spreadsheet', 'scrub the video to the halfway point', 'fill in this form'. A single click, a "
+    "single app switch, or anything with a visible label is NOT this — use CLICK: or a command, which "
+    "are far faster.\n"
     "To set a TIMER, ALARM, or REMINDER: output  SCHEDULE: <kind> | <when> | <text> | <repeat>\n"
     "  <kind> = timer, alarm, or reminder.\n"
     "  <when> = the ABSOLUTE local date-time as 24-hour ISO YYYY-MM-DDTHH:MM, which YOU compute from "
@@ -80,6 +89,20 @@ _SYSTEM = (
     "typ'): output exactly  DICTATE  and nothing else. This hands the keyboard to the user's voice "
     "(everything they say next is typed) — it is DIFFERENT from TYPE, which composes specific text "
     "you write. When the user just wants to start dictating, DICTATE — don't write anything yourself.\n"
+    "The user's WORKSPACE BOARD (a Trello-style kanban of their tasks) is shown in the Mac state "
+    "below when it has anything on it. To ANSWER a question about it ('what's on my board', 'what "
+    "am I doing', 'how many issues are open'), read it off what you can see and reply with "
+    "CHAT: <your answer> — the CHAT: prefix is required for anything spoken, never bare prose. "
+    "To CHANGE it, output  BOARD: <verb> | <arg> | <arg>  using exactly one of:\n"
+    "  BOARD: add_card | <list> | <title>        ·  BOARD: move_card | <card> | <list>\n"
+    "  BOARD: update_card | <card> | <new title> ·  BOARD: note | <card> | <text to append>\n"
+    "  BOARD: delete_card | <card>               ·  BOARD: add_list | <name>\n"
+    "  BOARD: add_board | <name>\n"
+    "Refer to a card by its TITLE as the user said it (close is fine, it's matched fuzzily), or by "
+    "the #id shown. Examples: 'add a card to doing called fix the scraper' → "
+    "BOARD: add_card | Doing | fix the scraper  ·  'move the AC direct card to done' → "
+    "BOARD: move_card | AC direct | Done  ·  'put a note on the scraper card that it needs "
+    "proxies' → BOARD: note | scraper | needs proxies.\n"
     "To TEACH A NEW COMMAND — when the user asks for a phrase to mean something FROM NOW ON "
     "('whenever I say refresh, refresh the page', 'make \"reload\" reload this tab', 'from now on X "
     "should Y', 'save that as a command called X'): output  TEACH: <the trigger phrase> | <the Vox "
@@ -89,6 +112,11 @@ _SYSTEM = (
     "phrase works instantly every time after, with no AI. Use it whenever the user is describing a "
     "standing rule for a phrase rather than asking for a one-off action — do NOT just reply that "
     "you've noted it, and never claim you saved something without emitting TEACH.\n"
+    "The SAME directive also CHANGES a command that was added earlier: if the phrase is already "
+    "taught, TEACH re-points it at the new action instead of adding a duplicate. So 'when I say "
+    "refresh, use reload instead', 'change the refresh command to reload' and 'make refresh do "
+    "something else' are all  TEACH: refresh | reload . Built-in commands cannot be changed — Vox "
+    "will say so; don't refuse on its behalf, just emit the TEACH.\n"
     "Rules:\n"
     "• Be autonomous — strongly prefer ACTING over asking. Make a sensible choice and do it; never "
     "ask for confirmation. Questions slow the user down, so only ask when you genuinely cannot "
@@ -323,6 +351,68 @@ def _click_by_vision(target: str, items) -> str | None:
         return None
 
 
+def _board(body: str) -> str:
+    """Change the workspace board (idea #51). ``<verb> | <arg> | <arg>``, mirroring SCHEDULE's shape.
+
+    Cards are addressed by TITLE, not id — voice never produces an id — via ``board_store.find_card``,
+    which matches exactly, then partially, then fuzzily. Reads aren't handled here: the board is
+    already in the prompt (``actions.board_block``), so the brain answers "what's on my board?"
+    directly instead of paying for a round-trip."""
+    parts = [p.strip() for p in (body or "").split("|")]
+    verb = (parts[0] or "").lower().replace(" ", "_") if parts else ""
+    a1 = parts[1] if len(parts) > 1 else ""
+    a2 = parts[2] if len(parts) > 2 else ""
+    try:
+        from vox import board_store
+        conn = board_store.build()
+    except Exception:
+        return "I couldn't open the board."
+    try:
+        if verb in ("add_card", "add", "new_card"):
+            if not a1 or not a2:
+                return "Which list, and what should the card say?"
+            card = board_store.add_card(conn, a1, a2)
+            return f"Added {card['title']!r} to {a1}."
+        if verb in ("move_card", "move"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            board_store.move_card(conn, card["id"], a2)
+            return f"Moved {card['title']!r} to {a2}."
+        if verb in ("update_card", "edit", "rename_card"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            board_store.update_card(conn, card["id"], title=a2 or None)
+            return f"Renamed it to {a2!r}."
+        if verb in ("note", "append"):  # add detail to a card without losing what's there
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            merged = f"{card.get('body', '')}\n{a2}".strip()
+            board_store.update_card(conn, card["id"], body=merged)
+            return f"Added a note to {card['title']!r}."
+        if verb in ("delete_card", "delete", "remove"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            board_store.delete_card(conn, card["id"])
+            return f"Deleted {card['title']!r}."
+        if verb in ("add_list", "new_list"):
+            return f"Added a {board_store.add_list(conn, a1)['name']!r} list."
+        if verb in ("add_board", "new_board", "create_board"):
+            return f"Created the {board_store.create_board(conn, a1)['name']!r} board."
+        return f"I don't know how to {verb!r} on the board."
+    except ValueError as exc:            # the store's own "no such list" / "already exists"
+        msg = str(exc)                   # these get SPOKEN, so start them like a sentence
+        return msg[:1].upper() + msg[1:] if msg else "That didn't work on the board."
+    except Exception as exc:
+        assistant._dbg("[board]", f"{verb} failed: {exc}")
+        return "That didn't work on the board."
+    finally:
+        conn.close()
+
+
 def _teach(phrase: str, action: str) -> str:
     """"Whenever I say X, do Y" → a real command in the DB, scoped to the focused app (idea #24).
 
@@ -354,6 +444,21 @@ def _teach(phrase: str, action: str) -> str:
             if clash:
                 return (f"'{phrase}' is already a built-in command "
                         f"({clash['label'] or clash['intent']}), so I've left it alone.")
+            # Already taught? CHANGE it rather than adding a rival row with the same trigger.
+            # "when I say refresh, use reload instead" is an edit, and without this it created a
+            # second command for the same phrase and the resolver had to pick between them.
+            prior = conn.execute(
+                "SELECT c.id, c.intent, c.arg, c.source FROM command c "
+                "JOIN phrase p ON p.command_id = c.id "
+                "WHERE lower(p.text)=lower(?) AND c.source IN ('user','learned') LIMIT 1",
+                (phrase,)).fetchone()
+            if prior is not None:
+                was = command_store.remap(conn, prior["id"], intent, arg, allow_user=True)
+                if was is None:
+                    return f"I couldn't change the {phrase!r} command."
+                old = f"{was['intent']} {was['arg']}".strip()
+                return f"Changed {phrase!r} from {old} to {action}."
+
             app = command_cache.current_app()
             ctx = command_store._ensure_context(
                 conn, "app", app, app, 10) if app else command_store._ensure_context(
@@ -412,6 +517,9 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     recent = actions.recent_actions_block()
     if recent:
         prompt = f"{prompt}\n\n{recent}"
+    board = actions.board_block()   # so it can answer about the board and name cards precisely
+    if board:
+        prompt = f"{prompt}\n\n{board}"
     raw = assistant.complete(prompt, history, system=_SYSTEM, brain="small").strip()
     if not raw:
         return False, assistant.respond(text, history)
@@ -479,12 +587,40 @@ def execute(text: str, history=None) -> tuple[bool, str]:
             msg = None
         assistant._dbg("[executor]", f"decision=SCHEDULE {body!r} → {msg!r}")
         return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
+    if upper.startswith("BOARD:"):
+        body = raw.split(":", 1)[1].strip()
+        msg = _board(body)
+        assistant._dbg("[executor]", f"decision=BOARD {body!r} → {msg!r}")
+        return False, msg
     if upper.startswith("TEACH:"):
         body = raw.split(":", 1)[1].strip()
         phrase, _, action = body.partition("|")
         msg = _teach(phrase.strip(), action.strip())
         assistant._dbg("[executor]", f"decision=TEACH {phrase.strip()!r} → {action.strip()!r} :: {msg!r}")
         return False, msg
+    if upper.startswith("AGENT:"):
+        task = raw.split(":", 1)[1].strip()
+        from vox import agent
+        if not _setting("agent_enabled", CONFIG.agent_enabled):
+            assistant._dbg("[executor]", f"decision=AGENT {task!r} → tier disabled")
+            return False, "That needs the agent tier, which is switched off in Vox's settings."
+        if agent.is_running():
+            return False, "I'm already doing something on screen — say stop to cancel it."
+
+        # Runs on a worker thread and speaks its own result when it finishes: a run can take a
+        # minute, and blocking the voice loop here would wedge listening exactly like a dead mic
+        # does. Keeping the loop alive is also what lets "stop" reach agent.abort().
+        def _finished(acted, message):
+            try:
+                from vox import tts
+                if message:
+                    tts.speak(message)
+            except Exception:
+                pass
+
+        agent.run_async(task, on_done=_finished)
+        assistant._dbg("[executor]", f"decision=AGENT {task!r} → started (async)")
+        return True, "On it — say stop or press escape to cancel."
     if upper.startswith("CLICK:"):
         target = raw.split(":", 1)[1].strip()
         # Fast path: the targeted AXPress finder (Electron-aware, early-exit). Only if it can't find
@@ -499,6 +635,16 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         return clicked, result
 
     command = raw.splitlines()[0].strip().strip('"').rstrip(".")
+    # PROSE GUARD. A reply the model forgot to prefix with CHAT: must not be run through the command
+    # parser: parsing is substring-based, so an ordinary sentence can hit a command by accident. Seen
+    # live — "There's one open issue about one-word commands…" matched the `open <target>` rule and
+    # Vox tried to open a website called "issue about one-word commands like refresh…". A command is
+    # never more than one sentence (`search <query>` is long but singular), so multiple sentences is
+    # a reliable tell. Speaking the answer is both safer and what the user actually wanted.
+    multi_sentence = re.search(r"[.!?]\s+[A-Z\"']", command) is not None
+    if multi_sentence and len(command.split()) > 12:
+        assistant._dbg("[executor]", f"decision=PROSE (no CHAT: prefix) → speak {command[:60]!r}…")
+        return False, command
     parsed = actions.parse(command)
     if parsed is None:
         assistant._dbg("[executor]", f"decision=COMMAND {command!r} → no mapping (no-op)")

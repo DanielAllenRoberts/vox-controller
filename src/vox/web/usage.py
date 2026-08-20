@@ -43,8 +43,14 @@ _LOCK = threading.RLock()
 # "claude-haiku-4-5-20251001" resolve via the "claude-haiku-4-5" entry).
 PRICES: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
+    "claude-opus-5": (5.00, 25.00),
     "claude-opus-4-8": (5.00, 25.00),
+    "claude-sonnet-5": (3.00, 15.00),
     "deepseek-chat": (0.27, 1.10),
+    # Same rate as deepseek-chat, which now aliases to this tier (see config.small_brain_model).
+    # Without an entry the everyday brain logs $0.00 against real usage — 392k input tokens showed
+    # as free, which makes the Token Usage page misleading exactly where it matters most.
+    "deepseek-v4-flash": (0.27, 1.10),
 }
 
 # Providers whose calls run on a flat subscription (Claude Max via the SDK/CLI).

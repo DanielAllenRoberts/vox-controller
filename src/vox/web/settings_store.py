@@ -155,6 +155,53 @@ _SCHEMA_META: list[dict] = [
                 "is a vision-model image. 'AX tree only' tests the tree in isolation. Applies on the "
                 "next request.",
     },
+    # --- Agent tier (idea #57) ---
+    {
+        "key": "agent_enabled",
+        "label": "Agent tier (multi-step screen control)",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "Let Vox carry out multi-step tasks by looking at the screen and clicking, using "
+                "Anthropic's computer-use tool. This is the only tier that can reach things the "
+                "accessibility tree can't see (video, canvas, unlabelled icons). It clicks and types "
+                "on your live desktop — press Escape or say 'stop' to cancel a run. Needs an "
+                "Anthropic API key. Off by default.",
+    },
+    {
+        "key": "agent_model",
+        "label": "Agent model",
+        "group": "Behavior",
+        "type": "select",
+        "options": [
+            {"value": "claude-sonnet-5", "label": "claude-sonnet-5 — $3/$15 per MTok (default)"},
+            {"value": "claude-opus-5", "label": "claude-opus-5 — $5/$25, most capable"},
+            {"value": "claude-opus-4-8", "label": "claude-opus-4-8 — $5/$25"},
+        ],
+        "help": "Model that drives the agent tier. Must support the computer-use tool — Haiku 4.5 "
+                "does not, which is why this is separate from the big brain. Always runs on the "
+                "Anthropic API (computer use isn't available on the Claude subscription).",
+    },
+    {
+        "key": "agent_max_steps",
+        "label": "Agent step limit",
+        "group": "Behavior",
+        "type": "number",
+        "help": "Hard cap on how many actions one agent run may take before it gives up. Lower is "
+                "safer and cheaper; each step costs a screenshot.",
+    },
+    {
+        "key": "agent_effort",
+        "label": "Agent effort",
+        "group": "Behavior",
+        "type": "select",
+        "options": [
+            {"value": "low", "label": "low — fastest, cheapest"},
+            {"value": "medium", "label": "medium — balanced"},
+            {"value": "high", "label": "high — most careful"},
+        ],
+        "help": "How much the agent thinks per step. Higher is more reliable on fiddly screens and "
+                "costs more.",
+    },
     {
         "key": "click_vision_fallback",
         "label": "Click by looking (vision fallback)",
