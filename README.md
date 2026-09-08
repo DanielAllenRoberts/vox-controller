@@ -66,3 +66,16 @@ This repository is **public**. Secrets live in `.env` (gitignored), all runtime 
 ---
 
 *This README is a living document — updated as the project grows.*
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Use it, fork it, build on it.
+
+Vox is its own implementation, but several of its designs were informed by other
+open-source projects, each credited where the idea is discussed in `docs/plan/`:
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) (desktop input primitives),
+[backtalk](https://github.com/jaredrhod/backtalk) (warm Agent-SDK session — read for technique
+only; it is AGPL and no code was taken),
+[Meetily](https://github.com/Zackriya-Solutions/meetily) (system-audio capture for meetings) and
+[anarlog](https://github.com/fastrepl/anarlog) (per-backend STT lanes).
+
