@@ -1189,6 +1189,49 @@ agent could address), #57 (the tier this may replace), #65 (a harness is the oth
 #34/#62 (the MCP this would sit beside), and the async-agent escalation thread — "go do this in the
 background" is much more useful when the background agent has hands.
 
+## 67. anarlog — and the STT lane we're not using (Apple SpeechAnalyzer)
+
+> **To look at:** [fastrepl/anarlog](https://github.com/fastrepl/anarlog) — "Open source Granola AI
+> alternative", **MIT**, TypeScript + Rust, **9.2k stars**, actively developed. A meeting-notes app,
+> so it overlaps [`meetings.md`](meetings.md) / the Meetily recon directly. Licence is MIT, which
+> means we can read AND borrow — unlike backtalk (AGPL, #64).
+
+**Why it's worth the look, beyond meetings:** its transcription is noticeably fast, and the reason
+is architectural. It doesn't have one STT — it has a *lane per backend*, each its own crate:
+
+| Crate | What it is |
+|---|---|
+| `transcribe-speechanalyzer` | **macOS-only, binds to a Swift lib via `swift-rs`** — Apple's native on-device speech framework |
+| `transcribe-whisper-local` | local Whisper, the familiar path |
+| `local-stt-core` / `onnx` | shared local-model plumbing |
+| `transcribe-soniqo`, `transcribe-proxy` | cloud / proxied options |
+
+**The interesting one is `transcribe-speechanalyzer`.** Apple's on-device recognition runs on the
+Neural Engine rather than the CPU — which is precisely the axis Vox is losing on. Measured on this
+machine (issues.md **O17**): faster-whisper's median `rtf` is 0.17, but under Logic Pro + a VM +
+a remote-desktop session it hit **3.53** — transcribing slower than real time, so Vox falls further
+behind every sentence, and that starvation was also *causing* the dictation cut-outs (O15). An STT
+lane that doesn't contend for CPU would make that whole failure class go away, and it costs no disk
+either — nothing to download, unlike `small.en` at ~590 MB (O6, disk is tight).
+
+**What I verified vs. what I assumed:** verified from the repo — the crate exists, is macOS-gated,
+and binds Swift through `swift-rs` alongside a separate local-Whisper crate. NOT verified — the
+exact framework/API it calls, minimum macOS version, accuracy against `small.en` on this accent, or
+whether it exposes word timings and confidence (Vox's turn detection and the Vosk fast-lane
+comparison both lean on those). Those are the questions to answer before committing to anything.
+
+**Shape of the idea for Vox:** a swappable STT backend behind the existing `stt/` interface (we
+already have `whisper_transcriber.py` and `vosk_recognizer.py` behind `stt/base.py`, so the seam
+exists), with Apple's engine as a macOS fast lane and Whisper as the portable fallback. Same
+pattern anarlog uses, and the same pattern we already use for TTS (`say` vs Kokoro).
+
+**Also worth stealing a look at:** the repo ships `.claude/skills/` and `.agents/skills/` in-tree
+(QA, release, changelog, SQLite schema design) — a working example of agent skills committed
+alongside the code, which is a distribution question we have open too.
+
+**Connects to:** O17 (the CPU starvation this would sidestep), O15 (which it was causing), #48 /
+`meetings.md` + `research/meetily-recon.md` (the meetings work this repo overlaps), #6 (disk).
+
 ## Sequencing note
 
 > **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation.
