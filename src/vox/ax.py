@@ -17,6 +17,7 @@ object), NOT ``^{__AXUIElement=}`` — the struct-pointer encoding makes childre
 can't be passed back into the C functions.
 """
 
+import contextlib
 import time
 
 # Interactive-ish roles whose label is worth listing as a click target (matches the old AppleScript
@@ -82,13 +83,99 @@ def _load():
     return _FNS if "AXUIElementCreateApplication" in _FNS else None
 
 
-def _frontmost_pid():
+# --- which app are we talking to? (issue O18) ---------------------------------------------------
+# Every entry point below used to ask "who is frontmost?" at the moment it ran. That's the wrong
+# question: what the user meant is the app they were LOOKING AT when they spoke, and the press lands
+# anywhere from an AX walk (~0.1-1.5 s) to an LLM round-trip (seconds) later. Anything that moves
+# focus in that window — the user clicking, a remote-desktop session, a notification — silently
+# redirected the click into a different application. Pinning fixes the target once, up front, so the
+# whole read-find-press sequence talks to one app.
+_PIN: tuple[int, str] | None = None   # (pid, app name) this utterance is aimed at, or None
+
+
+def frontmost():
+    """(pid, name) of the frontmost app per NSWorkspace, or None.
+
+    Instant, and NOT to be trusted on its own — see ``frontmost_verified()``. Kept only as the
+    last-resort fallback for when System Events can't answer at all."""
     try:
         from AppKit import NSWorkspace
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return app.processIdentifier() if app else None
+        return (app.processIdentifier(), app.localizedName() or "") if app else None
     except Exception:
         return None
+
+
+def frontmost_verified():
+    """(pid, name) of the frontmost app, asked live rather than read from a cache. None on failure.
+
+    ``NSWorkspace.frontmostApplication()`` is a KVO property refreshed by main-run-loop processing,
+    and the Vox daemon deliberately runs no ``NSApplication`` run loop (see ``overlay.py`` /
+    ``bubble.py``). Measured in a long-lived run-loop-less process, it stuck on one stale app for
+    five and a half minutes while a freshly-spawned process read the truth every time. Every AX call
+    below resolves its target through a pid, so a frozen answer doesn't fail — it quietly reads and
+    presses a different application (issue O18). ~150 ms; correctness is worth it."""
+    try:
+        from vox import actions
+        return actions.frontmost_app_pid()
+    except Exception:
+        return None
+
+
+def pinned():
+    """The (pid, name) every AX call is currently aimed at, or None (= whatever is frontmost)."""
+    return _PIN
+
+
+@contextlib.contextmanager
+def pinned_to(pid, name: str = ""):
+    """Aim every AX read and press inside this block at ONE app, instead of re-resolving "frontmost"
+    on each call. Nested pins are ignored — the OUTERMOST wins, because it's the one closest to the
+    utterance. A falsy pid is a no-op, so callers that can't resolve a target behave exactly as before."""
+    global _PIN
+    if _PIN is not None or not pid:
+        yield _PIN
+        return
+    _PIN = (int(pid), name or "")
+    try:
+        yield _PIN
+    finally:
+        _PIN = None
+
+
+def _target_pid():
+    """The pid this utterance's AX calls should talk to: the pinned app, else the live frontmost."""
+    return _PIN[0] if _PIN else _frontmost_pid()
+
+
+def _focus_moved(pid=None):
+    """Name of the app in front NOW when it isn't ``pid`` (default: the pinned app) — else None.
+
+    Called immediately before a press, and deliberately through ``frontmost_verified()``: the whole
+    point of the guard is to catch a "frontmost" our fast cached answer got wrong.
+
+    When it fires we REFUSE the press rather than delivering it anyway. The press is a synthesized
+    mouse click at screen coordinates, and those coordinates belong to a window that is no longer on
+    top — the click would land on whichever app IS on top, at a spot nobody chose. The AXPress
+    fallback would at least hit the right control, but silently, inside an app the user has just
+    navigated away from: a hidden action on stale intent. (``input.py`` has background event delivery
+    — ``input_background_delivery``, idea #61 — that could aim a press at a specific window, but it's
+    off by default and untested, so it isn't an option here.) A click that didn't happen is
+    recoverable and reported; a click on the wrong thing is neither."""
+    want = pid if pid is not None else (_PIN[0] if _PIN else None)
+    if want is None:
+        return None
+    now = frontmost_verified()
+    if now is None or now[0] == want:
+        return None  # still ours, or we can't tell → don't block a click the user asked for
+    return now[1] or "another app"
+
+
+def _frontmost_pid():
+    """pid of the frontmost app — the fallback every UNPINNED AX call resolves its root through, so
+    it has to be the verified answer, not the cached one (issue O18)."""
+    p = frontmost_verified() or frontmost()
+    return p[0] if p else None
 
 
 def _attr(fns, el, name):
@@ -119,13 +206,17 @@ def _label_of(fns, el, role):
 
 
 def _app_root(fns, settle: float | None = None):
-    """The frontmost app's AX root, with web content enabled (settles once per app). Or None.
+    """The target app's AX root, with web content enabled (settles once per app). Or None.
+
+    The target is the PINNED app when one is pinned (see ``pinned_to``), else whatever is frontmost
+    right now — which is what this used to always do, and what sent "click on settings" to Cursor
+    while the user was looking at Arc (issue O18).
 
     ``settle`` overrides the wait after asserting AXManualAccessibility. The retry path passes a
     longer one: Electron rebuilds its whole web-content tree from scratch, and 0.4s is enough for a
     first touch on a warm app but not for a rebuild — coming back too early reads the half-built
     tree and looks identical to "there's nothing here"."""
-    pid = _frontmost_pid()
+    pid = _target_pid()
     if not pid:
         return None
     try:
@@ -178,9 +269,14 @@ def _pressable(fns, el, chain):
 
 
 def click(target: str):
-    """Find a control labelled `target` in the focused app and AXPress the nearest pressable element.
-    Returns ("clicked", label) / ("not_found", None) / ("press_failed", label), or None if native AX
-    is unavailable (caller should fall back to AppleScript). Exact label wins over a substring match."""
+    """Find a control labelled `target` in the target app and AXPress the nearest pressable element.
+    Returns ("clicked", label) / ("not_found", None) / ("press_failed", label) /
+    ("focus_changed", app_now), or None if native AX is unavailable (caller should fall back to
+    AppleScript). Exact label wins over a substring match.
+
+    The app searched is the pinned one when a caller has pinned it (``pinned_to``), and the press is
+    refused if that app stopped being frontmost while we were walking its tree — see ``_focus_moved``
+    for why refusing beats pressing anyway."""
     fns = _load()
     if not fns:
         return None
@@ -225,6 +321,9 @@ def click(target: str):
     if hit is None:
         return ("not_found", None)
     press_el, el, label = hit
+    moved = _focus_moved()
+    if moved:
+        return ("focus_changed", moved)
     try:
         fns["AXUIElementPerformAction"](press_el, "AXScrollToVisible")  # virtualised lists
     except Exception:
@@ -288,6 +387,10 @@ _AXVALUE_CGSIZE = 2   # kAXValueCGSizeType
 # The pressable element refs from the last targets_with_frames() call, indexed to match the returned
 # list — so click_index(n) can AXPress element n without re-walking (the "say a number" step).
 _LAST_TARGETS: list = []
+# …and WHICH app they were read from. The badges the user is answering ("click 14") were drawn over
+# that app's window, so a click on a cached frame is only meaningful while that app is still in
+# front — the gap here is the longest in Vox (the user has to read the badges and speak a number).
+_LAST_TARGETS_PID: int | None = None
 
 
 def _axpair(fns, axval, type_const):
@@ -328,7 +431,7 @@ def targets_with_frames(limit: int = 400, _retry: bool = True, _settle: float | 
     entire content area unbadged (badges looked like they'd piled up in the top-left). A busy Slack
     measured 227 elements, so 400 leaves real headroom; the walk costs ~70 ms whether it's capped or
     not (``_BUDGET``'s node-visit cap dominates) and still guards a runaway tree."""
-    global _LAST_TARGETS
+    global _LAST_TARGETS, _LAST_TARGETS_PID
     fns = _load()
     if not fns:
         return None
@@ -380,7 +483,7 @@ def targets_with_frames(limit: int = 400, _retry: bool = True, _settle: float | 
     #
     # The absolute arm is tried at most ONCE per pid: an app that genuinely has only a handful of
     # clickable elements must not pay the _SETTLE wait on every single enumeration.
-    pid = _frontmost_pid()
+    pid = _target_pid()
     if pid:
         best = _best_count.get(pid, 0)
         thin = len(out) < _THIN_ABSOLUTE
@@ -406,7 +509,7 @@ def targets_with_frames(limit: int = 400, _retry: bool = True, _settle: float | 
             return targets_with_frames(limit, _retry=False, _settle=_RETRY_SETTLE)
         _best_count[pid] = max(best, len(out))
 
-    _LAST_TARGETS = cache
+    _LAST_TARGETS, _LAST_TARGETS_PID = cache, pid
     return out
 
 
@@ -425,10 +528,17 @@ def click_index(i: int):
     Prefers a REAL mouse click at the element's centre — ``AXPress`` reports success on many
     web/Electron controls (Slack sidebar, buttons) yet does nothing, whereas a synthesized click at
     the exact coords we already have actually works. Falls back to AXPress (native controls, no cursor
-    move). Returns ("clicked", label) / ("press_failed", label), or None if the index is stale."""
+    move). Returns ("clicked", label) / ("press_failed", label) / ("focus_changed", app_now), or
+    None if the index is stale.
+
+    The frames are cached from the enumeration that drew the badges, so they only mean anything
+    while THAT app is still in front — hence the same guard as ``click()`` (issue O18)."""
     if not (isinstance(i, int) and 0 <= i < len(_LAST_TARGETS)):
         return None
     press_el, label, frame = _LAST_TARGETS[i]
+    moved = _focus_moved(_LAST_TARGETS_PID)
+    if moved:
+        return ("focus_changed", moved)
     fns = _load()
     if fns is not None:  # bring virtualised/scrolled targets into view before clicking
         try:
@@ -490,3 +600,154 @@ if __name__ == "__main__":
     else:
         print(f"\n{len(_t)} elements.  Press one with:  "
               f"python -m vox.ax --click <N> --delay 3")
+
+
+# --- value setting + frame lookup (idea #61) ---------------------------------------------------
+# `set_value` exists because driving a control by *clicking* it is often several steps: a popup
+# needs a press, a menu walk and a second press; a slider needs a drag with no way to know where
+# 30% is. Setting the AX value says what you mean in one call, and it can't miss by a few pixels.
+
+# Roles whose value is worth setting directly. AXPopUpButton/AXMenuButton go down the menu path
+# below instead — setting their AXValue is accepted and silently ignored by most apps.
+_SETTABLE = ("AXSlider", "AXTextField", "AXTextArea", "AXCheckBox", "AXRadioButton",
+             "AXIncrementor", "AXComboBox")
+
+
+def _find_labelled(fns, root, target: str, roles=None):
+    """Walk for an element labelled `target` (exact wins over substring), optionally restricted to
+    `roles`. Returns (element, label, role) or None. Separate from `click`'s walk because that one
+    resolves to the nearest *pressable ancestor* — here we want the labelled element itself."""
+    tl = (target or "").strip().lower()
+    if not tl:
+        return None
+    found = {"exact": None, "fallback": None, "n": 0}
+
+    def walk(el, depth):
+        if found["exact"] or depth > _MAX_DEPTH or found["n"] > _BUDGET:
+            return
+        found["n"] += 1
+        role = _attr(fns, el, "AXRole") or ""
+        if roles is None or role in roles:
+            nm = _attr(fns, el, "AXTitle")
+            if not (isinstance(nm, str) and nm.strip()):
+                nm = _attr(fns, el, "AXDescription")
+            if isinstance(nm, str) and nm.strip():
+                low = nm.strip().lower()
+                if low == tl:
+                    found["exact"] = (el, nm.strip(), role)
+                    return
+                if found["fallback"] is None and tl in low:
+                    found["fallback"] = (el, nm.strip(), role)
+        for k in (_attr(fns, el, "AXChildren") or []):
+            walk(k, depth + 1)
+            if found["exact"]:
+                return
+
+    try:
+        walk(root, 0)
+    except Exception:
+        return None
+    return found["exact"] or found["fallback"]
+
+
+def _coerce(value: str, role: str):
+    """Turn a spoken value into what the control expects: a number for sliders, a bool for
+    checkboxes, the raw string otherwise."""
+    v = str(value).strip()
+    if role in ("AXCheckBox", "AXRadioButton"):
+        return 1 if v.lower() in ("on", "true", "yes", "checked", "enabled", "1") else 0
+    if role in ("AXSlider", "AXIncrementor"):
+        try:
+            return float(v.rstrip("%"))
+        except ValueError:
+            return v
+    return v
+
+
+def set_value(target: str, value: str):
+    """Set the control labelled `target` to `value`. Returns ("set", label) / ("not_found", None) /
+    ("set_failed", label), or None if native AX is unavailable."""
+    fns = _load()
+    if not fns:
+        return None
+    root = _app_root(fns)
+    if root is None:
+        return None
+
+    hit = _find_labelled(fns, root, target, roles=_SETTABLE)
+    if hit is not None:
+        el, label, role = hit
+        try:
+            err = fns["AXUIElementSetAttributeValue"](el, "AXValue", _coerce(value, role))
+        except Exception:
+            return ("set_failed", label)
+        return ("set", label) if err == 0 else ("set_failed", label)
+
+    # No directly-settable control — try a popup/menu button and pick the matching option.
+    hit = _find_labelled(fns, root, target, roles=("AXPopUpButton", "AXMenuButton"))
+    if hit is None:
+        return ("not_found", None)
+    el, label, _role = hit
+    return _pick_menu_option(fns, el, label, value)
+
+
+def _pick_menu_option(fns, el, label: str, value: str):
+    """Open a popup button and press the menu item matching `value`. This is what "select the
+    matching option directly" costs on macOS: the menu doesn't exist as AX children until the
+    button has been pressed."""
+    import time
+    try:
+        if fns["AXUIElementPerformAction"](el, "AXPress") != 0:
+            return ("set_failed", label)
+    except Exception:
+        return ("set_failed", label)
+    time.sleep(0.15)  # the menu is built on press; nothing to walk until it lands
+
+    want = str(value).strip().lower()
+    try:
+        for menu in (_attr(fns, el, "AXChildren") or []):
+            for item in (_attr(fns, menu, "AXChildren") or []):
+                nm = _attr(fns, item, "AXTitle") or ""
+                if isinstance(nm, str) and nm.strip() and (
+                        nm.strip().lower() == want or want in nm.strip().lower()):
+                    if fns["AXUIElementPerformAction"](item, "AXPress") == 0:
+                        return ("set", f"{label} → {nm.strip()}")
+                    return ("set_failed", label)
+    except Exception:
+        pass
+    try:  # nothing matched — close the menu we opened rather than leaving it hanging
+        from vox import input as vox_input
+        vox_input.press("escape")
+    except Exception:
+        pass
+    return ("set_failed", label)
+
+
+def frame_of(target: str):
+    """Global (x, y, w, h) of the element labelled `target`, or None. Lets callers aim a right-click
+    or a drag at a control they can name, reusing the same lookup `click` uses."""
+    fns = _load()
+    if not fns:
+        return None
+    root = _app_root(fns)
+    if root is None:
+        return None
+    hit = _find_labelled(fns, root, target)
+    if hit is None:
+        return None
+    el, label, _role = hit
+    try:
+        fns["AXUIElementPerformAction"](el, "AXScrollToVisible")
+    except Exception:
+        pass
+    frame = _frame(fns, el)
+    return (label, frame) if frame is not None else None
+
+
+def frame_index(i: int):
+    """(label, frame) for the i-th element of the last ``targets_with_frames()`` call — the badge
+    numbers the overlay drew. None for a stale index or an element with no frame."""
+    if not (isinstance(i, int) and 0 <= i < len(_LAST_TARGETS)):
+        return None
+    _press_el, label, frame = _LAST_TARGETS[i]
+    return (label, frame) if frame is not None else None

@@ -874,6 +874,321 @@ probably not be driving the screen while the user is away from it.
 **Connects to:** #16 (the scheduler this gates), #48 (meetings — presence is a signal there too),
 #57 (agent tier safety).
 
+## 61. Desktop input primitives — scroll · keys · right-click · drag · set (from Hermes)
+
+**Where this came from:** recon on Nous Research's Hermes Agent (see `hermes-comparison.md`). Its
+`computer_use` tool exposes capture · click · double_click · right_click · middle_click · drag ·
+scroll · type · key · set_value · wait · list_apps · list_windows · focus_app. Lining that up against
+Vox surfaced something we'd missed about our own code.
+
+**The gap wasn't the primitives — it was where they lived.** Vox could already scroll, press key
+combos and right-click. But only inside `agent.py`, the tier-4 agent loop: gated off by default,
+needs an Anthropic API key, and burns a multi-second model round-trip deciding to do it. To scroll a
+page you needed `agent_enabled=true`, a key, and ~$0.035 of tokens. There was no way to just say
+"scroll down" and have it happen.
+
+These are CGEvent calls. They cost milliseconds. They belong on the deterministic fast path.
+
+**Built:**
+
+| Primitive | Was | Now |
+|---|---|---|
+| `scroll` | agent tier only | "scroll down", "scroll up 3", "scroll to the top", "page down" |
+| `press` (key combo) | agent tier only, via AppleScript (~200ms) | "press command S", "press escape" — CGEvent, <10ms |
+| `right_click` / `double_click` | agent tier only — **and broken**, see below | "right click Submit", "double click 14" |
+| `drag` | nowhere | "drag 3 to 7", "drag Inbox onto Archive" |
+| `set_value` | nowhere | "set volume to 30", "set theme to dark" |
+| background delivery | nowhere | `input_background_delivery` — drive a window without raising it |
+
+**Bug found on the way:** the agent tier's `right_click` and `middle_click` were posting **left**
+button events. They called `ax._click_at`, which only ever synthesizes a left click. Nobody noticed
+because the tier is off by default. Fixed by routing both through `vox.input`.
+
+**Architecture:** a new `src/vox/input.py` owns the event synthesis; `actions.py` holds the spoken
+argument parsing and the human-readable results; `agent.py` now delegates to the same helpers rather
+than carrying its own copies. One implementation per gesture, two callers.
+
+**Background delivery** is the interesting one, and the only piece taken wholesale from Hermes'
+design. By default Vox posts to the global HID tap (`CGEventPost`) — reliable, but it acts on
+whatever is frontmost and moves your real cursor. With `input_background_delivery` on, events go to
+a specific process (`CGEventPostToPid`) instead. **This is app-dependent and experimental:** AppKit
+apps generally honour posted events; Chromium and Electron frequently ignore posted *mouse* events
+while still accepting keys. Off by default, so the default path is byte-for-byte what Vox did before.
+
+**Worth deciding after testing:**
+- Does background delivery actually work in the apps you use daily, or only in native ones? If it's
+  AppKit-only it might still be worth defaulting on for those and falling back per-app.
+- `set_value` on popup buttons has to press the button and walk the menu (the menu doesn't exist as
+  AX children until pressed). That costs ~150ms of settle time. Acceptable, or should popups stay a
+  click-through?
+- Should `scroll` target the element under the pointer, or the focused window? Right now it's the
+  pointer, which is how the OS behaves — but voice users aren't moving the pointer.
+
+**Learning interaction (#24):** scroll and press have stable identities and are safe to learn.
+`right click 14` is coordinate-shaped — badge indices are no more stable than pixels, and `agent.py`
+already warns that pixels must never enter the command DB. Same reasoning applies.
+
+**Not taken from `computer_use`:** `list_apps`/`list_windows` (we have `running_apps()` /
+`frontmost_app()`; a cross-app window inventory is a smaller want), and the eight `cua_browser_*`
+actions — dialog handling, file upload and download are real gaps but belong with the web-navigation
+work, not here.
+
+**Connects to:** #52 (the overlay whose badge numbers these reuse), #57 (the agent tier they were
+trapped in), #12 (the executor can now reach them), #24 (what's safe to learn).
+
+## 62. Silent notification bubble — the quiet sibling of the speak MCP
+
+**Where this came from:** the vox-speak MCP (#34) is the most-used piece of the whole project — an
+agent in the IDE says "the workflow is finished" out loud so you don't have to watch the screen. The
+gap is obvious once you've lived with it: **speaking is the only channel.** In a meeting, on a call,
+or when three agents finish inside a minute, an audible heads-up is the wrong tool and the answer is
+to turn it off entirely — which loses the notification too.
+
+**Built (2026-08-31):** `src/vox/bubble.py` + a `notify` tool on the vox-speak MCP. A small rounded
+HUD card fades into a screen corner, holds for a few seconds, and fades out. Silent.
+
+**It reuses the hard-won part of `overlay.py` (#52):** the helper-process pattern. The daemon is a
+single blocking audio loop with no `NSApplication` run loop, and a visible `NSWindow` whose main
+thread never services its run loop beachballs the entire app. So the card is drawn by a short-lived
+child (`python -m vox.bubble --helper <json>`) that owns its own run loop. The MCP server has the
+same problem with its stdio loop, and the same fix works for it.
+
+Non-negotiables, all inherited from the overlay: `NSApplicationActivationPolicyProhibited` (no Dock
+icon, can never become active), `setIgnoresMouseEvents_` (click-through — it can never eat a click),
+`NSWindowSharingNone` (stays out of screen recordings, **and** out of Vox's own `LOOK:` screenshots,
+so a notification about one task can't become input to the next), and joins all Spaces.
+
+Shows on `NSScreen.mainScreen()` — the display holding the active window, i.e. the one you're
+actually looking at, which on a laptop-plus-monitor setup is the whole difference between a useful
+notification and one you never see.
+
+**Stays until you close it.** `bubble_duration` defaults to **0** — a notification that faded while
+you were looking at another window did nothing. The card carries a ✕.
+
+**That ✕ forced the interesting design decision.** A dismissible card can't be mouse-transparent, and
+a normal `NSWindow` would have to *activate the app* to handle the click — stealing focus, the one
+thing this must never do. The fix is an `NSPanel` with `NSWindowStyleMaskNonactivatingPanel`, which
+takes the click without activating. Cost: while a card is up, that corner isn't click-through.
+
+**It says who sent it.** The card is labelled with the sender's registered name (#39 —
+`vox.agents` + `register_agent`), because with several CLIs running an unattributed notification
+tells you something finished but not what.
+
+**Settings:** `bubble_corner`, `bubble_duration`, `bubble_max_width`, live from the dashboard
+(Settings -> Notifications), no restart.
+
+**Known limit, deliberate:** a second bubble replaces the first rather than stacking. Two cards cover
+more screen than one notification is worth, and the MCP caller still gets a return value either way.
+Revisit if async agents actually make simultaneous finishes common.
+
+**Connects to:** #34 (the speak MCP this is the silent half of), #52 (the overlay whose helper-process
+pattern it reuses), #39 (whose registered names label the card), and the async-agent escalation idea —
+the bubble is the return channel that makes handing a task off to a background agent bearable.
+
+## 63. One voice at a time — the cross-process speech queue
+
+> **Status:** ✅ BUILT 2026-08-31 (`src/vox/speech_lock.py`). Closes the "overlapping speech" risk
+> that `named-agents.md` flagged and deferred.
+
+Vox's daemon and every agent's vox-speak MCP server are **separate processes**, each free to start
+talking whenever it likes. Two agents finishing inside a minute, or Vox answering you while an agent
+announces a build, produces audio you can't parse — and you lose *both* messages, not one.
+
+An `fcntl.flock` on `data/speaking.lock`, taken by `tts.speak()` and `tts.speak_with()`. It's the one
+coordination primitive every process already shares without inventing IPC, and the OS releases it
+when a holder crashes. The lock file records who holds it, so `speech_lock.holder()` — and
+`cat data/speaking.lock` — answer "who is talking?".
+
+**The timeout is a deadlock guard, not a queue policy.** If the process ahead never releases, we
+speak anyway. A voice assistant that has gone silent is a worse failure than one overlap, and this
+codebase has already been bitten by exactly that shape of bug (the Kokoro streaming player
+deadlocking the voice loop). `speech_queue_timeout`, default 15s.
+
+**Open:** the wait is symmetric, and arguably shouldn't be. An agent's announcement waiting on Vox is
+free — it's async. Vox waiting on an agent is not: you asked Vox something and it goes quiet. If that
+asymmetry is felt in use, the daemon should get a shorter wait than the MCP servers.
+
+**Connects to:** #39 (named agents, which is what makes several speakers likely), #34, #62.
+
+## 64. The warm brain — stop paying Claude SDK cold-start on every utterance
+
+> **Where this came from:** recon on [backtalk](https://github.com/jaredrhod/backtalk), see
+> [`backtalk-comparison.md`](backtalk-comparison.md). He gets first audio in 1-2s from the full
+> Claude Code harness. We take many seconds for the same thing, and the reason is four lines.
+
+**The bug is in `assistant._claude_sdk` (`src/vox/assistant.py:508`).** It calls the Agent SDK's
+`query()` — which **spawns a fresh Claude Code session per utterance**: process start, tool
+discovery, system prompt, project context, every single time. Then it does
+`return "".join(parts).strip()`, so nothing reaches TTS until the entire reply has generated. Then
+it re-serialises the whole conversation into the next prompt, because a cold session remembers
+nothing.
+
+This is the **big brain** (`big_brain_provider = "claude_sdk"`, `claude-opus-4-8`) — vision,
+`_click_fuzzy`, every chat escalation. The slow path is the one that runs when Vox is doing
+something hard.
+
+**The fix, both halves from Anthropic's own Agent SDK docs:**
+
+1. **`ClaudeSDKClient` held open** instead of `query()` per turn. Anthropic's guidance verbatim:
+   *"For low-latency interactive apps: use ClaudeSDKClient with a persistent connection."* The
+   session also holds the history, so we stop resending a growing transcript into a cold cache.
+2. **`include_partial_messages=True`** → buffer `StreamEvent` text deltas, split on
+   `(?<=[.!?])\s`, and yield each complete sentence. TTS starts on sentence one while sentence four
+   is still forming. **Cheap for us specifically:** `tts._speak_kokoro_streaming` + `_split_chunks`
+   already speak incrementally and `_StreamingPlayer` is already killable for barge-in. The missing
+   link is upstream — `assistant.respond()` / `complete()` return `str`, so add a generator variant
+   beside them rather than changing either.
+
+**Ship the desync guard FIRST, not after.** The SDK has one shared message stream and
+`receive_response()` stops at the first `ResultMessage` with no query/response pairing. Interrupt a
+turn without draining it and the leftovers pair with the *next* query — from then on every answer
+is one question late, for the rest of the session. Anthropic's docs confirm the requirement;
+backtalk's `reset_turn()` documents having lived it. **Vox has barge-in**, so we hit this condition
+by design, not by accident. Guard shape: a `_dirty` flag set on query and cleared only on
+`ResultMessage`, a bounded drain, and a session rebuild if the drain fails.
+
+**Also free:** `system_prompt={"type": "preset", "preset": "claude_code", "append": …}` instead of
+replacing the preset outright (we currently pass `system_prompt=system`, discarding the harness
+prompt), and `exclude_dynamic_sections: True`, which moves cwd/git details out of the cached prefix
+so it stops varying per machine and directory.
+
+**Not a reason to leave the Agent SDK.** We pass `allowed_tools=[]` — full harness, no harness
+benefit — which looks like the wrong surface until you remember the Agent SDK is the only way to
+bill against a **Claude subscription**; the Messages API needs an API key. The harness cost is the
+price of no-per-token-cost. Pay it once per session instead of once per utterance.
+
+> **⚠️ SCOPE: this is a BIG-BRAIN fix only. Do not try it on the small brain.** Established
+> 2026-09-01, so nobody re-reads this in a month and reaches for it on the command path:
+>
+> 1. **Streaming buys the command path nothing.** The executor needs a COMPLETE directive
+>    (`CLICK: x`) before it can act. Sentence-by-sentence yielding is worth everything to a speaker
+>    and nothing to a parser — and "first audio in 1-2s" is the number streaming flatters.
+> 2. **Warm still carries the `claude_code` system preset** on every turn. Fine amortised across a
+>    spoken conversation; not fine on a sub-second command hop.
+> 3. **The constraint is structural.** Subscription billing → Agent SDK → harness overhead →
+>    seconds. Sub-second → a plain API call → per-token cost. You cannot have both on the hot path,
+>    which is why the small-DeepSeek / big-subscription split is the RIGHT architecture.
+
+**⚠️ Licence:** backtalk is AGPL-3.0. Read it for the traps, write ours from Anthropic's docs —
+same call we made declining `kan` for the board.
+
+**Connects to:** #57 (the agent tier), #19 (barge-in, which makes the desync guard mandatory),
+and the async-agent escalation thread — a warm client is also what makes handing work to a
+background agent cheap.
+
+## 65. Give the big brain a harness — files and tools, without the Claude Code tax
+
+**The want:** the big brain should be able to *do* things — read and edit files, run a command —
+not just answer. Today `_claude_sdk` passes `allowed_tools=[]`, so we boot the entire Claude Code
+harness and then forbid it from using any of it. The agent tier (#57) can act on the *screen*, but
+nothing in Vox can act on the *filesystem*.
+
+**Candidate: [Pi](https://pi.dev) (Mario Zechner).** Worth a real look, for three reasons that map
+onto constraints we've already hit:
+
+- **MIT licensed.** This is the one that matters. We turned down `kan` (AGPL) for the board and
+  we're keeping backtalk (AGPL) at arm's length for #64. MIT means we can actually read and use it.
+- **~200-token system prompt, four tools** (read · write · edit · bash), with a lazy-loading skill
+  system that injects instructions only when needed. Compare Claude Code's preset, which is the
+  overhead #64 is working around. Databricks' internal benchmark reportedly had Pi at the highest
+  pass rate on Opus 4.8/xhigh **at lower cost**, because it sent ~3x less context per turn.
+- **Model-agnostic** — 37+ models across 20+ providers, so the harness doesn't dictate the brain.
+
+**The two honest problems:**
+
+1. **It's TypeScript; we're Python.** Integration is a subprocess/CLI boundary or a bridge, not an
+   import. That's the real cost of this idea and it should be priced before anyone commits.
+2. **It probably can't reach the Claude subscription.** Provider-agnostic means API keys. The
+   subscription is only reachable through Claude Code / the Agent SDK. So this is a genuine fork,
+   not a free upgrade:
+   - **Agent SDK (#64):** subscription billing, no per-token cost, heavy harness.
+   - **Pi:** light harness, tool use, MIT — but back to paying per token.
+
+   Those are different bets and we should make the choice deliberately rather than drift into one.
+
+**Sequencing:** this sits *behind* #64. Warm the brain we already have first — that's a measured
+win on the path we already use. Only then decide whether a second harness earns its integration
+cost. Nothing here blocks anything.
+
+**Also worth watching:** OpenCode, named alongside Pi as the other serious open harness (bigger
+community, less minimal). Not evaluated.
+
+**Connects to:** #64 (the warm brain, which this would sit beside or replace), #57 (the on-screen
+agent tier — a filesystem harness is the missing half), #38 (coding brain), and the async-agent
+escalation thread, where "go do this in the background" needs exactly a tool-capable harness.
+
+## 66. Vox's control surface as MCP tools — give the agent hands, not a loop
+
+**The inversion:** everyone else is building an agent *into* their assistant. This does the
+opposite — it hands Vox's existing primitives to an agent that already exists. Cheaper, and better
+at the one thing Vox is genuinely best at.
+
+**Why this beats what the big labs shipped.** ChatGPT's Computer Use (see
+[`chatgpt-desktop-comparison.md`](chatgpt-desktop-comparison.md)) is an agentic loop: screenshot →
+reason → click → re-screenshot. Press coverage clocked eight chess moves in three minutes. Vox's
+`ax.click` is a **~77ms deterministic AX lookup with no model in the loop**. Exposed over MCP, an
+agent gets sub-second GUI control instead of a reasoning loop — and picks targets by real accessibility
+label rather than guessing at pixels.
+
+We already have the hard parts. This is mostly plumbing.
+
+### Stage 1 — read tools (do these first)
+
+| MCP tool | Backed by |
+|---|---|
+| `frontmost_app` | `actions.frontmost_app()` |
+| `running_apps` | `actions.running_apps()` |
+| `clickable_targets` | `actions.clickable_targets(limit=300)` — frame-filtered, on-screen only |
+| `visible_targets` | `targets.visible_targets()` — DOM on a page, AX natively |
+| `environment_context` | `actions.environment_context()` — focused app + open tabs |
+| `read_window` | the AX tree of the frontmost window as text |
+
+Low risk of *damage*, immediately useful, and they make stage 2 better when it arrives: an agent
+that can read structure asks to click `"Submit"`, not `(1877, 68)`.
+
+This is essentially ChatGPT's **Appshots**, except the agent can request it instead of the human
+hitting a hotkey — and it returns structured text rather than an image, which is cheaper and exact.
+
+> **"Low risk" means damage, NOT privacy.** Reading the AX tree exposes whatever is on screen —
+> messages, a password manager, a private document — to whichever model the agent is running on.
+> `capture_screen()` is worse again because it is indiscriminate. Whatever we ship needs an app
+> deny-list on the READ side too, not only the write side. Don't let the staging imply reads are safe.
+
+### Stage 2 — write tools (behind a gate)
+
+`click_element` · `click_index` · `type_text` · `press` · `scroll` · `drag` · `set_value`
+(from `actions.py`, `ax.py`, `input.py` — all built, see #61).
+
+**The threat model is different from Vox's own control path, and that is the whole problem.** When
+Vox clicks something, a human said so out loud. When an MCP tool fires, *a model decided to*. Same
+primitives, no person in the loop.
+
+`press` is the sharp edge: keyboard control over Terminal is arbitrary code execution wearing a
+different hat. `agent_denied_apps` (Terminal, iTerm, Cursor, Warp, System Settings) already exists
+for exactly this and must apply here; the Hermes doc's reasoning for deferring a shell
+([`hermes-comparison.md`](hermes-comparison.md)) applies unchanged. Add a per-call confirm on the
+destructive verbs — backtalk solved its version with a spoken permission gate, which is a good model.
+
+**Depends on #61's background delivery** (`input_background_delivery`), so an agent can drive a
+window without raising it or taking the pointer out of your hands. That is still **untested** —
+item B on the standing list — so it is a real dependency, not a given.
+
+### Open questions
+
+- **Which server?** Bolting this onto `vox-speak` makes one server that both talks and acts — simple,
+  but then anything wired for notifications also gets hands. A separate `vox-control` server that you
+  add deliberately is probably the right call.
+- **Does the daemon need to be running?** The read tools go through `vox.ax` directly and don't, which
+  is a nice property: an agent could use them with Vox switched off.
+- **Overlap with the agent tier (#57).** That tier drives the screen from *inside* Vox with its own
+  model loop. If an external agent can do it better, #57 may be the thing that gets retired rather
+  than extended.
+
+**Connects to:** #61 (the primitives, and the background-delivery dependency), #52 (badge numbers an
+agent could address), #57 (the tier this may replace), #65 (a harness is the other way to get here),
+#34/#62 (the MCP this would sit beside), and the async-agent escalation thread — "go do this in the
+background" is much more useful when the background agent has hands.
+
 ## Sequencing note
 
 > **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation.

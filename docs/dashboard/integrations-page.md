@@ -11,6 +11,12 @@ vox-speak is a tiny MCP server (`mcp/vox_speak_server.py`) that gives the user's
 call a `speak` / `announce_done` tool to talk out loud while the user works. The
 page:
 
+> **⚠️ This page's copy is out of date (2026-08-31).** The server now also exposes `notify` (a
+> silent on-screen bubble, ideas #62), and `register_agent` / `whoami` / `list_agents` (named
+> agents, ideas #39). The hero still describes it as speech-only, and the setup block's `env`
+> doesn't mention `VOX_AGENT_NAME`. See `mcp/README.md` for the current tool list. Updating
+> `Integrations.tsx` needs a `dashboard/dist` rebuild, so it's a separate change.
+
 - **Hero** — explains what vox-speak does in plain language, plus an "install
   the dependency" hint (`uv add mcp`) with a copy button.
 - **Local-only note** — a guarded `ShieldCheck` card stating the config is

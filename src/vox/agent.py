@@ -36,6 +36,7 @@ import threading
 import time
 
 from vox import actions, assistant
+from vox import input as vox_input
 from vox.config import CONFIG
 
 # Set while a run is in flight so a second one can't start (one set of hands on the machine).
@@ -296,7 +297,6 @@ def _denied_app() -> str | None:
 def _do_computer(inp: dict, screen: Screen) -> tuple[str, bool]:
     """Run one `computer` action. Returns (result text, screen_changed)."""
     import Quartz
-    from vox import ax
 
     action = (inp or {}).get("action", "")
 
@@ -322,11 +322,13 @@ def _do_computer(inp: dict, screen: Screen) -> tuple[str, bool]:
             except Exception as exc:
                 return (f"Error moving the mouse: {exc}", False)
             return (f"Moved the pointer to ({coord[0]}, {coord[1]}).", False)
+        # Delegate to vox.input so the agent tier and the deterministic "right click X" command
+        # share one implementation. This also fixes right/middle click, which used to post
+        # LEFT-button events here (ax._click_at only ever synthesizes a left click).
+        button = {"right_click": "right", "middle_click": "middle"}.get(action, "left")
         clicks = {"double_click": 2, "triple_click": 3}.get(action, 1)
         try:
-            for _ in range(clicks):
-                ax._click_at(x, y)
-                time.sleep(0.05)
+            vox_input.click_at(x, y, button=button, clicks=clicks)
         except Exception as exc:
             return (f"Error clicking: {exc}", False)
         time.sleep(0.4)  # let the UI settle before the next screenshot
@@ -352,24 +354,11 @@ def _do_computer(inp: dict, screen: Screen) -> tuple[str, bool]:
         coord = inp.get("coordinate") or []
         direction = (inp.get("scroll_direction") or "down").lower()
         amount = int(inp.get("scroll_amount") or 3)
-        try:
-            if len(coord) == 2:
-                x, y = screen.to_screen(coord[0], coord[1])
-                ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved,
-                                                    Quartz.CGPointMake(x, y), Quartz.kCGMouseButtonLeft)
-                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
-            dy = {"up": amount, "down": -amount}.get(direction, 0)
-            dx = {"left": amount, "right": -amount}.get(direction, 0)
-            for _ in range(abs(amount) or 1):
-                ev = Quartz.CGEventCreateScrollWheelEvent(
-                    None, Quartz.kCGScrollEventUnitLine, 2,
-                    3 if dy > 0 else (-3 if dy < 0 else 0),
-                    3 if dx > 0 else (-3 if dx < 0 else 0))
-                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
-                time.sleep(0.03)
-        except Exception as exc:
-            return (f"Error scrolling: {exc}", False)
+        at = screen.to_screen(coord[0], coord[1]) if len(coord) == 2 else None
+        res = vox_input.scroll(direction, amount, at=at)
         time.sleep(0.3)
+        if res.startswith("failed"):
+            return (f"Error scrolling: {res}", False)
         return (f"Scrolled {direction}.", True)
 
     if action == "wait":
@@ -379,34 +368,12 @@ def _do_computer(inp: dict, screen: Screen) -> tuple[str, bool]:
     return (f"Error: Vox doesn't support the {action!r} action.", False)
 
 
-_KEY_MAP = {
-    "cmd": "command", "super": "command", "meta": "command", "win": "command",
-    "ctrl": "control", "opt": "option", "alt": "option",
-    "enter": "return", "esc": "escape",
-}
-
-
 def _press_combo(combo: str) -> str:
-    """Press a key combination like 'cmd+s' or 'Return' via AppleScript keystroke/key code."""
-    parts = [p.strip().lower() for p in str(combo).replace("-", "+").split("+") if p.strip()]
-    if not parts:
-        return "Error: no key given."
-    mods = [_KEY_MAP.get(p, p) for p in parts[:-1]]
-    key = _KEY_MAP.get(parts[-1], parts[-1])
-    special = {"return": 36, "tab": 48, "space": 49, "delete": 51, "escape": 53,
-               "left": 123, "right": 124, "down": 125, "up": 126}
-    using = (" using {" + ", ".join(f"{m} down" for m in mods) + "}") if mods else ""
-    if key in special:
-        script = f'tell application "System Events" to key code {special[key]}{using}'
-    else:
-        script = f'tell application "System Events" to keystroke "{key}"{using}'
-    try:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
-            return f"Error pressing {combo}: {r.stderr.strip()}"
-    except Exception as exc:
-        return f"Error pressing {combo}: {exc}"
-    return f"Pressed {combo}."
+    """Press a key combination like 'cmd+s' or 'Return'. Delegates to `vox.input` (idea #61) so the
+    agent tier and the deterministic "press command S" command share one implementation — and so the
+    agent gets CGEvent presses (<10ms) instead of an osascript round-trip (~200ms)."""
+    res = vox_input.press(combo)
+    return f"Error pressing {combo}: {res}" if res.startswith("failed") else f"Pressed {combo}."
 
 
 def _dispatch(name: str, inp: dict, screen: Screen) -> tuple[str, bool]:

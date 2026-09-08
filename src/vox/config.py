@@ -62,6 +62,11 @@ class Config:
     dictate_phrases: tuple[str, ...] = ("start typing", "start dictation", "begin typing", "dictate")
     # True: a long pause auto-exits dictation (can't get stuck). False: stay until "stop typing".
     dictation_exit_on_silence: bool = True
+    # How long dictation tolerates SILENCE before exiting, measured on the wall clock. A single
+    # empty capture window used to end dictation, which is why it stopped mid-sentence: the window
+    # is counted in frames, so a mic backlog from a slow Whisper pass could satisfy it instantly
+    # from stale audio. 45s is a thinking pause; 6s was a breath. (issues.md O15)
+    dictation_idle_exit_seconds: float = 45.0
 
     # --- Dashboard (Vox Control Center) --- a local web UI served by an embedded FastAPI
     # bridge (vox.web.server), opened hands-free by an "open dashboard" wake phrase. Entirely
@@ -296,6 +301,15 @@ class Config:
     # is frontmost the agent refuses raw coordinate clicks — the AX-label path still works.
     agent_denied_apps: tuple[str, ...] = ("Terminal", "iTerm2", "iTerm", "Cursor", "Warp", "System Settings")
 
+    # --- Desktop input primitives (idea #61) ---
+    # Background delivery aims synthesized events at a specific process (CGEventPostToPid) instead
+    # of the global HID tap, so Vox can drive a window without raising it or moving your pointer.
+    # OFF by default because it is app-dependent: AppKit apps generally honour posted events,
+    # Chromium/Electron often ignore posted MOUSE events (keys usually still land). Off = exactly
+    # the behaviour Vox had before this existed, so turning it on can only be an experiment.
+    input_background_delivery: bool = False
+    input_scroll_amount: int = 5     # default wheel lines for a bare "scroll down"
+
     # --- Voice output (TTS) --- macOS `say`: local, instant, no model download. Swap for a
     # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →
     # Accessibility → Spoken Content → System Voice → Manage Voices.
@@ -333,6 +347,29 @@ class Config:
     # A short chime played just BEFORE the MCP speaks, so an IDE heads-up doesn't come out of
     # nowhere (the most-used MCP flow: "tell me out loud when you're done"). "" disables it.
     mcp_speak_cue: str = "/System/Library/Sounds/Tink.aiff"
+
+    # --- Notification bubble --- the SILENT sibling of the speak MCP: a small card in a screen
+    # corner instead of a spoken heads-up, for when you're in a meeting, on a call, or several
+    # agents finish at once. Drawn by vox.bubble in a helper process; click-through, never steals
+    # focus. Used by the vox-speak MCP's `notify` tool.
+    bubble_corner: str = "top-right"   # top-right | top-left | bottom-right | bottom-left
+    # Seconds on screen before it fades out. 0 = STAY UNTIL DISMISSED (the default): a notification
+    # you missed while looking at another window did nothing. Close it with the card's ✕.
+    bubble_duration: float = 0.0
+    bubble_max_width: int = 380        # card width in points; the height fits the wrapped text
+
+    # --- Speech queue --- Vox and every agent's MCP server are SEPARATE processes, each able to
+    # start speaking whenever it likes. Two voices at once is unlistenable, so all speech takes a
+    # cross-process lock and waits its turn (see vox/speech_lock.py). The timeout is a deadlock
+    # guard, not a queue policy: if the holder never releases, speaking anyway beats a voice loop
+    # that has gone silent — the same failure mode as the Kokoro streaming-player deadlock.
+    speech_queue_enabled: bool = True
+    speech_queue_timeout: float = 15.0   # seconds to wait for the speaker ahead of you
+    # The HOLD is bounded too (issue O13): a speaker wedged inside the lock would otherwise own it
+    # until its process dies and make every other speaker pay the full wait, every utterance. A
+    # watchdog releases after this many seconds, and a waiter seeing a hold this old goes ahead
+    # immediately. Keep it comfortably longer than the longest real utterance.
+    speech_queue_max_hold: float = 30.0
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.

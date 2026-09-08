@@ -28,13 +28,16 @@ _insets: dict[int, tuple[float, float]] = {}
 
 
 def _frontmost():
-    """(pid, app name) of the frontmost app, or (None, "")."""
-    try:
-        from AppKit import NSWorkspace
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return (app.processIdentifier(), app.localizedName() or "") if app else (None, "")
-    except Exception:
-        return (None, "")
+    """(pid, app name) of the app this utterance is aimed at, or (None, "").
+
+    The PINNED app when a caller has pinned one (``ax.pinned_to``), else the live frontmost. The pin
+    matters here as much as in ``ax``: routing is by app name, so a stale answer doesn't merely read
+    the wrong tree, it sends the whole call down the wrong branch — the browser's DOM path or the
+    native AX path (issue O18)."""
+    p = ax.pinned()
+    if p:
+        return p
+    return ax.frontmost_verified() or ax.frontmost() or (None, "")
 
 
 def _webarea_frame(fns, root, want=None):

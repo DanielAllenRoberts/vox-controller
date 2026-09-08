@@ -311,6 +311,44 @@ class VPIOMicStream:
             pass
 
 
+def input_devices() -> list[dict]:
+    """Every input-capable audio device, as ``{value, label}`` for the dashboard's mic dropdown.
+
+    Keyed by NAME, not index. Indices shift the moment you plug in headphones or a dock — a saved
+    index silently starts pointing at a different microphone, which is exactly the failure this
+    setting exists to fix. sounddevice accepts a name and matches it, so the name is both stabler
+    and readable in the UI. Fully guarded: no audio backend → an empty list → the dropdown shows
+    only "System default" rather than the whole page erroring.
+    """
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return []
+    out, seen = [], set()
+    for d in devices:
+        name = (d.get("name") or "").strip()
+        if not name or int(d.get("max_input_channels") or 0) < 1 or name in seen:
+            continue  # output-only devices can't be a microphone; names can repeat across APIs
+        seen.add(name)
+        ch = int(d["max_input_channels"])
+        out.append({"value": name, "label": f"{name} ({ch} ch)"})
+    return out
+
+
+def resolve_device(value):
+    """Turn a stored setting into something sounddevice accepts: None (system default), an int
+    index, or a device name. Accepts both because ``input_device`` was an int index before this
+    was settable from the dashboard, and an existing config must keep working."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return int(text) if text.lstrip("-").isdigit() else text
+
+
 def open_mic_stream(cfg, out=None):
     """Open the mic backend chosen by config, with a hard fallback to the sounddevice MicStream.
 
@@ -324,14 +362,24 @@ def open_mic_stream(cfg, out=None):
 
     Returns an UNSTARTED stream; the caller enters it as a context manager exactly like MicStream.
     """
+    device = resolve_device(_setting("input_device", cfg.input_device))
+    # ALWAYS name the device, including the system-default case — that is the one that silently
+    # changes under you. A headphone connecting can move the default onto AirPods mid-session, and
+    # nothing in the log said so; Vox just stopped hearing anything and looked frozen.
+    try:
+        name = sd.query_devices(device, kind="input")["name"]
+    except Exception:
+        name = "unknown"
+    origin = "configured" if device is not None else "SYSTEM DEFAULT (can change under you)"
+    print(f"🎙️  mic: {name!r} — {origin}")
     if _setting("audio_aec", cfg.audio_aec):
         try:
-            stream = VPIOMicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device)
+            stream = VPIOMicStream(cfg.sample_rate, cfg.frame_samples, device)
             print("🎙️  mic: native VoiceProcessingIO (AEC) backend active")
             return stream
         except Exception as exc:
             print(f"⚠️  VPIO/AEC mic unavailable ({exc}); falling back to sounddevice mic")
-    return MicStream(cfg.sample_rate, cfg.frame_samples, cfg.input_device,
+    return MicStream(cfg.sample_rate, cfg.frame_samples, device,
                      on_log=(out.emit if out is not None else None),
                      stall_restart_seconds=getattr(cfg, "mic_stall_restart_seconds", 12.0))
 

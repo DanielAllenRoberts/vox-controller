@@ -19,6 +19,18 @@ from vox.config import CONFIG
 # Singleton background thread (started once from the daemon).
 _THREAD: "_FocusThread | None" = None
 
+# The last (pid, name) the watcher saw in front. It already pays an authoritative System Events call
+# every poll, so this is the cheapest trustworthy answer to "which app is the user on?" anywhere in
+# Vox — and the accessibility engine needs the PID, not just the name, to aim a click at the right
+# app (issue O18). At most one poll old; anything that presses re-checks before it acts.
+_LAST: tuple[int, str] | None = None
+
+
+def last() -> tuple[int, str] | None:
+    """(pid, name) of the app the watcher last saw in front, or None if it hasn't seen one yet
+    (watcher disabled, or the very first poll hasn't landed)."""
+    return _LAST
+
 
 class _FocusThread(threading.Thread):
     """Polls the frontmost app every ~poll seconds; logs each change. Guarded so a bad poll
@@ -42,8 +54,12 @@ class _FocusThread(threading.Thread):
             self._poll_once(actions)
 
     def _poll_once(self, actions) -> None:
+        global _LAST
         try:
-            app = actions.frontmost_app()
+            hit = actions.frontmost_app_pid()
+            app = hit[1] if hit else ""
+            if hit:
+                _LAST = hit  # refreshed every poll, not just on a change — the pid is what AX needs
             if app and app != self._last:
                 self._last = app
                 self._out.emit(f"  👁  window in view: {app}")

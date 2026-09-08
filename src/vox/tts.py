@@ -31,6 +31,7 @@ import tempfile
 import threading
 import wave
 
+from vox import speech_lock
 from vox.config import CONFIG
 
 
@@ -65,6 +66,15 @@ def _persona_voice(field: str) -> str:
 def speak(text: str) -> None:
     if not _setting("tts_enabled", CONFIG.tts_enabled) or not text.strip():
         return
+    # Wait for any agent that's already talking — Vox and each MCP server are separate processes
+    # and would otherwise speak over each other (see vox/speech_lock.py).
+    with speech_lock.hold("vox"):
+        _speak_now(text)
+
+
+def _speak_now(text: str) -> None:
+    """The engine ladder, split out of speak() so the speech-queue lock wraps exactly one call and
+    the kokoro→say fallthrough below stays byte-for-byte what it was."""
     if _setting("tts_engine", CONFIG.tts_engine) == "kokoro":
         # The streaming/killable player (sounddevice OutputStream) exists ONLY for interruptible
         # speaking (talk-over). It's heavier and its stream-finish detection has hung in the field
@@ -85,14 +95,25 @@ def speak(text: str) -> None:
 
 
 def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
-               rate=None, speed=None) -> None:
+               rate=None, speed=None, label: str = "") -> None:
     """Speak `text` with EXPLICIT engine/voice overrides, bypassing the active persona's voice and
     the global tts_enabled gate. Used by the vox-speak MCP so the assistant's heads-up voice can be
     DIFFERENT from the system's (and can independently use the neural Kokoro engine). `engine` "" =
     follow the live system setting; a say/kokoro value pins it. Any Kokoro failure falls back to
-    `say`, exactly like speak(). Always speaks when asked (it's a deliberate tool call)."""
+    `say`, exactly like speak(). Always speaks when asked (it's a deliberate tool call).
+
+    `label` names this speaker in the shared speech queue (e.g. a registered agent name), so the
+    lock file says who you're waiting for."""
     if not text.strip():
         return
+    with speech_lock.hold(label or "mcp"):
+        _speak_with_now(text, engine=engine, say_voice=say_voice, kokoro_voice=kokoro_voice,
+                        rate=rate, speed=speed)
+
+
+def _speak_with_now(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
+                    rate=None, speed=None) -> None:
+    """The engine ladder for speak_with — split out for the same reason as _speak_now."""
     eng = engine or _setting("tts_engine", CONFIG.tts_engine)
     if eng == "kokoro":
         try:

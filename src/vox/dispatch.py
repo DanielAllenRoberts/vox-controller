@@ -231,6 +231,10 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
                 return (True, f"clicked #{n} ({res[1]})")
             if res and res[0] == "press_failed":
                 return (True, f"found #{n} ({res[1]}) but couldn't press it")
+            if res and res[0] == "focus_changed":
+                # Badge frames belong to the app that was in front when they were drawn. Say why
+                # nothing happened — "no #14 on screen" would send you looking for the wrong bug.
+                return (True, f"{actions.FOCUS_MOVED} #{n} — {res[1]} came to the front instead.")
             return (True, f"no #{n} on screen")
         if any(c in t for c in _CANCEL_PHRASES):  # "hide clickable", "cancel", "escape", …
             return (True, "hidden")

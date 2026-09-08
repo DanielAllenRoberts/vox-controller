@@ -502,6 +502,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     if not _setting("llm_executor_enabled", CONFIG.llm_executor_enabled):
         return False, assistant.respond(text, history)
 
+    # Which app this utterance is about, captured NOW — before the LLM round-trip below, which is
+    # the longest gap in Vox between the user speaking and something being pressed. Asking again
+    # afterwards is issue O18: focus has often moved on, and the click lands in the wrong app.
+    aim = actions.focus_target()
+
     # A 'yes' to our earlier 'Did you mean <X>?' click prompt → just click <X> (deterministic, no
     # second LLM round-trip). Anything other than an affirmation falls through to the brain below.
     cand = _confirmed_click_target(text, history)
@@ -623,11 +628,19 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         return True, "On it — say stop or press escape to cancel."
     if upper.startswith("CLICK:"):
         target = raw.split(":", 1)[1].strip()
-        # Fast path: the targeted AXPress finder (Electron-aware, early-exit). Only if it can't find
-        # the target verbatim do we fall back to listing the screen + letting the brain pick (slower).
-        result = actions.click_element(target)
-        if not result.lower().startswith("clicked"):
-            result = _click_fuzzy(target)
+        # Everything from here on talks to the app captured BEFORE the round-trip above — the
+        # verbatim finder, the enumeration the brain reads, the screenshot it looks at and the
+        # eventual press all see one app (issue O18).
+        from vox import ax
+        with ax.pinned_to(*(aim or (0, ""))):
+            # Fast path: the targeted AXPress finder (Electron-aware, early-exit). Only if it can't
+            # find the target verbatim do we fall back to listing the screen + letting the brain
+            # pick (slower). A click REFUSED because focus left that app is not a miss — retrying it
+            # would just click whatever is in front now, so say so instead.
+            result = actions.click_element(target)
+            if not (result.lower().startswith("clicked")
+                    or result.startswith(actions.FOCUS_MOVED)):
+                result = _click_fuzzy(target)
         assistant._dbg("[executor]", f"decision=CLICK target={target!r} → {result!r}")
         clicked = result.lower().startswith("clicked")
         _observe(text, "click", target, success=clicked)

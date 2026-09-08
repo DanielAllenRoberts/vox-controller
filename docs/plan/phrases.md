@@ -38,6 +38,14 @@
 | Chain commands | "<cmd> and <cmd>" — e.g. "open Arc and search this" | runs both (only when both parse) |
 | Close tab | "close tab", "close this tab" | ⌘W |
 | Show/hide tabs | "show tabs", "hide tabs", "toggle sidebar" | toggles Arc's sidebar |
+| **Scroll** | "scroll down", "scroll up", "scroll down 3", "scroll down five" | wheel scroll at the pointer (default 5 lines) |
+| **Scroll to an end** | "scroll to the top", "scroll to the bottom" | ⌘↑ / ⌘↓ — a jump, not a pile of ticks |
+| **Page** | "page up", "page down" | Page Up / Page Down |
+| **Press a key** | "press command S", "press escape", "hit enter", "press command shift four" | spoken digits and modifier names work; an unknown key falls through to the LLM so "press submit" still means click |
+| **Right click** | "right click Submit", "right click 14" | by control label, or a badge number from "show clickable" |
+| **Double click** | "double click Inbox", "double click 7" | same targets as right click |
+| **Drag** | "drag 3 to 7", "drag Inbox onto Archive" | either side a badge number or a label |
+| **Set a value** | "set volume to 30", "set theme to dark" | sliders, text fields, checkboxes and dropdowns, set directly via AX |
 | Dictation | "start typing" → speak → "stop typing" | types at the cursor; edit words: "new line"/"next line" (soft newline), "enter"/"send", "backspace", "delete that", "tab key" |
 | (anything else / mis-worded / failed) | — | escalates to the **brain** (see below) — it acts if it can, asks if needed, or ignores chatter |
 

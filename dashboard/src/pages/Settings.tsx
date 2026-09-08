@@ -31,6 +31,11 @@ import { cn } from "@/lib/utils";
 
 const SETTINGS_KEY = ["settings"] as const;
 
+// Radix's <SelectItem> throws on an empty-string value — it reserves "" for
+// "nothing selected". The API legitimately ships one (input_device's "System
+// default"), so stand in for it in the DOM and swap it back on change.
+const EMPTY_OPTION = "__empty__";
+
 // Display order + icon per group. Unknown groups fall after these, ungrouped.
 const GROUP_META: Record<string, { icon: typeof Brain; blurb: string }> = {
   Brains: {
@@ -198,18 +203,26 @@ function SettingControl({
   }
 
   if (setting.type === "select") {
+    const options = setting.options ?? [];
+    // Only stand in for "" when it's a real option — otherwise a null value
+    // should stay "" so the placeholder shows.
+    const hasEmptyOption = options.some((opt) => opt.value === "");
+    const current = String(setting.value ?? "");
     return (
       <Select
-        value={String(setting.value ?? "")}
+        value={current === "" && hasEmptyOption ? EMPTY_OPTION : current}
         disabled={disabled}
-        onValueChange={(v) => onChange(v)}
+        onValueChange={(v) => onChange(v === EMPTY_OPTION ? "" : v)}
       >
         <SelectTrigger aria-label={setting.label}>
           <SelectValue placeholder="Select…" />
         </SelectTrigger>
         <SelectContent>
-          {(setting.options ?? []).map((opt) => (
-            <SelectItem key={opt.value} value={opt.value}>
+          {options.map((opt) => (
+            <SelectItem
+              key={opt.value}
+              value={opt.value === "" ? EMPTY_OPTION : opt.value}
+            >
               {opt.label}
             </SelectItem>
           ))}

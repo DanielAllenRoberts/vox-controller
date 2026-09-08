@@ -5,6 +5,145 @@
 
 ---
 
+## 0. NEEDS A LIVE TEST — the standing list
+
+Everything below is built and unverified by hand. Tick items off as they're tested; move anything
+that fails into its own block with what went wrong.
+
+**Restart the daemon first.** Check its start time is newer than your last edit — the daemon runs the
+code it was started with, and `src/vox/input.py` + the `#61` changes have never been loaded by a
+running Vox at all.
+
+| # | What | Built | Evidence it's untested |
+|---|---|---|---|
+| A | **Desktop input primitives (#61)** — scroll · press · right/double click · drag · set value | 2026-08-20, uncommitted | no `scrolled` / `dragged` / `pressed` line anywhere in `vox.log` |
+| B | **Background input delivery** (`input_background_delivery`) | 2026-08-20, uncommitted | off by default, never switched on |
+| C | **Board voice verbs + `TEACH:`** | 2026-08-04 | `grep -c "decision=BOARD" vox.log` → 0 · same for TEACH — see block 1 for the script |
+| D | **Multi-step executor** (commit `e4938a6`) | 2026-08-20 | nothing in the log since |
+| E | **Notification bubble + MCP `notify`** | 2026-08-31 | ✅ ✕-click verified by synthetic click (card closed, frontmost app unchanged); still never used by a real agent mid-task |
+| F | **Vosk grammar fast lane** | 2026-07-16 | `vosk_commands_enabled` still `False`; never live-speech-tested |
+| G | **Named agents — identity half** (`register_agent` / `whoami` / `list_agents`) | 2026-08-31 | works from a script; never used by a real CLI naming itself |
+| H | **Speech queue** (one voice at a time) | 2026-08-31 | ✅ verified with real TTS in two processes — lock held 0.03→1.71s then 1.74→3.33s, no overlap; not yet tested against the *daemon* speaking |
+
+### A · Desktop input primitives — say these
+
+| Say | Expect |
+|---|---|
+| "scroll down" · "scroll up 3" · "scroll down five" | wheel scroll at the pointer (default 5 lines) |
+| "scroll to the top" · "scroll to the bottom" | ⌘↑ / ⌘↓ — one jump, not a pile of ticks |
+| "page down" · "page up" | Page Down / Page Up |
+| "press command S" · "press escape" · "press command shift four" | the real keystroke, <10ms; spoken digits work |
+| "press submit" | **should NOT be a keystroke** — falls through to the LLM and clicks instead |
+| "right click Submit" · "double click 14" | by AX label, or a badge number from "show clickable" |
+| "drag 3 to 7" · "drag Inbox onto Archive" | either side a badge number or a label |
+| "set volume to 30" · "set theme to dark" | slider / field / checkbox / dropdown set via AX |
+
+Watch `vox.log` for `decision=COMMAND '<phrase>' → actions.handle → <result>`. A `→ no mapping` or a
+spoken "I can't scroll from here" means the parser never matched — that's the old behaviour, i.e. a
+stale daemon or a pattern that doesn't fire.
+
+### B · Background delivery — the experiment
+
+Turn `input_background_delivery` on, then try the same gestures **with a different app focused**.
+The question is which apps honour it:
+
+- AppKit apps (Finder, Notes, Mail, System Settings) — expected to work.
+- Chromium / Electron (Arc, Slack, Cursor, Obsidian) — **expected to ignore posted MOUSE events
+  while still accepting keys.** If that's what happens, the fix is per-app fallback to the global
+  tap, not one global off switch.
+
+Turn it back off if anything feels unreliable — off is byte-for-byte the old behaviour.
+
+### E · Notification bubble
+
+- `.venv/bin/python3 -m vox.bubble "test message" --source David` — card appears top-right with
+  DAVID above the text, and **stays** (duration now defaults to 0 = until dismissed).
+- **Click the ✕.** This is the one thing that can't be verified from a script — the card is now an
+  `NSPanel` with `NSWindowStyleMaskNonactivatingPanel` specifically so the click lands *without*
+  making the helper the active app. What to check: the card closes, and **focus does not move** —
+  whatever you were typing in stays focused and keeps receiving your keystrokes.
+- `--duration 3` — still fades on a timer when you want that.
+- `--corner bottom-left` and Dashboard → Settings → **Notifications** — corner / duration / width,
+  applied without a restart.
+- **The real test:** have an agent call `notify` mid-task and check it doesn't steal focus and shows
+  on the display you're actually working on.
+- Trade-off to feel out: the card now accepts mouse events (it has to, for the ✕), so while one is
+  up it isn't click-through. If that bites, the answer is probably click-through until you hover.
+- Known limit by design: a second bubble **replaces** the first rather than stacking.
+
+### G · Named agents — does it feel right?
+
+In a CLI with the vox-speak MCP wired up, say *"your name is David — register yourself"*, then:
+
+- `whoami` → David · `list_agents` → David plus anyone else running.
+- Ask it to speak → you should hear **"David here — …"** rather than an anonymous voice.
+- Ask it to notify → the card should be labelled **DAVID**.
+- Start a second CLI, name it Greg, and have both announce. The point of the whole exercise is that
+  you can tell them apart without looking.
+
+Only the *identity* half is built. Talking back to David by name (`tmux send-keys` routing) is
+stage 1 of `named-agents.md` and is not built.
+
+### H · Speech queue
+
+Have Vox say something long, and while it's talking have an agent announce. Expected: the agent
+waits, then speaks — no overlap. Then the reverse.
+
+- `cat data/speaking.lock` while something is talking names the current speaker.
+- The failure mode to watch for is the opposite one: **Vox going quiet for seconds** because it's
+  waiting behind an agent. It gives up after `speech_queue_timeout` (15s) and speaks anyway — if
+  that wait is noticeable in practice, lower it. Turn the whole thing off with
+  Settings → Notifications → *One voice at a time*.
+
+---
+
+## 0b. Small-brain latency — it's OUTPUT tokens, and the model swap was a red herring
+
+**Measured 2026-09-01** against `data/usage.jsonl` (529 records) and live DeepSeek calls.
+
+**The symptom:** small brain at **3.64s median / 8.45s p90** (n=308) — well outside the 1-2s a
+spoken command needs.
+
+**Two theories, both wrong:**
+
+1. ~~"deepseek-v4-flash is slower than the deepseek-chat it replaced"~~ (1.44s vs 3.64s in the log).
+   **Wrong — the alias is repointed.** A live call asking for `deepseek-chat` comes back
+   `served-as='deepseek-v4-flash'`. Both strings are the same model; reverting the config does
+   nothing. The log's two rows are just two time periods. *(The config comment on
+   `small_brain_model` already said this. It was right.)*
+2. ~~"the prompt got bloated" (883 → 1449 median input tokens)~~. Real, but **not the latency
+   cause** — see the measurement below. It costs money and context, not seconds.
+
+**What it actually is — output tokens dominate, input barely matters:**
+
+| test | in | out | median |
+|---|---|---|---|
+| big prompt, capped output | 1800 | 40 | **1.25s** |
+| small prompt, long output | 876 | 224 | **3.26s** |
+| the real profile | 1800 | 157 | 2.09s |
+
+Doubling the input costs nothing. Going 40 → 224 output tokens costs **~2 seconds**. Our small
+brain's median output is **241 tokens** — for a command router whose useful answer is
+`CLICK: submit`, about 10.
+
+**The fix (proposed, not applied):** `CONFIG.llm_max_tokens = 800` is a **single cap shared by every
+path** — `_openai_call`, `_anthropic`, and vision all pass it — and the comment admits the strategy:
+*"chat stays short via the prompt"*. There is no hard ceiling on the command path, so nothing stops
+the router explaining itself.
+
+`kind` is already threaded through every call (`"chat"｜"command"｜"rewrite"`), so a per-kind cap is
+clean: ~64 tokens for `command`, keep 800 for `rewrite`/compose. Pair it with a prompt line telling
+the router to emit the directive and nothing else.
+
+**Expected: ~2s off the hot path, on whatever model.** Verify by re-running the latency table above
+after the change — median should approach the capped-output row.
+
+**Consequence for ideas #58** (need-based context / prompt slimming): still worth doing for cost and
+context budget, but **do not expect it to make Vox feel faster.** Input tokens are nearly free on
+latency. That was the assumption going in and the measurement doesn't support it.
+
+---
+
 ## 1. Verify the board actually works
 
 **Status:** built 2026-08-04, **never run live** — `grep -c "decision=BOARD" vox.log` → **0**.
@@ -32,6 +171,33 @@ problem, not a store problem, and the fix is in the v2 draft.
 
 **Known gap:** the dashboard Board page can't create a board or rename/delete a list — those store
 functions exist but aren't exposed over HTTP. Voice can do things the UI can't.
+
+---
+
+## 1b. Board — multiple cards in one turn
+
+**Why it doesn't work today:** `executor.execute()` (`src/vox/executor.py:495-655`) is a chain of
+`if upper.startswith(...)` that **returns on the first match**. The model can emit three `BOARD:`
+lines and only line one is ever read — "add three cards to doing" quietly adds one. The plain-command
+fallback has the same shape (`raw.splitlines()[0]`).
+
+**Wanted:** add, remove and edit **multiple** cards in one utterance.
+
+- "add cards for X, Y and Z to doing"
+- "delete the test card and the zzz card"
+- "move X and Y to done"
+
+**Scope it to `BOARD:` only.** Board ops are visible, reversible and cheap to undo. `CLICK:` and
+`TYPE:` are none of those, and firing several of them off one mis-heard utterance is a different
+class of risk. So: loop every `BOARD:` line in the reply, run them in order, stop at the first
+failure, and speak one combined result ("Added 3 cards to Doing."). Everything else keeps
+first-directive-wins.
+
+**Also needs a prompt change.** The block currently reads *"output BOARD: `<verb>` | `<arg>` | `<arg>`
+using exactly one of"* — the model will reasonably read that as one directive per turn, so it may
+never emit three even once the executor can run them. Folds into the v2 prompt work.
+
+**Verify:** one utterance → N `decision=BOARD` lines in `vox.log`, and N cards on the board.
 
 ---
 

@@ -73,7 +73,10 @@ def _dbg(label: str, content) -> None:
         if not getattr(CONFIG, "debug", False):
             return
         body = content if isinstance(content, str) else repr(content)
-        block = f"[debug]{label}\n{body}\n[debug]{label}/end"
+        # Timestamp the opening marker. Without it these blocks float untethered in vox.log and
+        # can't be lined up against the timestamped voice-loop lines around them — which is exactly
+        # what makes "what was Vox doing at 13:34?" unanswerable.
+        block = f"[debug]{label} @ {time.strftime('%H:%M:%S')}\n{body}\n[debug]{label}/end"
         print(block, flush=True)
         path = getattr(CONFIG, "log_file", "") or ""
         if path:
