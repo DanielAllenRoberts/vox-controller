@@ -166,6 +166,25 @@ def _is_abort(text: str, cfg) -> bool:
     return any(p in t for p in cfg.abort_phrases)
 
 
+_AGENT_STOP = ("stop", "cancel", "stop it", "cancel that", "never mind", "nevermind", "abort")
+
+
+def _is_agent_stop(text: str) -> bool:
+    """True when an agent run is in flight and the user just told it to stop.
+
+    Deliberately only consulted while a run is live — "stop" means other things the rest of the
+    time (sleep, abort), and we don't want to change any of those. Guarded so a missing/broken
+    agent module can never affect the command path."""
+    try:
+        from vox import agent
+        if not agent.is_running():
+            return False
+        t = normalize(text)
+        return any(t == p or t.startswith(p + " ") for p in _AGENT_STOP)
+    except Exception:
+        return False
+
+
 def _is_assistant(text: str, cfg) -> bool:
     t = normalize(text)
     return any(p in t for p in cfg.assistant_phrases)
@@ -185,11 +204,74 @@ _NOISE_WORDS = {"and", "uh", "um", "ah", "oh", "so", "the", "a", "i", "yeah", "y
                 "okay", "ok", "hmm", "mm", "mhm", "like", "you", "well", "but", "or", "is", "it"}
 
 
-def _looks_like_noise(text: str) -> bool:
+_recent_single_words: dict[str, float] = {}  # one-word utterance → when we last heard it (monotonic)
+_SINGLE_WORD_REPEAT_SECONDS = 90.0
+
+
+def _is_known_command_phrase(word: str, cfg) -> bool:
+    """Is this single word a command Vox already knows, on its own?
+
+    The vocabulary is the command DB's active phrases for the focused app (which is where anything
+    TAUGHT ends up) plus the code-parser phrases already enumerated for the Vosk grammar — i.e. the
+    same "known phrase set" the fast lane recognizes against, no new source of truth.
+
+    Compared space-stripped as well as verbatim, exactly like wakeword.phrase_match: Whisper runs
+    short phrases together, and "show tabs" arriving as "showtabs" is a real, repeated entry in
+    vox.log. Membership must be the WHOLE phrase — matching individual words inside multi-word
+    phrases pulls in "to" (go to sleep), "good" (good bye) and "alright" (alright bye), which are
+    exactly the stray words the gate exists to stop. Guarded: no cache → no vocabulary → the word
+    falls through to the repeat test, i.e. today's behaviour."""
+    phrases: list[str] = []
+    try:
+        from vox import command_cache
+        phrases += command_cache.active_phrases(command_cache.current_app())
+    except Exception:
+        pass
+    try:
+        phrases += _fast_lane_extra_phrases(cfg)
+    except Exception:
+        pass
+    return any(word == normalize(p).replace(" ", "") for p in phrases)
+
+
+def _looks_like_noise(text: str, cfg=None) -> bool:
     """Short fragments / fillers — almost always background (a video, chatter). Don't escalate
-    these to the LLM."""
+    these to the LLM.
+
+    A bare "len(words) <= 1" used to be the whole rule, which is why genuine one-word commands
+    ("settings", "refresh", "show tabs" heard as "showtabs") were dropped before the brain ever saw
+    them (issues.md O20) — and, worse, why a one-word command could never be LEARNED: the learning
+    path only ever sees commands the brain resolved, and these never reached it. The gate still
+    exists for a real reason (O7: the mic hears the room, and Whisper turns ambient audio into
+    exactly these stray single words — 'courtesy', 'karassik', 'chaploo', 'unfettered'), so one word
+    is still chatter BY DEFAULT. It escapes the gate only on evidence that it was addressed to Vox:
+
+      • it is itself a command Vox already knows (the DB — including anything taught — or the Vosk
+        fast-lane grammar), or
+      • you just said the same single word a moment ago. Ambient speech doesn't repeat one isolated
+        word inside a minute and a half; a person whose command didn't land does.
+
+    Replayed over the 64 one-word utterances vox.log actually gated: this lets through 'enter',
+    'refresh' and 'showtabs' and keeps holding back every ambient one ('courtesy', 'karassik',
+    'chaploo', 'tenant', 'johnny', 'unfettered', …) — no false positives."""
     words = normalize(text).split()
-    return len(words) <= 1 or all(w in _NOISE_WORDS for w in words)
+    if not words:
+        return True
+    if all(w in _NOISE_WORDS for w in words):
+        return True   # pure filler at any length — unchanged
+    if len(words) > 1:
+        return False
+    word = words[0]
+    now = time.monotonic()
+    said_before = now - _recent_single_words.get(word, -1e9) <= _SINGLE_WORD_REPEAT_SECONDS
+    _recent_single_words[word] = now
+    if len(_recent_single_words) > 64:  # bounded: drop anything past the repeat window
+        for w, seen in list(_recent_single_words.items()):
+            if now - seen > _SINGLE_WORD_REPEAT_SECONDS:
+                _recent_single_words.pop(w, None)
+    if said_before:
+        return False
+    return not _is_known_command_phrase(word, cfg)
 
 
 def _wants_escalation(text: str, cfg) -> bool:
@@ -203,16 +285,124 @@ def _wants_escalation(text: str, cfg) -> bool:
     return any(k in t for k in cfg.escalation_keywords)
 
 
+_MISSED_GRAMMAR: list = []  # phrase set from the last Vosk miss, consumed by the drift hint
+
+
 def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
         text = transcriber.transcribe(audio, hotwords=hotwords)
     cpu, mem = process_stats()
+    # Mic LEVEL, so an empty transcription is diagnosable. `heard: ''` has two completely different
+    # causes that look identical in the log: the mic delivered near-silence (wrong input device,
+    # muted, AirPods across the room), or it delivered real speech and STT failed. Without a level
+    # you cannot tell them apart — which is how a session spent 34% of its utterances empty while
+    # the log looked healthy. int16 RMS: under ~40 is effectively silence, speech is hundreds+.
+    try:
+        from vox.audio import rms as _rms
+        level = _rms(audio)
+        quiet = "  ⚠ NEAR-SILENT (check the input device)" if level < 40 else ""
+    except Exception:
+        level, quiet = -1.0, ""
     out.emit(f"  ⏱  audio {dur:.1f}s · stt {stt.seconds:.2f}s "
-             f"(rtf {stt.seconds / max(dur, 0.01):.2f}) · cpu {cpu:.0f}% · mem {mem:.0f}MB")
+             f"(rtf {stt.seconds / max(dur, 0.01):.2f}) · level {level:.0f} · "
+             f"cpu {cpu:.0f}% · mem {mem:.0f}MB{quiet}")
     if cfg.debug:
         out.emit(f"  [debug] heard: {text!r}")
+    # DRIFT HINT. A short fixed phrase that the parser handles but Vosk didn't know is exactly the
+    # shape that bit as "scroll down" → "stand down": Vosk is grammar-constrained, so a command it
+    # has never been told about gets force-aligned onto the nearest phrase it HAS. Surfacing it the
+    # first time it happens is far cheaper than finding it in 54k log lines afterwards.
+    try:
+        if text and len(text.split()) <= 3 and _MISSED_GRAMMAR:
+            from vox import actions
+            known = _MISSED_GRAMMAR.pop()
+            if text.lower() not in known and actions.parse(text) is not None:
+                out.emit(f"  ⓘ fast-lane drift: {text!r} parses as a command but is NOT on the "
+                         f"Vosk grammar — add it to _fast_lane_extra_phrases()")
+    except Exception:
+        pass
     return text
+
+
+# Control phrases that must work INSIDE dictation. Dictation can't use the command grammar (you're
+# typing arbitrary prose, so a constrained grammar would mangle it), which is why it went straight to
+# Whisper — and that made the one phrase you need most, "stop typing", the slowest thing in the app:
+# a full Whisper pass on top of dictation's longer silence wait. Recognising JUST these against a
+# tiny grammar first is cheap (~5ms), and anything that isn't one of them still falls through to
+# Whisper untouched, so dictated text is unaffected.
+_DICTATION_CONTROL_PHRASES = (
+    "stop typing", "stop dictation", "stop dictating", "enter", "new line", "new paragraph",
+)
+
+
+def _dictation_control(audio, cfg) -> str | None:
+    """Vosk-match an utterance against the dictation control phrases only. Returns the phrase on a
+    confident match, else None so the caller runs Whisper as before. Fully guarded."""
+    if not _setting("vosk_commands_enabled", getattr(cfg, "vosk_commands_enabled", False)):
+        return None
+    try:
+        from vox import command_cache
+        from vox.stt import vosk_recognizer
+        log = command_cache.log if getattr(cfg, "vosk_log", True) else None
+        r = vosk_recognizer.recognize(audio, list(_DICTATION_CONTROL_PHRASES), cfg.sample_rate,
+                                      model_path=getattr(cfg, "vosk_model_path", ""), log=None)
+        min_conf = float(_setting("vosk_min_conf", getattr(cfg, "vosk_min_conf", 0.0)))
+        if r and r["conf"] >= min_conf:
+            if log:
+                log(f"  [vosk] ⚡ dictation control {r['text']!r} conf {r['conf']} → FAST LANE")
+            return r["text"]
+    except Exception:
+        pass
+    return None
+
+
+def check_fast_lane_drift(cfg, out=None) -> list[str]:
+    """Report fast-lane phrases the command parser can't actually handle.
+
+    The Vosk grammar and the command parser are two lists that must agree, and when they drift you
+    get bugs that appear and vanish depending on which lane wins — which is what made them so hard
+    to see (issues.md O21/O22). This catches the direction that IS checkable: a phrase Vosk will
+    happily snap to that then falls through to the brain. The opposite direction — a parser command
+    missing from the grammar, which is what "scroll down" → "stand down" was — can't be derived,
+    because the parser is regexes with no phrase inventory to enumerate. That one is caught at
+    runtime by the hint in _recognize()."""
+    from vox import actions
+    # Only phrases that are SUPPOSED to reach actions.parse can be checked against it. Mode
+    # switches, wake phrases, dashboard and overlay triggers are handled by dispatch and the mode
+    # machinery instead, and parse() returns None for all of them by design — checking those
+    # produced 51 false positives on the first attempt, which is worse than no check at all.
+    handled_elsewhere = {p.lower() for p in _DICTATION_CONTROL_PHRASES}
+    for attr in ("sleep_phrases", "dictate_phrases", "control_phrases", "assistant_phrases",
+                 "open_dashboard_phrases", "close_dashboard_phrases", "wake_phrases"):
+        handled_elsewhere |= {p.lower() for p in (getattr(cfg, attr, ()) or ())}
+    try:
+        handled_elsewhere |= {p.lower() for p in dispatch._SHOW_CLICKABLE_PHRASES}
+        handled_elsewhere |= {p.lower() for p in dispatch._HIDE_CLICKABLE_PHRASES}
+    except Exception:
+        pass
+    orphans = []
+    for phrase in _fast_lane_extra_phrases(cfg):
+        if phrase.lower() in handled_elsewhere:
+            continue
+        try:
+            if actions.parse(phrase) is None:
+                orphans.append(phrase)
+        except Exception:
+            continue
+    if orphans and out is not None:
+        out.emit(f"  ⚠ fast-lane drift: {len(orphans)} grammar phrase(s) the parser won't handle: "
+                 f"{', '.join(sorted(orphans)[:8])}")
+    return orphans
+
+
+def _is_spent_dictation_control(text: str) -> bool:
+    """True for a dictation-control phrase heard OUTSIDE dictation, where it is a no-op.
+
+    This function is only ever reached from control/assistant/idle — dictation runs its own loop —
+    so a dictation control phrase arriving here is by definition already spent."""
+    t = normalize(text or "")
+    return bool(t) and t in {p.lower() for p in _DICTATION_CONTROL_PHRASES}
 
 
 def _fast_lane_extra_phrases(cfg) -> list[str]:
@@ -228,11 +418,37 @@ def _fast_lane_extra_phrases(cfg) -> list[str]:
         out.append(f"open {a}")     # launch/focus the app
     # The numbered-overlay triggers live in dispatch (not the command DB), so add them here — this
     # puts "show clickable" on the fast lane and lets it snap mis-hears ("hard clickable" → the real
-    # phrase) instead of escalating to the LLM.
+    # phrase) instead of escalating to the LLM. The HIDE phrases need it just as much: only the show
+    # half was listed here, so "hide clickable" fell through to Whisper, which clips the short word
+    # to "hi"/"high" — and those reached the LLM. Seen repeatedly in vox.log.
     try:
-        out += list(dispatch._SHOW_CLICKABLE_PHRASES)
+        out += list(dispatch._SHOW_CLICKABLE_PHRASES) + list(dispatch._HIDE_CLICKABLE_PHRASES)
     except Exception:
         pass
+    # Reload lives in the code parser, so active_phrases() (which reads the DB) doesn't include it.
+    # Only the canonical wording — a phrase TAUGHT for it lands in the command DB and reaches the
+    # grammar through active_phrases() on its own.
+    out += ["reload", "reload the page"]
+    # MODE-SWITCH phrases. These live in the code parser too, so nothing was putting them on the
+    # grammar — and they are among the most-spoken things in the whole app. Measured over vox.log
+    # (scripts/perf_report.py): "go to sleep" 50x, "stop typing" 61x, "enter" 71x, "start typing"
+    # 24x — every one paying a full Whisper pass to recognise two short words. They're a closed set,
+    # so there's no reason for them to be on the slow lane at all.
+    for attr in ("sleep_phrases", "dictate_phrases", "control_phrases", "assistant_phrases",
+                 "open_dashboard_phrases", "close_dashboard_phrases"):
+        out += [p for p in (getattr(cfg, attr, ()) or ())]
+    out += list(_DICTATION_CONTROL_PHRASES)
+    # SCROLL / PAGE (ideas #61). Same reason as everything above — they live in the code parser, so
+    # active_phrases() never sees them. Leaving them off the grammar is not neutral: Vosk is
+    # grammar-CONSTRAINED, so an utterance it doesn't know is force-aligned onto the nearest phrase
+    # it does. On 2026-09-08 "scroll down" snapped to "stand down" (a sleep phrase) at conf 1.0 and
+    # silently ended control mode mid-session — see issues.md O21. Confidence can't catch that: it's
+    # the mean per-word score of an alignment the grammar itself forced, so it reads 1.0 precisely
+    # BECAUSE the real words weren't available. The only fix is giving Vosk the right phrase to win.
+    # Counts ("scroll down three") stay on Whisper — the extra word makes the utterance unknown to
+    # this grammar, which is the correct outcome rather than snapping and losing the number.
+    out += ["scroll", "scroll up", "scroll down", "scroll left", "scroll right",
+            "scroll to the top", "scroll to the bottom", "page up", "page down"]
     return out
 
 
@@ -258,11 +474,19 @@ def _recognize(audio, cfg, transcriber, out, hotwords: str = "") -> str:
                 if log:
                     snap = f" (heard {r['raw']!r})" if r["raw"].lower() != r["text"].lower() else ""
                     log(f"  [vosk] ⚡ {r['text']!r} conf {r['conf']}{snap} → FAST LANE (skipped Whisper)")
+                    # A snap onto a mode-EXIT phrase ends the session, so it deserves its own line:
+                    # correlating "⚡ 'stand down'" with "○ Sleeping." two lines later, and knowing
+                    # 'stand down' is a sleep phrase, is what made O21 take an hour to see. Grep
+                    # `[vosk] ⚠ MODE EXIT` to find every unverified exit.
+                    if r["text"].lower() in {p.lower() for p in (getattr(cfg, "sleep_phrases", ()) or ())}:
+                        log(f"  [vosk] ⚠ MODE EXIT on an UNVERIFIED grammar snap: {r['text']!r} "
+                            f"(Whisper was skipped — if you didn't say this, it was force-aligned)")
                 if cfg.debug:
                     out.emit(f"  [debug] heard (vosk): {r['text']!r}")
                 return r["text"]
             if log:
                 log(f"  [vosk] {'low conf ' + str(r['conf']) if r else 'no match [unk]'} → Whisper lane")
+                _MISSED_GRAMMAR.append({p.lower() for p in phrases})  # for the drift hint below
         except Exception as exc:  # any Vosk problem → Whisper, never break the loop
             try:
                 from vox import command_cache
@@ -288,12 +512,27 @@ def _passes_interrupt_gate(audio, text, cfg) -> bool:
     return True
 
 
+_CALL_STOP = ("stop", "stop it", "cancel", "cancel it", "wait", "hold on", "hang on",
+              "no stop", "stop stop")
+
+
+def _is_call_stop(text: str) -> bool:
+    """A bare "stop" while a call is in flight. Deliberately its OWN set, separate from
+    sleep_phrases / abort_phrases: "stop" on its own matched none of those, so during a ~20s
+    escalation the one word the user reaches for did literally nothing (issues.md O19). It only
+    means cancel while we're waiting on a call, exactly like _is_agent_stop only means cancel while
+    an agent run is live — so nothing outside this window changes. Whole-utterance match only, so
+    "stop typing" / "don't stop the timer" still route where they always did."""
+    t = normalize(text)
+    return t in _CALL_STOP
+
+
 def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
     """Run work() (a blocking LLM call) on a thread while still listening, so the user can cancel
     it by speaking a stop/sleep/quit/restart phrase (barge-in, idea #19). No echo worries — Vox
     isn't speaking during the call. Returns (result, interrupt): interrupt is None if work
-    finished, else 'sleep' | 'quit' | 'restart'. An abandoned call finishes in the background and
-    its result is dropped (Python can't kill a thread).
+    finished, else 'cancel' | 'sleep' | 'quit' | 'restart'. An abandoned call finishes in the
+    background and its result is dropped (Python can't kill a thread).
 
     `slow` marks calls expected to outrun the poll loop (big-brain / vision / compose). When
     interrupt_slow_calls_only is on (default), barge-in is NOT armed for fast calls — those finish
@@ -325,6 +564,15 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
                 if out is not None else transcriber.transcribe(audio, hotwords=cfg.command_hotwords))
         if not text:
             continue
+        # "stop" is checked BEFORE the blip gate. A bare "stop" is ~0.4s of audio and one word, so
+        # it sits right on interrupt_min_seconds/interrupt_min_words and was being thrown away as a
+        # blip — the exact word the user needs during a 20s escalation. Cancelling is also the
+        # safest thing a false positive can do (nothing runs; you just say it again), unlike the
+        # redirect below, which is why only this one branch skips the gate.
+        if _is_call_stop(text):
+            if out is not None:
+                out.emit(f"  ⛔ heard {text!r} — cancelling the request.")
+            return None, "cancel"
         if not _passes_interrupt_gate(audio, text, cfg):
             continue  # too short / too few words → a blip, not a barge-in; keep waiting for work()
         if _is_abort(text, cfg) or _is_sleep(text, cfg):
@@ -405,6 +653,16 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
             if not text:
                 continue
+        # An agent run (idea #57) works the screen for up to a minute on its own thread. While one
+        # is in flight a plain "stop" should cancel IT and leave us in control mode — not drop Vox
+        # to idle, which is what the same word means the rest of the time.
+        if _is_agent_stop(text):
+            from vox import agent
+            agent.abort()
+            sounds.play(cfg.sound_abort)
+            out.emit("🛑 Stopping the agent.")
+            pending = []
+            continue
         if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
             sounds.play(cfg.sound_abort)
             out.emit("🛑 Stopped.")
@@ -443,7 +701,9 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
         det = dispatch.try_deterministic(text)
         if det is not None:
             acted, msg = det
-            if acted:
+            # A refused click is the one "acted" result that MUST be spoken. Staying silent is
+            # indistinguishable from Vox ignoring you — the exact complaint that surfaced O18.
+            if acted and not str(msg).startswith(actions.FOCUS_MOVED):
                 out.emit(f"  → {msg}")
             else:
                 out.emit(f"  🔊 {msg}")
@@ -451,7 +711,13 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
                 mic.flush()  # drop our own confirmation TTS the mic caught
             _record_turn("assistant", str(msg), kind="command")
             pending = []  # handled deterministically → drop any pending clarification
-        elif not pending and _looks_like_noise(text):  # 1-word/filler → background; don't bug the LLM
+        elif not pending and _is_spent_dictation_control(text):
+            # "stop typing" means something in dictation and nothing outside it. Saying it once
+            # exits dictation; the repeat (or the tail of the same phrase re-captured after the
+            # exit chime) lands in CONTROL mode, where the parser has no such command — so it went
+            # to the brain and cost a ~20s round-trip to be told nothing. It's already satisfied.
+            out.emit("  (already stopped typing)")
+        elif not pending and _looks_like_noise(text, cfg):  # filler / unknown 1-word → background
             out.emit("  (ignored — too short / background)")
             pending = []
         elif not pending and not _wants_escalation(text, cfg):  # keyword mode: no trigger → don't escalate
@@ -469,7 +735,12 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
                 raise _Quit
             if interrupt == "restart":
                 raise _Restart
-            if interrupt == "sleep":  # "stop"/"sleep" said mid-call → cancel and go idle
+            if interrupt == "cancel":  # a bare "stop" mid-call → drop the request, STAY in control
+                sounds.play(cfg.sound_abort)
+                out.emit("  🛑 Cancelled — still listening.")
+                pending = []
+                continue
+            if interrupt == "sleep":  # "stand down"/"sleep" said mid-call → cancel and go idle
                 sounds.play(cfg.sound_sleep)
                 out.emit("○ Stopped (cancelled the request).")
                 return None
@@ -566,7 +837,30 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
         # only clear action requests reach the executor; everything else falls through to chat.
         if dispatch.looks_like_action(text, cfg):
             sounds.play(cfg.sound_thinking)
-            acted, msg = executor.execute(text)
+            # Same barge-in arming as control's escalation and the chat call below. This one call
+            # was the odd one out — a plain blocking executor.execute(), so a slow brain wedged the
+            # listening loop for its whole duration and nothing, not even "stop", could reach it
+            # (issues.md O19).
+            result, interrupt = _run_interruptible(
+                lambda: executor.execute(text), frames, cfg, transcriber, out=out, slow=True)
+            if interrupt == "quit":
+                raise _Quit
+            if interrupt == "restart":
+                raise _Restart
+            if interrupt == "cancel":  # a bare "stop" mid-call → drop it, stay in the conversation
+                sounds.play(cfg.sound_abort)
+                out.emit("  🛑 Cancelled — still listening.")
+                expecting_answer = False
+                continue
+            if interrupt == "sleep":
+                sounds.play(cfg.sound_sleep)
+                out.emit("○ Sleeping.")
+                return None
+            if isinstance(interrupt, tuple) and interrupt[0] == "redirect":  # new command mid-call
+                out.emit(f"  ⤳ cancelled — doing {interrupt[1]!r} instead")
+                redirect, expecting_answer = interrupt[1], False
+                continue
+            acted, msg = result
             if msg == executor.ENTER_DICTATION:  # brain heard "start typing" → switch to dictation
                 out.emit("→ entering dictation…")
                 return "dictation"
@@ -599,7 +893,12 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
             raise _Quit
         if interrupt == "restart":
             raise _Restart
-        if interrupt == "sleep":  # "sleep"/"stop" said while the AI was responding → drop it, go idle
+        if interrupt == "cancel":  # a bare "stop" mid-reply → drop it, stay in the conversation
+            sounds.play(cfg.sound_abort)
+            out.emit("  🛑 Cancelled — still listening.")
+            expecting_answer = False
+            continue
+        if interrupt == "sleep":  # "sleep"/"stand down" said while the AI was responding → go idle
             sounds.play(cfg.sound_sleep)
             out.emit("○ Sleeping.")
             return None
@@ -643,18 +942,88 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
             return return_to
 
 
-def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
+# How long to let the exit chime finish before flushing the mic. sounds.play is fire-and-forget
+# (subprocess.Popen), so flushing on the next line drained the buffer BEFORE afplay had made a
+# sound — the chime (Sosumi, 1.54s) still landed in the mic and still became the first "utterance"
+# of the next mode. Waiting the cue out first is what actually drops it, and it's cheaper than the
+# alternative: idle would otherwise spend ~2s capturing + transcribing the chime and then flush
+# the words you said behind it.
+_CHIME_SETTLE_SECONDS = 1.6
+
+
+def _flush(mic, settle: float = 0.0) -> None:
+    """Drop whatever the mic captured while we were making noise, after waiting `settle` seconds
+    for the cue to finish playing.
+
+    The dictation-exit chime was landing in the buffer and becoming the FIRST "utterance" of the
+    next mode — which is why leaving dictation felt frozen: 28% of first hears after an exit came
+    back empty against a 6% baseline, so you'd speak, get nothing, and say it again. Every other
+    noise-making path in this file already flushes; these three didn't. Guarded because `mic` is
+    optional here (older callers pass none) and a flush must never be the thing that breaks an exit."""
+    if settle:
+        time.sleep(settle)
+    try:
+        if mic is not None:
+            mic.flush()
+    except Exception:
+        pass
+
+
+def _dictation_idle_exit_seconds(cfg) -> float:
+    """How long dictation tolerates continuous silence before it exits on its own. A live setting
+    (dashboard-tunable) with the Config value as the floor; the default is deliberately far longer
+    than one `listen_timeout_seconds` window — see _dictation_mode."""
+    return float(_setting("dictation_idle_exit_seconds",
+                          getattr(cfg, "dictation_idle_exit_seconds", 45.0)))
+
+
+def _dictation_mode(frames, cfg, transcriber, out, mic=None, return_to=None):
     sounds.play(cfg.sound_dictate_start)
     out.emit('✎ DICTATION — click where you want text, then speak. Say "stop typing" to stop.')
     actions.reset_dictation()  # fresh spacing/capitalization state for this session
+    # A think-pause is NOT the end of dictation. capture_utterance returns None after
+    # listen_timeout_seconds (6s) with no speech onset, and that single empty window used to exit
+    # on its own — which is exactly the "dictation randomly stops mid-sentence" report. Measured
+    # over vox.log: 82 of 158 dictation exits (52%) were this timeout, every one of them firing
+    # 4-6 wall-clock seconds after the last word. (4-6 rather than a flat 6 because the window is
+    # counted in FRAMES, and the backlog that piled up during the previous Whisper pass is consumed
+    # instantly — the worse the machine load, the shorter the real pause you're allowed. See O17.)
+    # So: an empty window now only re-arms the mic, and we exit only once the silence has actually
+    # lasted `dictation_idle_exit_seconds` of WALL-CLOCK time, which the backlog can't shorten.
+    idle_exit = _dictation_idle_exit_seconds(cfg)
+    last_speech = time.monotonic()
     while True:
         audio = capture_utterance(frames, cfg, silence_seconds=cfg.assistant_silence_seconds)
-        if audio is None:  # long pause
+        if audio is None:  # a quiet window — a pause, not necessarily the end
             if not _setting("dictation_exit_on_silence", cfg.dictation_exit_on_silence):
                 continue  # setting: stay in dictation until an explicit "stop typing"
+            if time.monotonic() - last_speech < idle_exit:
+                continue  # still inside the silence budget → keep listening
             sounds.play(cfg.sound_dictate_stop)
+            _flush(mic, settle=_CHIME_SETTLE_SECONDS)
+            out.emit(f"✎ Stopped typing (nothing said for {idle_exit:.0f}s).")
+            return return_to
+        last_speech = time.monotonic()
+        # Check the control phrases BEFORE paying for Whisper — "stop typing" is the phrase you say
+        # most in dictation and it was the slowest to land.
+        ctrl = _dictation_control(audio, cfg)
+        if ctrl in ("stop typing", "stop dictation", "stop dictating"):
+            sounds.play(cfg.sound_dictate_stop)
+            _flush(mic, settle=_CHIME_SETTLE_SECONDS)
             out.emit("✎ Stopped typing.")
             return return_to
+        if ctrl in ("enter", "new line", "new paragraph"):
+            # Hand the PHRASE to dictate(), not a newline character. dictate() opens with
+            # `raw = text.strip()`, so "\n" becomes "" and it returns at `if not raw` having done
+            # nothing at all — all three of these were silent no-ops, while the log printed
+            # "typed: enter" regardless so it looked like they had worked. The phrase routes into
+            # dictate()'s specials map instead: "enter" → key code 36 (a real Return that SENDS),
+            # "new line"/"new paragraph" → Shift+Return (a soft break that doesn't). This also puts
+            # the fast lane and the Whisper lane on one implementation rather than two that drift —
+            # which is what hid the bug, since "enter" worked whenever Vosk happened to miss it.
+            actions.dictate(ctrl)
+            out.emit(f"  typed: {ctrl}")
+            continue
         text = _transcribe(transcriber, audio, cfg, out)
         if not text:
             continue
@@ -668,6 +1037,7 @@ def _dictation_mode(frames, cfg, transcriber, out, return_to=None):
             raise _Restart
         if "stop typing" in normalize(text) or _is_sleep(text, cfg):
             sounds.play(cfg.sound_dictate_stop)
+            _flush(mic, settle=_CHIME_SETTLE_SECONDS)
             out.emit("✎ Stopped typing.")
             return return_to
         actions.dictate(text)
@@ -891,7 +1261,7 @@ def main() -> None:
                                                     return_to="control" if from_control else None)
                             from_control = False
                         else:  # dictation
-                            label = _dictation_mode(frames, cfg, transcriber, out,
+                            label = _dictation_mode(frames, cfg, transcriber, out, mic,
                                                     return_to="control" if from_control else None)
                             from_control = False
                     out.emit(idle_msg)

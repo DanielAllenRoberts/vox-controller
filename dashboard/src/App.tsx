@@ -13,6 +13,7 @@ import { AxTree } from "@/pages/AxTree";
 import { Rules } from "@/pages/Rules";
 import { Dictionary } from "@/pages/Dictionary";
 import { Commands } from "@/pages/Commands";
+import { Learning } from "@/pages/Learning";
 import { Memory } from "@/pages/Memory";
 import { Integrations } from "@/pages/Integrations";
 import { Handbook } from "@/pages/Handbook";
@@ -108,6 +109,14 @@ export default function App() {
           element={
             <PageTransition>
               <Commands />
+            </PageTransition>
+          }
+        />
+        <Route
+          path="learning"
+          element={
+            <PageTransition>
+              <Learning />
             </PageTransition>
           }
         />

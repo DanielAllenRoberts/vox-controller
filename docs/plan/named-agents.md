@@ -5,8 +5,16 @@
 > option is kept.** Related: #3 (voice callback), #34 (vox-speak MCP), #49 (MCP two-way bridge),
 > #38 (coding brain), #25 (scoped prompts), #22 (personalities).
 >
-> **Status:** 💡 design only. The *one* thing already shipped from this conversation is the
-> **pre-speech sound cue** (see "Speak-back" below) — that's live in `mcp/vox_speak_server.py`.
+> **Status:** 💡 mostly design. Shipped so far: the **pre-speech sound cue** (see "Speak-back"), and
+> as of **2026-08-31** the **identity half** of stage 1 plus one stage-5 item —
+> `src/vox/agents.py` (the `data/agents.json` registry), the `register_agent` / `whoami` /
+> `list_agents` MCP tools, automatic name-prefixing on spoken replies, agent names on notification
+> bubbles (#62), and the **central speak-queue** (`src/vox/speech_lock.py`, #63) that this doc listed
+> under "honest risks" as fine to skip for an MVP — it turned out to be the first thing that bit.
+>
+> **Still not built: the routing half.** Getting your voice back *into* David's session
+> (`tmux send-keys`, the `agent:<name>:<text>` label in `_oneshot`/`loop.py`) is untouched. Today you
+> can tell who is talking; you can't yet talk back to one by name.
 
 ---
 

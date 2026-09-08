@@ -42,6 +42,29 @@ The mic captured background noise (no speech) and Whisper **hallucinated** text 
 - **Intended fix:** (a) enable `audio_aec` for speaker use (built, flagged off) so the mic stops hearing the TTS — kills the loop at the source; (b) harden the barge-in path so it can't stack overlapping turns / re-entrant TTS-kills (serialize turn handling; ignore mic input during our own TTS unless AEC confirms it's external); (c) a watchdog that re-inits the audio streams if the loop stalls N seconds. Headphones avoid it entirely today.
 - **Status:** ⚠️ logged, not fixed. Highest-value fix is enabling AEC + serializing barge-in.
 
+## 2026-08-03 — "how did you refresh the page?" → "That wasn't me" (it had, 24 seconds earlier)
+
+- **What happened:** `'can you refresh the page?'` → the brain returned `CLICK: refresh` → *"Clicked
+  Refresh the Page."* — it worked. 24 seconds later, `'how did you refresh the page'` → **"That
+  wasn't me — refreshing is a control-mode command. When you say 'refresh' or 'reload,' Vox sends a
+  Cmd+R keystroke to the browser through AppleScript. I only handle open conversation and questions
+  in assistant mode."**
+- **Two failures, and the second is the worse one.** (1) No recall: nothing in the prompt tells the
+  brain what actions just ran, so it can't answer "what did you just do?". (2) **Confabulation:** it
+  didn't say "I don't know" — it denied the act *and invented a mechanism*. It clicked the browser's
+  Reload button via the AX/DOM click path; the Cmd+R-over-AppleScript story is fiction. A user who
+  believed it would now have a wrong model of how Vox works.
+- **Why it's cheap to fix:** `command_log` (built 2026-07-31) already records every resolution with
+  `heard_phrase`, `resolved_intent`, `resolved_arg`, `resolved_by`, `success` and a timestamp. The
+  gap is purely that none of it reaches the prompt. Injecting the last ~5 rows into the executor /
+  chat context is a query plus a few lines of formatting — this is **exactly part 3 of ideas #56**
+  ("What did you just do?" / recent-command recall), which already anticipated it.
+- **Design note:** the recall should state what ran *and how it was resolved* (`db` / `parser` /
+  `llm` / `click`), because the confabulation was specifically about mechanism, not just about
+  whether it happened. Feeding intent+arg without the resolution path would fix the amnesia and
+  leave the invented-explanation problem intact.
+- **Status:** ⚠️ logged, not fixed. Queued with #56.
+
 ## The principle this points to
 
 **Whenever a deterministic action is low-confidence or unmatched → escalate to the assistant.** This is the bridge between CONTROL mode (fast, deterministic) and ASSISTANT mode (LLM reasoning), and it's what makes the system feel smart rather than brittle. (See the tiered cascade in `overview.md`.)

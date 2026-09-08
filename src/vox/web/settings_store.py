@@ -155,8 +155,56 @@ _SCHEMA_META: list[dict] = [
                 "is a vision-model image. 'AX tree only' tests the tree in isolation. Applies on the "
                 "next request.",
     },
+    # --- Agent tier (idea #57) ---
+    {
+        "key": "agent_enabled",
+        "label": "Agent tier (multi-step screen control)",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "Let Vox carry out multi-step tasks by looking at the screen and clicking, using "
+                "Anthropic's computer-use tool. This is the only tier that can reach things the "
+                "accessibility tree can't see (video, canvas, unlabelled icons). It clicks and types "
+                "on your live desktop — press Escape or say 'stop' to cancel a run. Needs an "
+                "Anthropic API key. Off by default.",
+    },
+    {
+        "key": "agent_model",
+        "label": "Agent model",
+        "group": "Behavior",
+        "type": "select",
+        "options": [
+            {"value": "claude-sonnet-5", "label": "claude-sonnet-5 — $3/$15 per MTok (default)"},
+            {"value": "claude-opus-5", "label": "claude-opus-5 — $5/$25, most capable"},
+            {"value": "claude-opus-4-8", "label": "claude-opus-4-8 — $5/$25"},
+        ],
+        "help": "Model that drives the agent tier. Must support the computer-use tool — Haiku 4.5 "
+                "does not, which is why this is separate from the big brain. Always runs on the "
+                "Anthropic API (computer use isn't available on the Claude subscription).",
+    },
+    {
+        "key": "agent_max_steps",
+        "label": "Agent step limit",
+        "group": "Behavior",
+        "type": "number",
+        "help": "Hard cap on how many actions one agent run may take before it gives up. Lower is "
+                "safer and cheaper; each step costs a screenshot.",
+    },
+    {
+        "key": "agent_effort",
+        "label": "Agent effort",
+        "group": "Behavior",
+        "type": "select",
+        "options": [
+            {"value": "low", "label": "low — fastest, cheapest"},
+            {"value": "medium", "label": "medium — balanced"},
+            {"value": "high", "label": "high — most careful"},
+        ],
+        "help": "How much the agent thinks per step. Higher is more reliable on fiddly screens and "
+                "costs more.",
+    },
     {
         "key": "click_vision_fallback",
+        "default": True,  # matches the code's _setting() fallback
         "label": "Click by looking (vision fallback)",
         "group": "Behavior",
         "type": "toggle",
@@ -301,9 +349,75 @@ _SCHEMA_META: list[dict] = [
         "type": "text",
         "help": "Path to a short sound played just before the vox-speak MCP speaks, so a spoken heads-up doesn't come out of nowhere. Blank to disable. Reload the MCP server to apply.",
     },
+    {
+        "key": "dictation_idle_exit_seconds",
+        "label": "Dictation silence exit (s)",
+        "group": "Voice",
+        "type": "number",
+        "help": "How long dictation waits through silence before exiting, on the wall clock. Raise it if dictation still drops out while you think mid-sentence; it does not affect 'stop typing'.",
+    },
+    {
+        "key": "input_device",
+        "label": "Microphone",
+        "group": "Voice",
+        "type": "select",
+        "options_source": "input_devices",
+        "options": [{"value": "", "label": "System default"}],
+        "help": "Which microphone Vox listens to. The list is read live from your Mac, so plugging in a new device and reloading this page shows it. Devices are saved by NAME, not index, so it survives unplugging something else. Restart the daemon to apply — the mic stream is opened once at startup.",
+    },
+    # --- Notifications (the silent sibling of the speak MCP) ---
+    {
+        "key": "bubble_corner",
+        "label": "Bubble corner",
+        "group": "Notifications",
+        "type": "select",
+        "options": [
+            {"value": "top-right", "label": "Top right"},
+            {"value": "top-left", "label": "Top left"},
+            {"value": "bottom-right", "label": "Bottom right"},
+            {"value": "bottom-left", "label": "Bottom left"},
+        ],
+        "help": "Where the silent notification bubble appears. It shows on the display holding the active window, inside the menu bar and Dock.",
+    },
+    {
+        "key": "bubble_duration",
+        "label": "Bubble duration (s)",
+        "group": "Notifications",
+        "type": "number",
+        "help": "Seconds the notification bubble stays on screen. 0 = stay until you click its ✕ — a notification you missed while looking at another window did nothing.",
+    },
+    {
+        "key": "bubble_max_width",
+        "label": "Bubble width (px)",
+        "group": "Notifications",
+        "type": "number",
+        "help": "Width of the notification card. Its height grows to fit the wrapped message.",
+    },
+    {
+        "key": "speech_queue_enabled",
+        "label": "One voice at a time",
+        "group": "Notifications",
+        "type": "toggle",
+        "help": "Vox and each agent's MCP server are separate processes and will otherwise talk over each other. On, they take turns.",
+    },
+    {
+        "key": "speech_queue_timeout",
+        "label": "Speech queue wait (s)",
+        "group": "Notifications",
+        "type": "number",
+        "help": "How long to wait for whoever is speaking before going ahead anyway. A deadlock guard, not a queue policy — a silent assistant is worse than one overlap.",
+    },
+    {
+        "key": "speech_queue_max_hold",
+        "label": "Speech queue max hold (s)",
+        "group": "Notifications",
+        "type": "number",
+        "help": "Longest one speaker may hold the queue. A watchdog releases the lock after this even if that speaker has wedged, and anyone waiting on a hold this old goes ahead immediately — so a single stuck process can't slow every other voice down. Keep it comfortably longer than your longest spoken reply.",
+    },
     # --- Cost ---
     {
         "key": "monthly_budget_usd",
+        "default": "0",  # matches the code's _setting() fallback
         "label": "Monthly budget (USD)",
         "group": "Cost",
         "type": "text",
@@ -321,6 +435,7 @@ _SCHEMA_META: list[dict] = [
     },
     {
         "key": "learning_mode",
+        "default": "auto",  # matches the code's _setting() fallback
         "label": "Command learning",
         "group": "Commands",
         "type": "select",
@@ -337,6 +452,7 @@ _SCHEMA_META: list[dict] = [
     },
     {
         "key": "learning_confirm",
+        "default": False,  # matches the code's _setting() fallback
         "label": "Ask before saving a command",
         "group": "Commands",
         "type": "toggle",
@@ -422,6 +538,34 @@ class SettingError(ValueError):
     """
 
 
+def _options_for(meta: dict) -> list[dict]:
+    """The option list for a select — static from the schema, or built live for entries that carry
+    an ``options_source``. The mic list can't be static: it changes when you plug in headphones.
+
+    A stored value that isn't currently present (the device is unplugged) is appended rather than
+    dropped, so the dashboard shows what you actually chose instead of silently snapping back to
+    the default, and ``set()`` keeps accepting it.
+    """
+    src = meta.get("options_source")
+    if not src:
+        return meta.get("options", [])
+    opts = list(meta.get("options", []))          # leading fixed entries, e.g. "System default"
+    try:
+        if src == "input_devices":
+            from ..audio import input_devices
+            opts += input_devices()
+    except Exception:
+        pass  # no audio backend → just the fixed entries; never break the settings page
+    try:
+        with _LOCK:
+            current = _load_overrides().get(meta["key"])
+        if current and not any(o["value"] == current for o in opts):
+            opts.append({"value": current, "label": f"{current} (not connected)"})
+    except Exception:
+        pass
+    return opts
+
+
 def _coerce(meta: dict, value):
     """Validate ``value`` against ``meta`` and return the coerced value.
 
@@ -439,7 +583,7 @@ def _coerce(meta: dict, value):
             return value.lower() == "true"
         raise SettingError(f"{meta['key']} expects a boolean, got {value!r}")
     if typ == "select":
-        allowed = [o["value"] for o in meta.get("options", [])]
+        allowed = [o["value"] for o in _options_for(meta)]
         if value not in allowed:
             raise SettingError(
                 f"{meta['key']} must be one of {allowed}, got {value!r}"
@@ -522,7 +666,7 @@ def all() -> list[dict]:  # noqa: A001 - matches the contract's API name
             "value": value,
             "help": meta["help"],
         }
-        if "options" in meta:
-            setting["options"] = meta["options"]
+        if "options" in meta or "options_source" in meta:
+            setting["options"] = _options_for(meta)
         out.append(setting)
     return out

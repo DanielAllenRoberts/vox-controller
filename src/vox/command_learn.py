@@ -32,11 +32,18 @@ from vox import command_store
 # (the arg IS free-text content and never repeats), LOOK/CHAT (questions aren't replayable actions),
 # and the whole mode/system control plane (sleep/quit/restart — a mis-fired learned row there is
 # unrecoverable). See docs/plan/command-learning/01-promotion.md.
+# NB: adding an intent to the parser is NOT enough to make it learnable — it has to be listed here
+# too, or the learner refuses it and the phrase escalates to the LLM forever. Seen live 2026-08-07:
+# "refresh page" resolved correctly to `reload` on every single utterance and was rejected every
+# time with "intent 'reload' is not learnable", so it never stopped costing an LLM call.
 LEARNABLE_INTENTS = {
     "navigate", "navigate_new", "tab", "tab_arrow", "tab_index",
     "window", "window_move", "window_index", "desktop_move", "desktop_index",
-    "profile", "profile_move", "app_cycle", "sidebar", "click",
+    "profile", "profile_move", "app_cycle", "sidebar", "click", "reload",
 }
+# Deliberately NOT learnable: "back" and "close_tab". Both take no argument, so they can never
+# validate a target and a mis-hear fires them silently — and closing a tab loses state. `reload` is
+# in because reloading is harmless and reversible, which is the bar for a no-arg intent.
 
 # Intents whose action doesn't depend on what's focused: opening an app or a URL does the same thing
 # from anywhere. Learning those per-app made "open logic" a separate candidate in every app it was
@@ -90,13 +97,20 @@ def should_confirm(cand: dict, *, phrase: str = "", label: str = "") -> tuple[bo
     """
     if _setting("learning_confirm", False):
         return True, "confirm-every-command is on"
-    if phrase and label and not _shares_a_word(phrase, label):
-        # Nothing in the words resembles the target. On its own that's weak evidence, so only ask
-        # when the hit count is ALSO thin — a mapping you've used twenty times has earned its place
-        # however odd it reads.
-        if int(cand.get("window_hits", cand.get("hit_count") or 0)) <= int(_setting("learning_min_hits", 3)):
-            return True, "phrase and target share no recognisable word, on minimal evidence"
     return False, ""
+
+
+def looks_like_a_leap(phrase: str, label: str) -> bool:
+    """Do the words and the thing they resolved to share nothing? The signature of a lucky guess.
+
+    This used to WITHHOLD the save on thin evidence. It no longer does. Under the eager model a
+    command is saved on first hearing precisely so it's usable immediately, which makes "minimal
+    evidence" the normal case rather than a warning sign — withholding then blocked the common good
+    case ("refresh page" → reload share no letters, yet it's exactly right) and left the user saying
+    a phrase that visibly did nothing. Probation is the safety net instead: an unproven command that
+    isn't used enough deletes itself, and one "no" retires it on the spot. Kept as a LOG signal, so
+    odd mappings are still greppable while the trial runs."""
+    return bool(phrase and label and not _shares_a_word(phrase, label))
 
 
 def _shares_a_word(phrase: str, label: str, threshold: float = 0.6) -> bool:
@@ -294,8 +308,12 @@ def observe(heard: str, intent: str, arg: str | None, *, app: str | None = None,
             _last["command_id"] = cmd_id
             _refresh_cache()
             if log:
-                log(f"  [learn] ✅ LEARNED {phrase!r} → {intent}{'/' + arg if arg else ''} "
-                    f"as command #{cmd_id} ({bar}) [{ctx_label}] — on probation")
+                uses = int(_setting("learning_probation_uses", 2))
+                odd = " ⚠ words don't resemble the target" if looks_like_a_leap(
+                    phrase, arg or intent) else ""
+                log(f"  [learn] ✅ SAVED {phrase!r} → {intent}{'/' + arg if arg else ''} "
+                    f"as command #{cmd_id} [{ctx_label}] — usable now, 1/{uses} uses to "
+                    f"cement{odd}")
             return {"learnable": True, "candidate_id": cand["id"], "promoted": cmd_id, "bar": bar}
         finally:
             conn.close()

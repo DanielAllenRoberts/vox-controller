@@ -74,7 +74,11 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "desktop_move": _desktop_move, "desktop_index": _desktop_index,
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
+        "reload": _reload,
         "click": click_element,
+        "scroll": _scroll, "press": _press,
+        "right_click": _right_click, "double_click": _double_click,
+        "drag": _drag, "set_value": _set_value,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -90,6 +94,55 @@ def _run(text: str) -> str:
 def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None."""
     t = text.lower().strip().rstrip(".!?")
+
+    # --- desktop primitives (idea #61) ---------------------------------------------------------
+    # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
+    # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
+
+    # Right / double click, by control label or by a badge number from the overlay.
+    m = re.search(r"\b(right|double)[\s-]?click\s+(?:on\s+)?(?:the\s+)?(.+)", t)
+    if m:
+        tgt = re.sub(r"\s+(?:button|link|icon|tab|menu|option|item|checkbox|control|toggle)$", "",
+                     m.group(2).strip())
+        if tgt:
+            return ("right_click" if m.group(1) == "right" else "double_click", tgt)
+
+    # Scroll. "scroll to the top/bottom" and "page up/down" are separate because a jump is a
+    # keystroke, not a pile of wheel ticks.
+    if re.search(r"\bscroll\s+(?:to\s+)?(?:the\s+)?top\b|\bgo\s+to\s+the\s+top\s+of\s+the\s+page\b", t):
+        return ("scroll", "top")
+    if re.search(r"\bscroll\s+(?:to\s+)?(?:the\s+)?bottom\b|\bgo\s+to\s+the\s+bottom\s+of\s+the\s+page\b", t):
+        return ("scroll", "bottom")
+    m = re.search(r"\bpage\s+(up|down)\b", t)
+    if m:
+        return ("scroll", "pageup" if m.group(1) == "up" else "pagedown")
+    m = re.search(r"\bscroll\s+(up|down|left|right)(?:\s+(?:by\s+)?(\w+))?", t)
+    if m:
+        n = _to_index(m.group(2) or "") or (int(m.group(2)) if (m.group(2) or "").isdigit() else None)
+        return ("scroll", f"{m.group(1)}:{n or 5}")
+    if re.fullmatch(r"(?:please\s+)?scroll", t):
+        return ("scroll", "down:5")
+
+    # Press a key combination — but ONLY when it really names keys. "press submit" is someone
+    # asking for a click, so an unrecognised combo falls through to the click/LLM path instead of
+    # failing with "I don't know the key 'submit'".
+    m = re.search(r"\b(?:press|hit|tap)\s+(?:the\s+)?(.+)", t)
+    if m:
+        from vox import input as vox_input
+        combo = re.sub(r"\s+(?:key|keys|button)$", "", m.group(1).strip())
+        if vox_input.normalize_combo(combo) is not None:
+            return ("press", combo)
+
+    # Drag one target onto another ("drag 3 to 7", "drag Inbox onto Archive").
+    m = re.search(r"\bdrag\s+(?:the\s+)?(.+?)\s+(?:to|onto|into|on to)\s+(?:the\s+)?(.+)", t)
+    if m:
+        return ("drag", f"{m.group(1).strip()}||{m.group(2).strip()}")
+
+    # Set a control's value directly ("set volume to 30", "set theme to dark"). Timers/alarms are
+    # the scheduler's, and it already gets first refusal in dispatch — this guard is belt-and-braces.
+    m = re.search(r"\bset\s+(?:the\s+)?(.+?)\s+to\s+(.+)", t)
+    if m and not re.search(r"\b(timer|alarm|reminder|schedule)\b", t):
+        return ("set_value", f"{m.group(1).strip()}||{m.group(2).strip()}")
 
     # Click a labelled button / link / control by name, via the accessibility tree ("click Submit",
     # "click the Log in button"). Checked first — "click" is distinctive. Trailing role words are
@@ -110,6 +163,13 @@ def parse(text: str) -> tuple[str, str] | None:
     # Browser/app: go back (⌘[).
     if re.search(r"\bgo back\b|\bnavigate back\b", t):
         return ("back", "")
+
+    # Reload the current page (⌘R). Only the CANONICAL wording is builtin — this is the command line
+    # the brain emits and the right-hand side of a `TEACH:`. "refresh" is deliberately NOT here: the
+    # user wants that mapping to come from actually teaching it, so the learning path gets exercised
+    # rather than hidden behind a hardcoded synonym.
+    if re.fullmatch(r"(?:please\s+)?reload(?:\s+(?:the\s+|this\s+)?(?:page|tab|site))?", t):
+        return ("reload", "")
 
     # Close the current tab (⌘W).
     if re.search(r"\bclose\s+(?:this\s+|the\s+|current\s+)?tabs?\b", t):
@@ -244,11 +304,26 @@ def running_apps() -> list[str]:
     return [a.strip() for a in out.split(",") if a.strip()] if ok else []
 
 
+def frontmost_app_pid() -> tuple[int, str] | None:
+    """(unix pid, name) of the focused app, straight from System Events. None on failure.
+
+    The pid comes along because the accessibility API talks in pids, and the obvious way to get one
+    — ``NSWorkspace.frontmostApplication()`` — cannot be trusted here: it's a cached property
+    refreshed by main-run-loop processing, and the Vox daemon deliberately runs no ``NSApplication``
+    run loop (see ``overlay.py`` / ``bubble.py``). Measured in a long-lived run-loop-less process, it
+    sat on one stale app for five and a half minutes while a fresh process read the truth every
+    time — which is how "click on settings" pressed Cursor's Settings while the user was looking at
+    Arc (issue O18). ~150 ms, and worth every one of them."""
+    ok, out = _osa('tell application "System Events" to get {unix id, name} of '
+                   '(first process whose frontmost is true)')
+    pid, _, name = (out or "").partition(",")
+    return (int(pid.strip()), name.strip()) if ok and pid.strip().isdigit() else None
+
+
 def frontmost_app() -> str:
     """Name of the focused (frontmost) app — tells the brain which app you're on. "" on failure."""
-    ok, out = _osa('tell application "System Events" to get name of '
-                   '(first process whose frontmost is true)')
-    return out.strip() if ok else ""
+    hit = frontmost_app_pid()
+    return hit[1] if hit else ""
 
 
 def _active_tab(browser: str) -> tuple[str, str]:
@@ -279,6 +354,81 @@ def _now_line() -> str:
     from datetime import datetime
     now = datetime.now().astimezone()
     return f"Now: {now.strftime('%A %Y-%m-%d %H:%M')} ({now.tzname()})"
+
+
+def board_block(max_cards: int = 40) -> str:
+    """The workspace board as compact prompt text, or "" if empty/unavailable (idea #51).
+
+    Given to the action layer so the brain can both ANSWER about the board ("what's in my to-do?")
+    and resolve a card the user names ("move the AC Direct card to doing") without a round-trip.
+    Card ids are included because they're the unambiguous handle when two titles look alike.
+    Capped: a long board would otherwise crowd out the rest of the prompt."""
+    try:
+        from vox import board_store
+        conn = board_store.build()
+        try:
+            snap = board_store.board_snapshot(conn)
+            names = [b["name"] for b in board_store.list_boards(conn)]
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    lists = (snap or {}).get("lists") or []
+    if not lists:
+        return ""
+    shown, lines = 0, []
+    for l in lists:
+        cards = l.get("cards") or []
+        lines.append(f"  {l['name']} ({len(cards)}):")
+        for c in cards:
+            if shown >= max_cards:
+                lines.append("    …more not shown")
+                break
+            lines.append(f"    #{c['id']} {c['title']}")
+            shown += 1
+    other = [n for n in names if n != (snap or {}).get("name")]
+    extra = f" Other boards: {', '.join(other)}." if other else ""
+    return (f"[Workspace board \"{(snap or {}).get('name', 'Workspace')}\" — the user's task board."
+            f"{extra} Use BOARD: to change it]\n" + "\n".join(lines))
+
+
+def recent_actions_block(limit: int = 6) -> str:
+    """The last few actions Vox ran, as prompt text. "" when there's nothing (or the DB is off).
+
+    Given to BOTH brains. The action layer uses it to avoid repeating or contradicting what just
+    happened; the chat brain needs it because that's where the damage showed — asked "how did you
+    refresh the page?" it denied doing it and invented a mechanism, purely because nothing in its
+    prompt said what had just run."""
+    try:
+        from vox import command_store
+        conn = command_store.connect()
+        try:
+            rows = command_store.recent_actions(conn, limit)
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = []
+    for r in reversed(rows):  # oldest first — reads as a timeline
+        ts = (r.get("ts") or "")[-8:-3]  # HH:MM
+        did = r.get("resolved_intent") or "?"
+        if r.get("resolved_arg"):
+            did += f" {r['resolved_arg']}"
+        how = {"db": "saved command", "parser": "built-in command",
+               "llm": "worked out by you"}.get(r.get("resolved_by"), r.get("resolved_by") or "?")
+        flags = ""
+        if not r.get("success"):
+            flags += " (failed)"
+        if r.get("negated"):
+            flags += " (user said this was wrong)"
+        where = f" in {r['context_value']}" if r.get("context_value") else ""
+        lines.append(f"  {ts} heard \"{r.get('heard_phrase') or ''}\"{where} → ran: {did} "
+                     f"[{how}]{flags}")
+    return ("[What Vox has just done — these ALREADY happened, you did them. Use this to answer "
+            "questions about recent actions and to understand corrections like \"that's not what I "
+            "wanted\". Never deny an action listed here.]\n" + "\n".join(lines))
 
 
 def environment_context() -> str:
@@ -460,14 +610,63 @@ end try
 '''
 
 
+# Result prefix for a click that was REFUSED because focus left the app the utterance was aimed at
+# (issue O18). Callers match on it to know the click didn't happen AND must not be retried somewhere
+# else — deliberately not in `_FAIL_MARKERS`, because escalating would just re-run the click against
+# whatever app is in front now, which is the exact mistake this whole change exists to prevent.
+FOCUS_MOVED = "I didn't click"
+
+
+def focus_target() -> tuple[int, str] | None:
+    """(pid, name) of the app this utterance is aimed at — call it as EARLY as possible, then pin it.
+
+    Re-asking "what's frontmost?" at press time is what issue O18 was: an LLM round-trip, a click or
+    a remote-desktop session can move focus in between, and the press then lands in a different
+    application with no signal that it happened.
+
+    Answered from the focus watcher, which already polls this authoritatively every ~1.5 s — the
+    same reading that produces the ``[app=…]`` in the command-DB log line, so the click goes to the
+    app Vox told you it was scoped to. That makes it free but up to one poll old, which is fine
+    because it is not the last word: whatever presses re-checks against a live reading first
+    (``ax._focus_moved``), so a stale poll can only ever cost a refusal, never a wrong click.
+    Falls back to asking directly when the watcher is off or hasn't polled yet."""
+    from vox import ax, focus_watch
+    return focus_watch.last() or ax.frontmost_verified() or ax.frontmost()
+
+
 def click_element(target: str) -> str:
-    """Find a control labelled `target` in the focused app's accessibility tree and click it
+    """Find a control labelled `target` in the target app's accessibility tree and click it
     (AXPress the nearest pressable element). Uses the fast native AX engine (``vox.ax``, ~77 ms even
-    on a miss) so it can't freeze the voice loop or let focus drift to another app; falls back to the
-    AppleScript walk only if native AX is unavailable. Needs Accessibility permission. Never raises."""
+    on a miss) so it can't freeze the voice loop; falls back to the AppleScript walk only if native
+    AX is unavailable. Needs Accessibility permission. Never raises.
+
+    "Target app" is pinned up front (``focus_target``) and held for the whole find-and-press, so the
+    click goes to the app the user was looking at when they spoke rather than to whatever happens to
+    be frontmost by the time we press (issue O18). An outer pin — the executor sets one before its
+    LLM round-trip — wins, since it was taken closer to the utterance."""
     t = (target or "").strip().replace("\\", " ").replace('"', " ")
     if not t:
         return "Click what? Try 'click Submit'."
+
+    from vox import ax
+    aim = None if ax.pinned() else focus_target()  # an outer pin already answered this
+    with ax.pinned_to(*(aim or (0, ""))) as pin:
+        return _click_pinned(t, target, pin[1] if pin else "")
+
+
+def _click_pinned(t: str, target: str, want: str) -> str:
+    """The body of ``click_element``, run with the target app already pinned."""
+    # On a web page, ask the PAGE first. The browser's web AX tree is only intermittently exposed
+    # (collapsed in 20% of samples — see vox/webdom.py), so an AX miss here means "the tree is down"
+    # at least as often as it means "no such element". Returns None off-browser or on no match, so
+    # browser chrome and every native app still take the AX path below unchanged.
+    try:
+        from vox import targets
+        web = targets.click_label(t)
+    except Exception:
+        web = None
+    if web is not None:
+        return f"Clicked {web[1] or target}."
 
     # Native AX first — when it runs it's authoritative (a "not found" is a real, fast miss, NOT a
     # timeout), so we do NOT retry on the slow AppleScript path.
@@ -482,9 +681,14 @@ def click_element(target: str) -> str:
             return f"Clicked {label or target}."
         try:
             from vox import assistant
-            assistant._dbg("[click]", f"click_element({target!r}) [native] → {status}")
+            assistant._dbg("[click]", f"click_element({target!r}) [native] → {status}"
+                                      + (f" (aimed at {want}, now {label})" if status == "focus_changed" else ""))
         except Exception:
             pass
+        if status == "focus_changed":
+            # Refused, not failed: see ax._focus_moved for why pressing anyway is the worse option.
+            return (f"{FOCUS_MOVED} — {label} is in front now, "
+                    f"not {want or 'the app you were on'}.")
         if status == "not_found":
             return f"I couldn't find a '{target}' to click."  # fast, authoritative miss — no slow retry
         # status == "press_failed": native found it but the press errored → one-off AppleScript retry.
@@ -582,8 +786,8 @@ def clickable_targets(limit: int = 300) -> list[str]:
          channel/toolbar labels and not one message, then blamed for not finding the message.
     Same source as the numbered overlay, so what the brain can pick == what a badge is drawn on."""
     try:
-        from vox import ax
-        framed = ax.targets_with_frames(limit=limit)
+        from vox import targets
+        framed = targets.visible_targets(limit=limit)
         res = None if framed is None else _dedupe([i["label"] for i in framed])
     except Exception:
         res = None
@@ -935,6 +1139,21 @@ def _back(_: str) -> str:
     return "Back." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't go back ({out})")
 
 
+def _reload(_: str) -> str:
+    """Reload the current page — ⌘R. There was no reload command at all until 2026-08-03, which is
+    why "refresh" could never be taught as one: the brain had to fall back to CLICKing the browser's
+    reload button, which only works while that button is in the accessibility tree.
+
+    Unlike ``_back``/``close_tab`` this does NOT activate the browser first — reload is the one the
+    user is most likely to say while the browser is already in front, and stealing focus to the
+    browser when it isn't would reload a page they weren't looking at."""
+    front = frontmost_app()
+    target = front if front in _CHROMIUM or front == "Safari" else CONFIG.browser
+    ok, out = _osa(f'tell application "{target}" to activate\n'
+                   'tell application "System Events" to keystroke "r" using command down')
+    return "Reloaded." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't reload ({out}).")
+
+
 def close_tab() -> str:
     # Close the current browser tab (⌘W). Activate the browser first so the keystroke lands there.
     ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
@@ -1112,8 +1331,19 @@ def dictate(text: str) -> None:
         "enter": (36, ""), "return": (36, ""), "send": (36, ""), "submit": (36, ""),
         "backspace": (51, ""), "delete": (51, ""), "delete that": (51, ""), "tab key": (48, ""),
     }
-    if low in specials:
-        code, mod = specials[low]
+    # A retry Whisper batched into ONE chunk ("enter, enter") matched nothing, so saying it again
+    # made things WORSE, not better — the loop that has you saying "enter" six times. Collapse a
+    # repeated edit word back to one. Whole-utterance only, so dictating the word mid-sentence is
+    # untouched, and it fires ONCE: the repeats were retries, not a request for six newlines.
+    key = re.sub(r"\s+", " ", re.sub(r"[,;]+", " ", low)).strip()
+    if key not in specials:
+        for phrase in specials:
+            esc = re.escape(phrase)
+            if key and re.fullmatch(rf"{esc}(?:\s+{esc})+", key):
+                key = phrase
+                break
+    if key in specials:
+        code, mod = specials[key]
         _osa(f'tell application "System Events" to key code {code}'
              + (f' using {{{mod}}}' if mod else ''))
         if code == 36:  # any Return → next chunk starts fresh on a new line
@@ -1186,3 +1416,112 @@ def _handoff(what: str) -> str:
     # Anything the deterministic layer can't handle. CONTROL mode escalates this to the
     # executor / assistant (see core/loop.py); this string is just the fallback wording.
     return f"Not sure how to do that: {what!r}"
+
+
+# --- desktop primitives: scroll · press · right/double click · drag · set (idea #61) -------------
+# These gestures already existed inside the agent tier (`agent.py`), which is gated off, needs an
+# API key and spends a model round-trip deciding to use them. Here they're deterministic commands:
+# "scroll down" is a CGEvent, not a conversation. `vox.input` holds the synthesis; this layer is
+# only the spoken-argument parsing and the human-readable result.
+
+def _scroll(arg: str) -> str:
+    """"down:5" · "up:3" · "top" · "bottom" · "pageup" · "pagedown"."""
+    from vox import input as vox_input
+    a = (arg or "down:5").strip().lower()
+    if a in ("top", "bottom"):
+        # ⌘↑/⌘↓ jumps to the end in most apps; a fixed number of wheel ticks never quite does.
+        res = vox_input.press("command+up" if a == "top" else "command+down")
+        return f"scrolled to the {a}" if not res.startswith("failed") else res
+    if a in ("pageup", "pagedown"):
+        res = vox_input.press(a)
+        return ("paged up" if a == "pageup" else "paged down") if not res.startswith("failed") else res
+    direction, _, amount = a.partition(":")
+    try:
+        n = int(amount) if amount else 5
+    except ValueError:
+        n = 5
+    return vox_input.scroll(direction or "down", n)
+
+
+def _press(arg: str) -> str:
+    """Press a spoken key combination — "command s", "escape", "control option t"."""
+    from vox import input as vox_input
+    if not (arg or "").strip():
+        return "Press what? Try 'press command S'."
+    return vox_input.press(arg)
+
+
+def _resolve_point(target: str):
+    """(label, (cx, cy)) for a spoken click target — a badge number from the overlay ("14") or a
+    control label in the AX tree ("Submit"). None when neither finds it."""
+    from vox import ax
+    t = (target or "").strip().lower().rstrip(".")
+    n = int(t) if t.isdigit() else _to_index(t)
+    hit = ax.frame_index(n - 1) if n is not None else None
+    if hit is None and not t.isdigit():
+        hit = ax.frame_of(target)
+    if hit is None:
+        return None
+    label, (x, y, w, h) = hit
+    return (label, (x + w / 2.0, y + h / 2.0))
+
+
+def _click_variant(target: str, button: str, clicks: int, verb: str) -> str:
+    from vox import input as vox_input
+    if not (target or "").strip():
+        return f"{verb.capitalize()} what? Try '{verb} Submit'."
+    hit = _resolve_point(target)
+    if hit is None:
+        return f"I couldn't find anything to click called {target!r}."
+    label, (cx, cy) = hit
+    try:
+        vox_input.click_at(cx, cy, button=button, clicks=clicks)
+    except Exception as exc:
+        return f"failed: couldn't {verb} {label!r} ({exc})."
+    return f"{verb}ed {label}"
+
+
+def _right_click(target: str) -> str:
+    return _click_variant(target, "right", 1, "right-click")
+
+
+def _double_click(target: str) -> str:
+    return _click_variant(target, "left", 2, "double-click")
+
+
+def _drag(arg: str) -> str:
+    """"source||destination" — either side a badge number or a control label."""
+    from vox import input as vox_input
+    src, _, dst = (arg or "").partition("||")
+    if not src.strip() or not dst.strip():
+        return "Drag what where? Try 'drag 3 to 7'."
+    a, b = _resolve_point(src), _resolve_point(dst)
+    if a is None:
+        return f"I couldn't find anything called {src.strip()!r} to drag."
+    if b is None:
+        return f"I couldn't find anywhere called {dst.strip()!r} to drop it."
+    try:
+        vox_input.drag(a[1][0], a[1][1], b[1][0], b[1][1])
+    except Exception as exc:
+        return f"failed: couldn't drag ({exc})."
+    return f"dragged {a[0]} to {b[0]}"
+
+
+def _set_value(arg: str) -> str:
+    """"label||value" — set a slider, text field, checkbox or dropdown directly."""
+    from vox import ax
+    label, _, value = (arg or "").partition("||")
+    if not label.strip() or not value.strip():
+        return "Set what to what? Try 'set volume to 30'."
+    try:
+        res = ax.set_value(label.strip(), value.strip())
+    except Exception as exc:
+        return f"failed: couldn't set that ({exc})."
+    if res is None:
+        return "failed: the accessibility engine isn't available."
+    status, name = res
+    if status == "set":
+        return f"set {name} to {value.strip()}"
+    if status == "not_found":
+        return f"I couldn't find a control called {label.strip()!r} to set."
+    return f"failed: found {name!r} but couldn't set it."

@@ -179,6 +179,74 @@ export interface CommandIntent {
   description: string;
 }
 
+// --- Command learning (idea #24, docs/plan/command-learning/) --------------
+// The audit surface for commands Vox taught ITSELF. Note these fields are
+// snake_case: unlike the rest of the command API, /api/commands/learning has
+// always emitted the DB's own column names, and it's kept internally
+// consistent rather than half-converted.
+export interface LearningThresholds {
+  min_hits: number;
+  window_days: number;
+  probation_days: number;
+  probation_uses: number;
+  max_negatives: number;
+}
+
+/** A command Vox saved and is now using. */
+export interface LearnedCommand {
+  id: number;
+  intent: string;
+  arg: string | null;
+  label: string;
+  context: string;
+  phrases: string[];
+  enabled: boolean;
+  hits: number;
+  score: number;
+  learned_at: string | null;
+  reason: string | null;
+  last_used_at: string | null;
+  /** Saved, but not yet used enough to be permanent — decay() deletes it if it stays unproven. */
+  probation: boolean;
+  probation_days_left: number | null;
+  probation_uses_left: number;
+}
+
+/** Evidence Vox is accumulating. Not a command yet, and never fires. */
+export interface LearningCandidate {
+  id: number;
+  intent: string;
+  arg: string | null;
+  context: string;
+  phrases: string[];
+  hits: number;
+  negatives: number;
+  blocked: boolean;
+  first_seen: string | null;
+  last_seen: string | null;
+  /** Why it has or hasn't earned promotion, from the learner's own predicate. */
+  bar: string;
+}
+
+/** A new way of saying something Vox ALREADY does, attached to the existing command. */
+export interface LearnedAlias {
+  id: number;
+  text: string;
+  hits: number;
+  command_id: number;
+  label: string;
+  intent: string;
+  arg: string | null;
+}
+
+export interface LearningView {
+  mode: string;
+  thresholds: LearningThresholds;
+  aliases: LearnedAlias[];
+  learned: LearnedCommand[];
+  candidates: LearningCandidate[];
+}
+
 export interface CommandDb {
   contexts: CommandContext[];
   intents: CommandIntent[];
@@ -524,6 +592,17 @@ export const api = {
     request<{ ok: boolean }>(`/commands/phrases/${phraseId}`, {
       method: "DELETE",
     }),
+
+  // --- Command learning (idea #24) -----------------------------------------
+  learning: () => request<LearningView>("/commands/learning"),
+  promoteCandidate: (id: number) =>
+    request<Command>(`/commands/candidates/${id}/promote`, { method: "POST" }),
+  rejectCandidate: (id: number) =>
+    request<{ ok: boolean }>(`/commands/candidates/${id}/reject`, {
+      method: "POST",
+    }),
+  forgetLearned: (id: number) =>
+    request<{ ok: boolean }>(`/commands/learned/${id}`, { method: "DELETE" }),
 
   // --- Reminders / timers / alarms (Vox-owned scheduler, idea #16) ---------
   reminders: () => request<Reminder[]>("/reminders"),

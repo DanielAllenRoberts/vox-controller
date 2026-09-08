@@ -89,30 +89,43 @@ for intent, arg, why in [
 ok, _ = command_learn.is_learnable("navigate", "slack")
 check("accepts a normal action", ok)
 
-# --- 5. the promotion bar: N clean hits in a ROLLING window -----------------------------------------
-print("\n5. promotion bar (rolling window, no calendar-day requirement)")
-same_day = {"window_hits": 3, "negative_count": 0, "blocked": 0}
-thin = {"window_hits": 2, "negative_count": 0, "blocked": 0}
-r1, why1 = command_learn.clears_bar(same_day)
-r2, why2 = command_learn.clears_bar(thin)
-check("3 hits on ONE day IS ready (no waiting for tomorrow)", r1, why1)
-check("2 hits is not yet ready", not r2, why2)
-r3, why3 = command_learn.clears_bar({**same_day, "negative_count": 3})
+# --- 5. the save bar --------------------------------------------------------------------------------
+# NOTE (2026-08-03): the design changed. `learning_min_hits` is now the bar for SAVING (default 1 —
+# save the moment the LLM works something out, so the very next use skips the LLM), NOT the bar for
+# permanence. Permanence is probation: N uses inside the probation window or it deletes itself.
+# The old "3 independent LLM derivations before it's usable" model made the user pay for the same
+# resolution three times, which is the cost the feature exists to remove.
+print("\n5. save bar (hits inside a rolling window)")
+min_hits = int(command_learn._setting("learning_min_hits", 3))
+at_bar = {"window_hits": min_hits, "negative_count": 0, "blocked": 0}
+under = {"window_hits": max(0, min_hits - 1), "negative_count": 0, "blocked": 0}
+r1, why1 = command_learn.clears_bar(at_bar)
+check(f"{min_hits} hit(s) in one day IS ready (no waiting for tomorrow)", r1, why1)
+if min_hits > 1:
+    r2, why2 = command_learn.clears_bar(under)
+    check(f"{min_hits - 1} hits is not yet ready", not r2, why2)
+else:
+    check("bar is 1 — saved on first resolution, usable immediately", True, why1)
+r3, why3 = command_learn.clears_bar({**at_bar, "negative_count": 3})
 check("negatives block promotion", not r3, why3)
-r4, why4 = command_learn.clears_bar({**same_day, "blocked": 1})
+r4, why4 = command_learn.clears_bar({**at_bar, "blocked": 1})
 check("an explicitly forgotten action stays blocked", not r4, why4)
 
 # --- 5b. when does it ask instead of just saving? ---------------------------------------------------
+# A "leap" (the words share nothing with the target) no longer WITHHOLDS the save — it's logged
+# instead. Under the eager model minimal evidence is the normal case, and withholding meant the user
+# said a phrase that visibly did nothing. Probation + one-"no" retirement are the safety net now.
 print("\n5b. confirm-vs-save")
 ask, why = command_learn.should_confirm({"window_hits": 3}, phrase="open alexs chat",
                                         label="Alex Fairbairn")
-check("shared wording on good evidence → saves silently", not ask, why or "no confirm needed")
-ask2, why2b = command_learn.should_confirm({"window_hits": 3}, phrase="open the thing",
+check("shared wording → saves silently", not ask, why or "no confirm needed")
+ask2, why2b = command_learn.should_confirm({"window_hits": 1}, phrase="open the thing",
                                            label="Quarterly Revenue Dashboard")
-check("a leap on minimal evidence → asks first", ask2, why2b)
-ask3, _ = command_learn.should_confirm({"window_hits": 25}, phrase="open the thing",
-                                       label="Quarterly Revenue Dashboard")
-check("same leap, lots of evidence → stops asking", not ask3, "25 hits")
+check("a leap no longer blocks the save (logged, not withheld)", not ask2, why2b or "saved")
+check("but a leap is still DETECTED for the log",
+      command_learn.looks_like_a_leap("open the thing", "Quarterly Revenue Dashboard"))
+check("a sensible mapping is not flagged as a leap",
+      not command_learn.looks_like_a_leap("open alexs chat", "Alex Fairbairn"))
 
 # --- 6. negative signal ------------------------------------------------------------------------------
 print("\n6. negative signal")

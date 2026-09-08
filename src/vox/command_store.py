@@ -102,6 +102,7 @@ _INTENTS: list[tuple[str, str, int, str | None, str]] = [
     ("navigate_new",  "action", 1, "target",                 "Open in a new tab (force fresh)"),
     ("search",        "action", 1, "query",                  "Web search"),
     ("back",          "action", 0, None,                     "Go back (browser/app)"),
+    ("reload",        "action", 0, None,                     "Reload the current page (⌘R)"),
     ("tab",           "action", 1, "tab name",               "Switch to a tab by name"),
     ("tab_arrow",     "action", 1, "up:N | down:N",          "Move between tabs (relative)"),
     ("tab_index",     "action", 1, "N | first | last",       "Switch to a tab by position"),
@@ -195,7 +196,45 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, ddl in cols:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    _migrate_site_args(conn)
+    _sync_intents(conn)
     conn.commit()
+
+
+def _sync_intents(conn: sqlite3.Connection) -> None:
+    """Keep the `intent` catalogue in step with `_INTENTS` on EVERY boot, not just first seed.
+
+    `command.intent` is a foreign key into this table, so an intent added to the code after the DB
+    was seeded can never be used — inserting a command with it fails with "FOREIGN KEY constraint
+    failed". That's what happened when `reload` was added (2026-08-03): the action existed, the
+    parser produced it, and saving it as a command was impossible. INSERT OR IGNORE, so existing
+    rows (and any hand-edited descriptions) are untouched."""
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO intent (name, category, takes_arg, arg_help, description) "
+            "VALUES (?,?,?,?,?)", list(_INTENTS))
+    except Exception:
+        pass  # a catalogue refresh must never stop the daemon booting
+
+
+def _migrate_site_args(conn: sqlite3.Connection) -> None:
+    """Un-freeze the site-open commands seeded with a resolved URL (see `seed`).
+
+    A DB seeded before 2026-08-03 stores `navigate https://slack.com`, which bypasses the
+    installed-app check in `actions._navigate()` and sends "open slack" to the website even when the
+    Slack app is right there. Rewriting the arg to the spoken name restores the runtime decision.
+    Idempotent, and scoped by exact URL match so a user-edited or learned row is never touched."""
+    try:
+        from vox import actions
+        by_url = {url: name for name, url in actions._SITE_ALIASES.items()}
+        rows = conn.execute(
+            "SELECT id, arg FROM command WHERE intent='navigate' AND arg IS NOT NULL").fetchall()
+        for cid, arg in rows:
+            name = by_url.get(arg)
+            if name:
+                conn.execute("UPDATE command SET arg=? WHERE id=?", (name, cid))
+    except Exception:
+        pass  # a migration must never stop the daemon booting
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -262,10 +301,15 @@ def seed(conn: sqlite3.Connection) -> bool:
     arc = _ensure_context(conn, "app", "Arc", "Arc", 10)
 
     # --- global: site-opens (migrate actions._SITE_ALIASES → navigate commands) ---
+    # The arg is the SPOKEN NAME, not the resolved URL. `actions._navigate()` checks for an installed
+    # app before falling back to the site, so "open slack" opens the Slack app when you have it and
+    # slack.com when you don't. Storing the URL here froze that decision at seed time and sent every
+    # one of these to the website — on this machine that wrongly hijacked Slack, Spotify, Claude,
+    # Notion and Trello. "go to slack.com" is still the way to force the site over an installed app.
     from vox import actions
-    for name, url in actions._SITE_ALIASES.items():
+    for name in actions._SITE_ALIASES:
         _add_command(conn, g, "navigate", f"Open {name.title()}",
-                     [f"open {name}", f"go to {name}"], arg=url)
+                     [f"open {name}", f"go to {name}"], arg=name)
 
     # --- global: other fixed commands (parameterised ones stay in the code parser, decision #2) ---
     _add_command(conn, g, "window_move", "Next window", ["next window"], arg="next")
@@ -378,9 +422,18 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", text.lower())).strip()
 
 
+# How many words an utterance may carry BEYOND a `contains` phrase and still fire it. Politeness and
+# mis-hears ("please open slack for me") stay inside this; a sentence that merely mentions the phrase
+# does not, and falls through to the LLM — which is the right place to judge conversational speech.
+# Seen live 2026-08-03: "i said open slack and then you" — the user describing a bug TO THE AGENT —
+# matched the seeded phrase "open slack" and navigated the browser. Every one of the 150 seeded
+# phrases is `contains`, so this was reachable from any of them.
+_CONTAINS_SLACK_WORDS = 3
+
+
 def _phrase_hit(phrase_text: str, match_type: str, t: str) -> bool:
-    """Does normalized utterance `t` match this phrase? (Mirrors the loop: `contains` is substring,
-    which is how `phrase_match` works today; `exact` is equality; `regex` is a raw-text search.)"""
+    """Does normalized utterance `t` match this phrase? (`exact` is equality; `regex` is a raw-text
+    search; `contains` is a WORD-BOUNDED substring within a length budget — see below.)"""
     if match_type == "regex":
         try:
             return re.search(phrase_text, t) is not None
@@ -389,7 +442,13 @@ def _phrase_hit(phrase_text: str, match_type: str, t: str) -> bool:
     p = normalize(phrase_text)
     if match_type == "exact":
         return p == t
-    return p in t  # contains (default)
+    if not p:
+        return False
+    # Word-bounded, so "open x" (x.com) can't fire on "open xcode" and "click link" can't fire on
+    # "click linkedin" — a bare substring test matched both.
+    if re.search(rf"(?:^|\s){re.escape(p)}(?:\s|$)", t) is None:
+        return False
+    return len(t.split()) - len(p.split()) <= _CONTAINS_SLACK_WORDS
 
 
 def candidate_contexts(conn, app: str | None = None, domain: str | None = None) -> list[dict]:
@@ -572,6 +631,24 @@ def window_hits(conn, candidate_id: int, days: float) -> int:
     return int(row[0]) if row else 0
 
 
+def recent_actions(conn, limit: int = 6) -> list[dict]:
+    """The last few things Vox actually DID — what was heard, what ran, how it resolved.
+
+    The audit surface for "what did you just do?" (ideas #56 part 3). Without it the brain has no
+    idea what just happened and fills the gap with invention: asked how it had refreshed the page
+    24 seconds after doing it, it answered "That wasn't me" and described a Cmd+R-over-AppleScript
+    mechanism it had never used. `resolved_by` is included precisely because that failure was about
+    MECHANISM, not just about whether the action happened."""
+    try:
+        rows = _rows(conn,
+                     "SELECT ts, heard_phrase, resolved_intent, resolved_arg, resolved_by, "
+                     "success, negated, context_value FROM command_log "
+                     "ORDER BY id DESC LIMIT ?", (int(limit),))
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
 def note_usage(conn, command_id: int, phrase_id: int | None = None, *, success: bool = True) -> None:
     """Bump usage on a command (and the phrase that matched) — the data decay and eviction run on.
     On failure bump fail_count instead; a success resets it (doc 04, F3)."""
@@ -714,9 +791,13 @@ def promote(conn, candidate_id: int, *, reason: str = "threshold") -> int | None
         return existing["id"]
 
     label = f"{cand['intent']} {cand['arg']}".strip() if cand["arg"] else cand["intent"]
+    # hit_count starts at 1, not 0: the resolution that CREATED this command is itself a use, so a
+    # command saved on first hearing reads "1 of 3 uses" — matching what actually happened. Starting
+    # at 0 made the creating use invisible and put everything a use further from cementing.
     cur = conn.execute(
-        "INSERT INTO command (context_id, intent, arg, label, source, learned_at, learned_reason) "
-        "VALUES (?,?,?,?, 'learned', datetime('now'), ?)",
+        "INSERT INTO command (context_id, intent, arg, label, source, learned_at, learned_reason, "
+        "hit_count, last_used_at) "
+        "VALUES (?,?,?,?, 'learned', datetime('now'), ?, 1, datetime('now'))",
         (cand["context_id"], cand["intent"], cand["arg"], f"Learned: {label}"[:60], reason))
     cmd_id = cur.lastrowid
     for p in phrases:
@@ -727,13 +808,21 @@ def promote(conn, candidate_id: int, *, reason: str = "threshold") -> int | None
     return cmd_id
 
 
-def remap(conn, command_id: int, intent: str, arg: str | None) -> dict | None:
-    """Re-point a LEARNED command at a different action, keeping its phrases ("when I say X I
-    actually mean Y" — doc 04). Refuses builtin/user rows: those are human-authored and an inferred
-    edit must never overwrite them. Returns the previous action (so it can be undone / recorded as
-    the anti-mapping), or None if it refused."""
+def remap(conn, command_id: int, intent: str, arg: str | None,
+          *, allow_user: bool = False) -> dict | None:
+    """Re-point a command at a different action, keeping its phrases ("when I say X I actually mean
+    Y" — doc 04). Returns the previous action (so it can be undone / recorded as the anti-mapping),
+    or None if it refused.
+
+    ``builtin`` rows are never touchable — they're what Vox ships with.
+
+    ``user`` rows (taught explicitly via TEACH) are refused by default, because the caller is
+    usually an INFERRED correction and a guess must not silently rewrite something the user
+    authored. Set ``allow_user`` when the user is explicitly asking to change it — "when I say
+    refresh, use reload instead" — which is exactly when editing their own command is the point."""
     row = conn.execute("SELECT * FROM command WHERE id=?", (command_id,)).fetchone()
-    if row is None or row["source"] != "learned":
+    allowed = ("learned", "user") if allow_user else ("learned",)
+    if row is None or row["source"] not in allowed:
         return None
     was = {"intent": row["intent"], "arg": row["arg"]}
     conn.execute("UPDATE command SET intent=?, arg=?, updated_at=datetime('now'), "

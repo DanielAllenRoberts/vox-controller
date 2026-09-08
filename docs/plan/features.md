@@ -49,6 +49,12 @@
 | Arc profile / sidebar | ✅ | "profile two", "show tabs" / "hide tabs" | Ctrl+‹n›; clicks Arc's View menu item |
 | Chain two commands | ✅ | "open Arc and search this" | runs both halves when both parse |
 | Hotword-biased recognition | ✅ | automatic in control mode | nudges STT toward command/app words |
+| **Scroll** | ✅ | "scroll down", "scroll up 3", "scroll to the top", "page down" | CGEvent wheel; top/bottom use ⌘↑/⌘↓. Was agent-tier only. ideas #61 |
+| **Press a key combo** | ✅ | "press command S", "press escape", "press command shift 4" | CGEvent (<10ms) not AppleScript (~200ms); spoken digits work ("shift four"). ideas #61 |
+| **Right / double click** | ✅ | "right click Submit", "double click 14" | by AX label or overlay badge number. ideas #61 |
+| **Drag** | ✅ | "drag 3 to 7", "drag Inbox onto Archive" | either side a badge number or a label. ideas #61 |
+| **Set a control's value** | ✅ | "set volume to 30", "set theme to dark" | AX-native — sliders/fields/checkboxes set directly; popups press + pick the menu item. ideas #61 |
+| Background input delivery | ✅/off | `input_background_delivery` | posts to a pid (CGEventPostToPid) so Vox drives a window **without raising it or moving your cursor**. App-dependent — Electron often ignores posted mouse events. ideas #61 |
 
 ## Clicking & the accessibility tree
 
@@ -118,6 +124,9 @@
 | Feature | Status | How to see it | Notes |
 |---|---|---|---|
 | vox-speak MCP (speak-when-done) | ✅ | dashboard → **Integrations** | an MCP server that speaks a coding agent's finished-work announcements through TTS; per-machine setup block. ideas #34 |
+| **Silent notification bubble** | ✅ | MCP `notify`, or `python -m vox.bubble "text"` | a card in a screen corner instead of speaking — stays until you click its ✕, never steals focus (non-activating panel). Settings → **Notifications**. ideas #62 |
+| **Named agents (identity)** | ✅ | MCP `register_agent` / `whoami` / `list_agents` | agents take a name, so spoken replies become "David here — …" and bubbles are labelled DAVID. Routing *back* to an agent by name is not built. ideas #39 |
+| **One voice at a time** | ✅ | `cat data/speaking.lock` while something speaks | cross-process lock so Vox and every agent take turns instead of talking over each other; times out rather than deadlock. ideas #63 |
 
 ## In progress / next (see `ideas.md` for detail)
 

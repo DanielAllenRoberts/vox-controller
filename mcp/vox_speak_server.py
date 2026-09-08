@@ -42,6 +42,12 @@ _DEFAULT_KOKORO_VOICE = "af_bella"  # ≠ Vox's default Kokoro "af_heart"
 # Resolved dashboard setting (mcp_speak_cue) → env (VOX_MCP_CUE) → this default; "" disables it.
 _DEFAULT_CUE = "/System/Library/Sounds/Tink.aiff"
 
+# This process's agent name (idea #39, docs/plan/named-agents.md). One MCP server is spawned per
+# client, so one process == one agent. Seeded from the env for a CLI that's configured with a name
+# up front; otherwise the agent names ITSELF at runtime by calling `register_agent`, which is the
+# self-registration model that design settled on — no central config guessing which terminal is who.
+_AGENT_NAME = os.environ.get("VOX_AGENT_NAME", "").strip()
+
 
 def _cue_path():
     """Path to the pre-speech cue sound: dashboard setting → env → default. '' disables it.
@@ -93,6 +99,11 @@ def _say(text: str, voice: str, rate: int) -> str:
     text = (text or "").strip()
     if not text:
         return "(nothing to speak)"
+    # With several CLIs running, an unattributed voice is worse than no voice — you hear that
+    # something finished but not what. A registered name goes in front of the words. Prefix first,
+    # THEN truncate, so the cap covers what actually gets spoken.
+    if _AGENT_NAME:
+        text = f"{_AGENT_NAME} here — {text}"
     text = text[:_MAX_CHARS]
     _play_cue()  # short chime first, so the spoken heads-up doesn't come out of nowhere
     engine, say_voice, kokoro_voice = _mcp_voice()
@@ -106,6 +117,7 @@ def _say(text: str, voice: str, rate: int) -> str:
             say_voice=voice or say_voice,
             kokoro_voice=kokoro_voice,
             rate=(rate or None),
+            label=_AGENT_NAME or "mcp",   # names this speaker in the shared speech queue
         )
         return f"spoke aloud: {text[:80]!r}"
     except Exception:
@@ -155,6 +167,80 @@ def announce_done(summary: str = "The task is finished.", voice: str = "") -> st
                (defaults to VOX_MCP_VOICE, kept distinct from Vox's system voice).
     """
     return _say(summary, voice, 0)
+
+
+@mcp.tool()
+def notify(text: str, source: str = "", corner: str = "", duration: float = -1) -> str:
+    """Show a SILENT pop-up bubble in a corner of the user's screen — a heads-up with no sound.
+
+    The quiet alternative to `speak`. Use this instead of speaking when the user has asked to be
+    notified silently, is in a meeting or on a call, or when several things are finishing at once
+    and speaking each one would be noise. The bubble is click-through and never steals focus, so it
+    can't interrupt what the user is doing; it fades out on its own.
+
+    Args:
+        text: The message to show (kept short — it's a glance, not a document; long text is
+              truncated).
+        source: Who the message is from. Defaults to this agent's registered name, so with several
+                CLIs running the card says which one is talking. Rarely worth setting by hand.
+        corner: Optional "top-right" | "top-left" | "bottom-right" | "bottom-left" to override the
+                configured corner for this one message.
+        duration: Seconds on screen. 0 stays until the user clicks the card's ✕; a negative value
+                  (the default) uses the user's configured preference.
+    """
+    try:
+        from vox import bubble
+    except Exception as exc:  # bare run outside the repo venv — nothing to draw with
+        return f"(notify unavailable: {exc})"
+    try:
+        shown = bubble.show(text, source=source or _AGENT_NAME,
+                            corner=corner, duration=duration)
+    except Exception as exc:  # never crash the MCP client over a failed notification
+        return f"(notify failed: {exc})"
+    return f"(shown silently: {shown})"
+
+
+@mcp.tool()
+def register_agent(name: str) -> str:
+    """Give THIS agent a name, so the user can tell which one is talking.
+
+    Call this when the user names you ("your name is David"). From then on your spoken heads-up is
+    prefixed with the name and your notification bubbles are labelled with it — which is what makes
+    several CLIs running at once distinguishable rather than a chorus of anonymous voices.
+
+    Args:
+        name: The name to answer to (e.g. "David").
+    """
+    global _AGENT_NAME
+    try:
+        from vox import agents
+        entry = agents.register(name)
+    except Exception as exc:
+        return f"(couldn't register: {exc})"
+    _AGENT_NAME = entry["name"]
+    return f"registered as {entry['name']!r} (pid {entry['pid']})"
+
+
+@mcp.tool()
+def whoami() -> str:
+    """The name this agent is registered under, if any. Useful to check before announcing."""
+    return _AGENT_NAME or "(this agent has no name yet — call register_agent to take one)"
+
+
+@mcp.tool()
+def list_agents() -> str:
+    """List every named agent currently registered, so you can see who else is running."""
+    try:
+        from vox import agents
+        rows = agents.all_agents()
+    except Exception as exc:
+        return f"(couldn't read the registry: {exc})"
+    if not rows:
+        return "(no agents registered)"
+    return "\n".join(
+        f"- {r.get('name')} — pid {r.get('pid')}, registered {r.get('registered_at')}"
+        f"{', pane ' + r['tmux_pane'] if r.get('tmux_pane') else ''}"
+        for r in rows)
 
 
 if __name__ == "__main__":

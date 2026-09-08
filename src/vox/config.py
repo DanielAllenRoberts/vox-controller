@@ -62,6 +62,11 @@ class Config:
     dictate_phrases: tuple[str, ...] = ("start typing", "start dictation", "begin typing", "dictate")
     # True: a long pause auto-exits dictation (can't get stuck). False: stay until "stop typing".
     dictation_exit_on_silence: bool = True
+    # How long dictation tolerates SILENCE before exiting, measured on the wall clock. A single
+    # empty capture window used to end dictation, which is why it stopped mid-sentence: the window
+    # is counted in frames, so a mic backlog from a slow Whisper pass could satisfy it instantly
+    # from stale audio. 45s is a thinking pause; 6s was a breath. (issues.md O15)
+    dictation_idle_exit_seconds: float = 45.0
 
     # --- Dashboard (Vox Control Center) --- a local web UI served by an embedded FastAPI
     # bridge (vox.web.server), opened hands-free by an "open dashboard" wake phrase. Entirely
@@ -186,7 +191,10 @@ class Config:
         # this list on noise; a "vox …" hallucination then falsely fires the idle one-shot, so "vox"
         # is OUT. "switch" stays (else mis-heard as "search"); it can't fire the one-shot (no "vox").
         "switch cursor arc safari chrome github youtube gmail spotify notion "
-        "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma"
+        "chatgpt linkedin trello amazon netflix calculator terminal finder slack figma "
+        # Apps in daily use here that were missing, so "open obsidian" / "open whatsapp" paid a full
+        # Whisper pass every time (both show up in scripts/perf_report.py's grammar-candidate list).
+        "obsidian whatsapp"
     )
 
     # --- Vosk grammar command recognition — the "fast lane" (idea #53) ---------------------------
@@ -268,6 +276,40 @@ class Config:
     # (token-light text, no image); "screenshot" = image only (today's behavior). Master toggle above.
     screen_vision_mode: str = "auto"
 
+    # --- Agent tier (idea #57) --- multi-step GUI control via Anthropic's computer-use tool:
+    # screenshot → decide → click at a coordinate → look again. The LAST rung of the click ladder
+    # (DB → AX label → AX badge → here), and the only one that reaches canvas/WebGL/unlabelled
+    # controls the accessibility tree can't see. Also the only path that can do SEVERAL steps for
+    # one request. Everything else in Vox stays single-shot.
+    # OFF by default: it clicks and types on your live desktop, so you opt in from the dashboard.
+    agent_enabled: bool = False
+    # Must be a model that supports the computer_20251124 tool — Haiku 4.5 does NOT, so this is a
+    # separate setting rather than reusing big_brain_model. Always uses the "anthropic" provider
+    # (anthropic_key_env), since computer use is an API tool, not a subscription feature.
+    # Sonnet 5 over Opus 5 deliberately: $3/$15 per MTok vs $5/$25, and a screenshot loop is
+    # token-heavy (~2.8k image tokens PER STEP at 1920px), so the model choice dominates the bill.
+    # Measured on the first Opus runs here: ~$0.035/step, i.e. ~$0.35 for a 10-step task.
+    agent_model: str = "claude-sonnet-5"
+    agent_max_steps: int = 15        # hard cap on tool round-trips in one run (runaway guard)
+    agent_max_seconds: float = 180.0  # wall-clock ceiling for one run
+    # Width the screenshot is sent at. The tool's declared display size MUST match the image we
+    # actually send or every coordinate is skewed. 1920 = native here (scale 1.0, most accurate);
+    # 1280 is the docs' cost-saving baseline. Height follows the display's aspect ratio.
+    agent_capture_width: int = 1920
+    agent_effort: str = "medium"     # output_config.effort: low | medium | high | xhigh | max
+    # Apps where a stray coordinate click is worst (shell access / destructive). While one of these
+    # is frontmost the agent refuses raw coordinate clicks — the AX-label path still works.
+    agent_denied_apps: tuple[str, ...] = ("Terminal", "iTerm2", "iTerm", "Cursor", "Warp", "System Settings")
+
+    # --- Desktop input primitives (idea #61) ---
+    # Background delivery aims synthesized events at a specific process (CGEventPostToPid) instead
+    # of the global HID tap, so Vox can drive a window without raising it or moving your pointer.
+    # OFF by default because it is app-dependent: AppKit apps generally honour posted events,
+    # Chromium/Electron often ignore posted MOUSE events (keys usually still land). Off = exactly
+    # the behaviour Vox had before this existed, so turning it on can only be an experiment.
+    input_background_delivery: bool = False
+    input_scroll_amount: int = 5     # default wheel lines for a bare "scroll down"
+
     # --- Voice output (TTS) --- macOS `say`: local, instant, no model download. Swap for a
     # neural local TTS (Piper) later in tts.py. Premium/Siri voices install via System Settings →
     # Accessibility → Spoken Content → System Voice → Manage Voices.
@@ -305,6 +347,29 @@ class Config:
     # A short chime played just BEFORE the MCP speaks, so an IDE heads-up doesn't come out of
     # nowhere (the most-used MCP flow: "tell me out loud when you're done"). "" disables it.
     mcp_speak_cue: str = "/System/Library/Sounds/Tink.aiff"
+
+    # --- Notification bubble --- the SILENT sibling of the speak MCP: a small card in a screen
+    # corner instead of a spoken heads-up, for when you're in a meeting, on a call, or several
+    # agents finish at once. Drawn by vox.bubble in a helper process; click-through, never steals
+    # focus. Used by the vox-speak MCP's `notify` tool.
+    bubble_corner: str = "top-right"   # top-right | top-left | bottom-right | bottom-left
+    # Seconds on screen before it fades out. 0 = STAY UNTIL DISMISSED (the default): a notification
+    # you missed while looking at another window did nothing. Close it with the card's ✕.
+    bubble_duration: float = 0.0
+    bubble_max_width: int = 380        # card width in points; the height fits the wrapped text
+
+    # --- Speech queue --- Vox and every agent's MCP server are SEPARATE processes, each able to
+    # start speaking whenever it likes. Two voices at once is unlistenable, so all speech takes a
+    # cross-process lock and waits its turn (see vox/speech_lock.py). The timeout is a deadlock
+    # guard, not a queue policy: if the holder never releases, speaking anyway beats a voice loop
+    # that has gone silent — the same failure mode as the Kokoro streaming-player deadlock.
+    speech_queue_enabled: bool = True
+    speech_queue_timeout: float = 15.0   # seconds to wait for the speaker ahead of you
+    # The HOLD is bounded too (issue O13): a speaker wedged inside the lock would otherwise own it
+    # until its process dies and make every other speaker pay the full wait, every utterance. A
+    # watchdog releases after this many seconds, and a waiter seeing a hold this old goes ahead
+    # immediately. Keep it comfortably longer than the longest real utterance.
+    speech_queue_max_hold: float = 30.0
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.
