@@ -471,6 +471,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => request<Status>("/status"),
+  restart: () => request<{ ok: boolean }>("/restart", { method: "POST" }),
 
   usageRecent: (limit = 100) =>
     request<UsageEvent[]>(`/usage/recent?limit=${limit}`),

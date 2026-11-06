@@ -1034,8 +1034,62 @@ def _best_match(query: str, titles: list[str]) -> int | None:
     return best if best_score >= 0.55 else None
 
 
+def _match_score(query: str, title: str) -> float:
+    """How well a spoken query matches one tab title (substring or close phonetic match)."""
+    q, tl = query.lower().strip(), title.lower()
+    if q in tl:
+        return 0.9
+    score = difflib.SequenceMatcher(None, q, tl).ratio()
+    for w in tl.split():
+        score = max(score, difflib.SequenceMatcher(None, q, w).ratio())
+    return score
+
+
+def _arc_active_space() -> str:
+    ok, out = _osa('tell application "Arc" to return title of active space of front window')
+    return out if ok else ""
+
+
+def _arc_tab(query: str) -> str | None:
+    """Arc: pick among ALL matching tabs, preferring one in the profile on screen.
+
+    `tabs of front window` spans every profile, and favorites (where Gmail usually lives) aren't
+    listed under any space — so with a Gmail favorite in several profiles, "go to my gmail tab"
+    took whichever came first, often the wrong account. A Workspace Gmail's title doesn't even say
+    "Gmail" ("… - Acme Mail"), so the URL host counts too. Arc can't say which profile a favorite
+    belongs to, so — like _reuse_tab — select each candidate in turn and keep the first that leaves
+    the active space unchanged; if none does, fall back to the best match. None = couldn't read."""
+    ok, titles = _tab_titles("Arc")
+    uok, urls = _tab_urls("Arc")
+    if not ok:
+        return None
+    hay = list(titles)
+    if uok and len(urls) == len(titles):
+        hay = [t + (" gmail" if "mail.google." in u else "") for t, u in zip(titles, urls)]
+    scored = sorted(((_match_score(query, h), i) for i, h in enumerate(hay)), key=lambda x: -x[0])
+    best = scored[0][0] if scored else 0.0
+    # Only the top tier competes ("gmail" also fuzzy-matches every "… Mail" title at ~0.6) —
+    # trying weak matches would hop you through half your tabs.
+    cands = [i for sc, i in scored if sc >= 0.55 and sc >= best - 0.02]
+    if not cands:
+        return f"No tab matching {query!r}."
+    here = _arc_active_space() if len(cands) > 1 else ""
+    for i in cands:
+        sok, sout = _select_tab("Arc", i + 1)
+        if not sok:
+            return f"Couldn't switch tab ({sout})."
+        if not here or _arc_active_space() == here:
+            return f"Switched to {titles[i]!r}."
+    _select_tab("Arc", cands[0] + 1)
+    return f"Switched to {titles[cands[0]]!r}."
+
+
 def _tab(query: str) -> str:
     b = CONFIG.browser
+    if b == "Arc":
+        msg = _arc_tab(query)
+        if msg is not None:
+            return msg
     ok, titles = _tab_titles(b)
     if not ok:
         return f"Couldn't read tabs (tab switching may not support {b})."
@@ -1372,10 +1426,10 @@ def _get_clipboard() -> str:
     return out if ok else ""
 
 
-def edit_selection(transform) -> str:
-    """Rewrite the user's SELECTED text: copy it (⌘C), run transform(text)->text, paste it back
-    (⌘V), then restore the clipboard. `transform` is a callable (e.g. an LLM call). Needs
-    Accessibility permission; works anywhere standard copy/paste does (Docs, editors, fields)."""
+def selected_text() -> str | None:
+    """The text currently selected in the focused app, read via ⌘C with the clipboard restored
+    afterwards. None when nothing is selected (or the app didn't answer the copy). Needs
+    Accessibility permission; works anywhere standard copy does."""
     import time
     original = _get_clipboard()
     sentinel = "__vox_no_selection__"
@@ -1383,13 +1437,23 @@ def edit_selection(transform) -> str:
          'tell application "System Events" to keystroke "c" using command down')
     time.sleep(0.15)
     selected = _get_clipboard()
+    _osa(f'set the clipboard to {_as_str(original)}')
     if selected == sentinel or not selected.strip():
-        _osa(f'set the clipboard to {_as_str(original)}')
+        return None
+    return selected
+
+
+def edit_selection(transform) -> str:
+    """Rewrite the user's SELECTED text: copy it (⌘C), run transform(text)->text, paste it back
+    (⌘V), then restore the clipboard. `transform` is a callable (e.g. an LLM call). Needs
+    Accessibility permission; works anywhere standard copy/paste does (Docs, editors, fields)."""
+    selected = selected_text()
+    if selected is None:
         return "Highlight some text first, then say it again."
     new_text = (transform(selected) or "").strip()
     if not new_text:
-        _osa(f'set the clipboard to {_as_str(original)}')
         return "The brain returned nothing — left your text as is."
+    original = _get_clipboard()
     _osa(f'set the clipboard to {_as_str(new_text)}\n'
          'tell application "System Events" to keystroke "v" using command down\n'
          'delay 0.1\n'

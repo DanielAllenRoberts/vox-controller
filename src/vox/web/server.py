@@ -37,6 +37,9 @@ from . import settings_store, usage
 
 # Process start time → uptimeSeconds in /api/status.
 _STARTED_AT = time.monotonic()
+# True only when the voice daemon started us (start_in_background). Standalone `python -m
+# vox.web.server` has no daemon to restart, so /api/restart refuses there.
+_IN_DAEMON = False
 
 # Built frontend lives at <repo>/dashboard/dist. This file is
 # src/vox/web/server.py → parents[3] is the repo root.
@@ -175,6 +178,23 @@ def create_app() -> FastAPI:
             "personality": settings_store.get("personality") or "",
             "uptimeSeconds": round(time.monotonic() - _STARTED_AT, 1),
         }
+
+    @app.post("/api/restart")
+    def post_restart(request: Request) -> dict:
+        """Restart the voice daemon — the same path as saying "restart vox". Answers first and
+        relaunches half a second later, so the browser gets its response before this process exits.
+
+        Requires a JSON content type: a bodyless POST is a CORS "simple request", so without this any
+        web page could fire a hidden form at localhost and restart Vox. A JSON fetch from another
+        origin needs a preflight, which the CORS policy refuses."""
+        if "application/json" not in request.headers.get("content-type", ""):
+            raise HTTPException(status_code=415, detail="expected application/json")
+        if not _IN_DAEMON:
+            raise HTTPException(status_code=409, detail="dashboard is running standalone — no daemon to restart")
+        from ..core import loop
+        print("↻ Restarting Vox (dashboard)…")
+        threading.Timer(0.5, loop.relaunch).start()
+        return {"ok": True}
 
     # --- Settings ---
     @app.get("/api/settings")
@@ -1626,6 +1646,8 @@ def start_in_background(cfg=CONFIG) -> threading.Thread | None:
     swallowed so the voice daemon keeps running. Reads host/port from ``cfg`` if
     present, else the documented defaults.
     """
+    global _IN_DAEMON
+    _IN_DAEMON = True
     host = getattr(cfg, "dashboard_host", "127.0.0.1")
     port = getattr(cfg, "dashboard_port", 8765)
 

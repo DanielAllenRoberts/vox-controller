@@ -16,6 +16,12 @@ class MicStreamDead(Exception):
     the mic) instead of wedging silently in ``queue.get`` — the "freezes after a while" bug."""
 
 
+class NoInputDevice(Exception):
+    """Raised by ``open_mic_stream`` when no microphone can be opened at all — not the configured one
+    and not the system default (a Mac mini with its AirPods switched off has NO input). The daemon
+    catches this and waits for a mic to appear instead of dying at startup."""
+
+
 class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
@@ -352,6 +358,12 @@ def resolve_device(value):
 def open_mic_stream(cfg, out=None):
     """Open the mic backend chosen by config, with a hard fallback to the sounddevice MicStream.
 
+    Tries the configured microphone first, then the system default. A saved mic that isn't here
+    right now (AirPods switched off, a dock unplugged) must NOT stop Vox launching: it falls back to
+    the default and says so loudly. The setting is kept, so the next restart with the device present
+    uses it again. If NOTHING can be opened, raises ``NoInputDevice`` so the daemon can wait for a
+    mic instead of crashing with a sounddevice traceback.
+
     When `cfg.audio_aec` is true, try the native VoiceProcessingIO backend (system AEC). On ANY
     failure — PyObjC missing, mic permission denied, engine/tap/convert error — log a warning and
     fall back to the sounddevice `MicStream`, so the daemon never loses its mic. Default
@@ -362,14 +374,27 @@ def open_mic_stream(cfg, out=None):
 
     Returns an UNSTARTED stream; the caller enters it as a context manager exactly like MicStream.
     """
-    device = resolve_device(_setting("input_device", cfg.input_device))
+    say = out.emit if out is not None else print
+    configured = resolve_device(_setting("input_device", cfg.input_device))
+    last_exc = None
+    for device in ([configured, None] if configured is not None else [None]):
+        try:
+            name = sd.query_devices(device, kind="input")["name"]
+            stream = _open_mic_backend(cfg, out, device, name)
+        except Exception as exc:
+            last_exc = exc
+            if device is not None:
+                say(f"⚠️  configured mic {device!r} unavailable ({exc}) — using the system default "
+                    f"instead. Pick another in the dashboard → Settings → Voice → Microphone.")
+            continue
+        return stream
+    raise NoInputDevice(f"no microphone could be opened ({last_exc})")
+
+
+def _open_mic_backend(cfg, out, device, name: str):
     # ALWAYS name the device, including the system-default case — that is the one that silently
     # changes under you. A headphone connecting can move the default onto AirPods mid-session, and
     # nothing in the log said so; Vox just stopped hearing anything and looked frozen.
-    try:
-        name = sd.query_devices(device, kind="input")["name"]
-    except Exception:
-        name = "unknown"
     origin = "configured" if device is not None else "SYSTEM DEFAULT (can change under you)"
     print(f"🎙️  mic: {name!r} — {origin}")
     if _setting("audio_aec", cfg.audio_aec):

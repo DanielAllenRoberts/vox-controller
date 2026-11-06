@@ -1119,6 +1119,25 @@ escalation thread, where "go do this in the background" needs exactly a tool-cap
 
 ## 66. Vox's control surface as MCP tools — give the agent hands, not a loop
 
+> **BUILT 2026-09-11 — `mcp/vox_control_server.py` ("vox-control"), docs in `mcp/README.md`.** Both
+> stages landed in one go, as the separate server this section argued for (vox-speak is untouched and
+> vox-control carries its tools, so one entry per client). What's in: `screen_state`, `screenshot`
+> (± numbered badges, saved to `/tmp/vox_shots/` so a Dispatch session can `SendUserFile` it to the
+> phone), `ax_tree`, `clickable_elements`, `run_command` (grammar + taught/learned commands),
+> `click` by label or badge number, right/double click, `type_text`, `press`, `scroll`, `drag`,
+> `set_value`, `get_selection`/`replace_selection`, `run_agent`/`stop_agent` (#57 as a tool, not
+> retired), scheduler, board, `teach`, memory. stdio by default; `--http` + bearer token for another
+> machine. Verified live: clicks by label and by number, marked screenshot, HTTP 401/200.
+> The use it was built for: Claude Code + Remote Control/Dispatch, so the Mac can be driven from a
+> phone while away.
+>
+> **NOT built — the stage-2 gates below.** No read-side app deny-list, `agent_denied_apps` is not
+> applied to `press`/`click`, no per-call confirm on destructive verbs. Today the gate is the *client's*
+> per-tool permission prompt (Claude Code asks before each MCP call unless allow-listed), plus the
+> safety rules carried in the server's MCP instructions. Fine for one person driving their own Mac;
+> revisit before handing the server to anything autonomous. Also open: the dashboard Integrations
+> page still shows only the vox-speak snippet.
+
 **The inversion:** everyone else is building an agent *into* their assistant. This does the
 opposite — it hands Vox's existing primitives to an agent that already exists. Cheaper, and better
 at the one thing Vox is genuinely best at.
@@ -1232,8 +1251,217 @@ alongside the code, which is a distribution question we have open too.
 **Connects to:** O17 (the CPU starvation this would sidestep), O15 (which it was causing), #48 /
 `meetings.md` + `research/meetily-recon.md` (the meetings work this repo overlaps), #6 (disk).
 
+## 68. A menu bar item for Vox — and typing to it instead of talking
+
+**Two things in one small app.** A macOS status-bar icon (like Wi-Fi's, like Claude's) with a
+dashboard toggle — and a **text box that feeds Vox exactly what speech would**, so responses can be
+tested without talking, and Vox can be worked on in places where talking isn't an option (office,
+café, late at night). Designed 2026-09-11 with the loop already read; nothing built yet.
+
+### Typed input goes through the real pipeline — not a side door
+
+`capture_utterance` (`audio.py`) is the ONE place every mode waits for speech: the idle wake
+backend, control, assistant and dictation all block in it. Give it a tiny thread-safe queue to check
+each frame; when typed text is waiting, it hands that back instead of audio, and the transcriber
+passes a typed utterance straight through (`_recognize` too, ahead of the Vosk lane). Result: typed
+text hits **everything** speech hits — wake phrases (`take control`), one-shots (`vox open safari`),
+the command DB, the executor, command learning, the conversation feed, `vox.log` (`you (typed): …`).
+No second code path to drift from the spoken one, which is the whole point of testing by typing.
+
+Fed by a new bridge route, `POST /api/say {"text": "…"}`. Replies come back through the conversation
+feed the dashboard already has (`conversation.record_turn` → `/api/conversation/recent` + the WS
+stream) — the widget reads them from there rather than the loop having to know about it.
+
+One behaviour to know: typed text is "heard" in whatever mode Vox is in, same as voice. Idle means
+you type `take control` (or `vox …`) first. The panel shows the mode so that isn't a surprise —
+which needs the loop to publish its mode (a one-liner into a shared state that `/api/status`
+reads; today `mode` there is hardcoded `"idle"`).
+
+### The menu bar app
+
+`python -m vox.menubar` — pyobjc `NSStatusItem`, the same AppKit-in-a-helper-process approach the
+bubble (`bubble.py`) and overlay (`overlay.py`) use, so no new dependency and no run loop in the
+daemon. Spawned by the daemon at startup like the dashboard thread is (setting `menubar_enabled`,
+default on), with a pidfile so a restart kills the stale one instead of stacking icons. Icon: an SF
+Symbol template (`waveform`), tinted/badged by mode.
+
+Menu:
+- **Vox: running · control mode** — status line, polled from `/api/status`; dim when the daemon's gone.
+- **Open Dashboard / Close Dashboard** — one toggle, reusing `_open_dashboard` / `actions.close_dashboard`.
+- **Type to Vox…** — a small floating `NSPanel`: transcript above (from the conversation feed),
+  input below, Enter sends to `/api/say`. A **"speak replies"** checkbox flips the existing
+  `tts_enabled` setting so it's fully silent where you can't talk.
+- **Quit menu bar item.**
+
+Estimate: ~40 lines across `audio.py` / `loop.py` / `server.py` for the text path, ~250 for the
+menu bar app, a setting, docs. The text path is worth doing first and on its own — it's what makes
+the dashboard's Conversation page a test harness too.
+
+**Connects to:** #43 (the conversation feed this reads), #34/#62 (the bubble's helper-process
+pattern), the `.app` packaging gap in `hermes-comparison.md` (a status-bar app is the natural
+host for the daemon if Vox ever ships as a download), #66 (built — the MCP is the *agent's* text
+input to Vox; this is the *human's*).
+
+## 69. Clicky (heyclicky) — hold-to-talk, a pointing cursor, and tutor mode
+
+> **To look at:** [heyclicky.com](https://heyclicky.com) — a YC Spring 2026 Mac app, "an AI buddy
+> that lives next to your cursor". Hold a hotkey, ask out loud, and it screenshots the screen, answers
+> by voice, and a blue companion cursor **flies to the thing it's talking about**. "heyclicky agent"
+> spawns background agents (Notion / Gmail / Calendar). Free tier, then $20 / $100 a month; claims 25k+
+> users. The original is open source — [`farzaa/clicky`](https://github.com/farzaa/clicky), **MIT**,
+> Swift — but new work is private. [`jasonkneen/openclicky`](https://github.com/jasonkneen/openclicky)
+> (MIT) is the most developed fork.
+
+**Has it replaced us? No.** It's the same surface, built for a different job. Clicky is a **tutor**:
+"how do I do X in DaVinci?" → it explains and points. Vox is **control**: it does X. Clicky is cloud
+end to end (AssemblyAI STT → Claude with a screenshot → ElevenLabs TTS, keys behind a Cloudflare
+Worker), push-to-talk only, and sees the screen through screenshots alone. Vox is local-first and
+always listening, and it has the AX tree, #52's badges, the command DB and learning. Their open
+architecture has nothing better than ours. What it does have is three ideas worth taking.
+
+### 1. Hold-to-talk — a second way in, beside the wake word ⭐
+
+Hold a key, talk, let go. Nothing has to be "heard" first, and **releasing the key ends the
+utterance** — no trailing-silence wait, no smart-turn guess. That fixes several things at once:
+
+- **No false wakes.** Nothing gets acted on unless the key is down. That suits meetings, calls, and
+  a room with the TV on.
+- **Noisy rooms.** The wake word and the silence endpointing both struggle with background noise,
+  and the key replaces both.
+- **Pausing to think doesn't cut you off.** Holding the key tells Vox you're still talking, which
+  covers the dictation cut-out class (O15) from the user's side.
+- **Faster.** Release *is* the end of turn, so the `silence_seconds` wait after every utterance
+  disappears.
+
+**Shape:** a global hold-key monitor (pyobjc `NSEvent` global monitor on `flagsChanged`, e.g. hold
+**Right ⌥**, configurable), in a helper process like `overlay.py` / `bubble.py` — or inside the menu
+bar app (#68) once that exists. It flips a shared "held" flag. `capture_utterance` (`audio.py`)
+already loops per frame, the same seam #68's typed-input queue uses, so it gets two small rules:
+*key down* → start capturing now, bypassing the wake backend in whatever mode Vox is in; *key up* →
+return the utterance immediately, and ignore silence while held. From idle, a held-key utterance
+counts as a one-shot, like `vox …`. Earcons on press and release (`sounds.py`) confirm it's
+listening. Setting `push_to_talk` (key / off), default off. The wake word stays the default, and a
+"hold-to-talk only" mode with wake off is the meetings/office setting. Needs Input Monitoring /
+Accessibility, which the daemon already has for AX.
+
+### 2. A pointing cursor — "show me where X is", without clicking
+
+Clicky's standout. The brain writes `[POINT:x,y:label:screenN]` into its reply and the overlay
+cursor glides there. **We can do it better than pixels:** `executor._click_by_vision` already gets the
+big brain to pick a **badge number** on an `overlay.annotate()`d screenshot, so the target is an
+exact AX element. Pointing is the same pipeline with a highlight at the end instead of a click: an
+`overlay.point(frame, label)` that draws a glowing ring or arrow (spanning displays, like #52) and
+fades out. Voice: "where's the export button?" / "show me X". The brain can also put `[POINT:N]`
+in spoken answers, so it points while it explains. This is also the surface #46's "click here?"
+confirm and #7's status pet were waiting for, and it gives the command-learning trial a visible
+"is this the one?" before a learned click is saved.
+
+### 3. Tutor mode + idle observation (more speculative)
+
+**Tutor mode:** walk through a task one step at a time — point, wait for you to do it, check the
+screen, next step. It's #2 in a loop with a screen check between steps, and it serves people
+learning an app rather than driving it, which is a real new audience. **Idle observation** (from
+the `danpeg/clicky` fork, folded into OpenClicky): notice you're stuck and offer help. That one is
+creepy unless it's opt-in and very conservative, so it sits last.
+
+**Also noted — no action needed:** OpenClicky's local control bridge (`127.0.0.1:32123`: screenshot,
+speak, point for trusted local agents) is essentially our vox-control MCP (#66), so we're already
+there. Adding `point` to the MCP once #2 exists would complete it.
+
+**Connects to:** #68 (the menu bar helper is the natural home for the hold-key monitor, and both
+use `capture_utterance`), O15 (the cut-out class a held key rules out), #52 / #36 (badges +
+`overlay.annotate` that pointing reuses), #46 / #7 (the highlight surface they need), #24 (a
+visible confirm for learned clicks), #66 (a `point` tool).
+
+## 70. Pi as the big brain — a voice-level agent that builds itself up over time ⭐
+
+**The want:** an OpenClaw / Hermes-style agent, but one that lives at the voice layer, right next to
+the person. Simple asks stay on the small brain. When a task is genuinely complex ("message Sam on
+Slack that I'm running late, then put it on my calendar"), it **escalates to an agent** that can take
+many steps, use lots of tools, and get better at the job over time.
+
+**Why Pi and not the Agent SDK (#65 weighed this; this is the decision):** the harness itself.
+Pi is minimal (four core tools, a ~200-token prompt) and **grows by accretion**. Each new capability
+is a CLI tool plus a README, or a skill the agent reads only when it needs it. The agent can write
+and update those docs itself, so it documents what it learned and keeps it. That self-documenting
+growth is the point. The Agent SDK is a fixed, heavy harness we only rent.
+
+**Shape:**
+
+- **A sidecar, not a call.** Vox starts `pi --mode rpc` once (JSON over stdin/stdout) and keeps it
+  running, which also solves #64's cold start for this path. The router's `AGENT:` directive hands the
+  task over. Vox says "on it", keeps listening, and speaks the result when Pi reports done. Esc or
+  "stop" aborts it.
+- **Hands = the Vox controls, as Pi-native tools.** Pi has no built-in MCP (on purpose), so #66's
+  control surface becomes a small `vox` CLI (`vox screen`, `vox click "Send"`, `vox type …`, `vox
+  press enter`) that calls the bridge on 8765, with a README Pi reads. That's one implementation
+  serving two front-ends: the MCP for Claude Code / Desktop, the CLI for Pi.
+- **Apps = Composio** (Gmail, Slack, Calendar, …), on **Vox's own Composio account**
+  (`COMPOSIO_API_KEY` in `.env`, separate from any claude.ai connector). Exposed the same way: a
+  `composio` CLI tool wrapping the Python SDK's search / connect / execute, or a community MCP-bridge
+  extension if one proves solid.
+- **A workspace it owns:** a gitignored `data/agent/` holding Pi's skills, tool READMEs, and notes.
+  This is where "builds up over time" lives, and it's inspectable from the dashboard (#28's
+  transparency rule).
+- **A confirm gate before anything irreversible.** Sending, posting, buying, deleting: a spoken
+  "Send 'running late' to Sam on Slack — go?", answered by voice. Done as a Pi extension hook on tool
+  calls, so the rule doesn't depend on the model behaving.
+
+**The honest cost, the model.** Pi can't use the Claude subscription. Anthropic's terms bar
+third-party harnesses from subscription logins and enforced it in 2026. The community auth extension
+warns of account suspension, so we won't use it. Pi runs on an **Anthropic API key** (pay per token)
+or a cheaper provider (**DeepSeek**, which the small brain already uses). Pick per task class, with a
+per-task budget cap.
+
+**Build order:** (1) the `vox` CLI over the bridge, which works with no Pi at all and is testable on
+its own. (2) The Pi sidecar plus `AGENT:` handoff, read-only tasks first ("what's on my calendar").
+(3) Composio. (4) The confirm gate, before any send is allowed. (5) The agent workspace in the
+dashboard.
+
+**Connects to:** #65 (the harness question; this answers it), #64 (warm brain; the sidecar is warm
+by construction), #66 (the control surface it wraps), #57 (the computer-use agent tier this
+replaces as the default), #71 (scheduled agent tasks run on this), #28 (memory transparency).
+
+## 71. Scheduled agent tasks — crons that *do* things, not just remind
+
+**The want:** "every day at 3 a.m., go to Facebook Marketplace and look for pianos, then at 10 a.m.
+give me a report." Today the scheduler (`scheduler.py`, #16) only **announces**: timers chime,
+alarms ring, reminders speak. It should also be able to **run the agent**.
+
+**Shape: a fourth job kind, `task`.** Same store (`data/reminders.json`), same recurrence
+(`daily` / `weekdays` / `weekly` / `every:<n>`), and the same dashboard list and cancel. The
+difference is what firing means: it calls the agent (#70) with the job's prompt instead of speaking
+it.
+
+- **Work and report are two jobs, linked.** The 3 a.m. job runs **silently**, since nobody's
+  listening. It saves its findings to a result store (`data/agent/results/<job>/<date>.md`). The
+  10 a.m. job is a `report` that reads the latest result and speaks a short summary, plus a bubble
+  or board card with the details. One spoken request creates both ("every day at 3 do X, report at
+  10").
+- **Diffing is what makes it useful.** "Three new pianos since yesterday, one under $500" beats
+  re-reading the whole list. The task keeps its last result and the report says what changed.
+- **Created by voice, through the router.** A new `SCHEDULE:` shape, or the agent itself writing the
+  job via an MCP / CLI `schedule` tool. The dashboard shows the prompt, last run, last result, and a
+  "run now" button for testing.
+
+**Real constraints to design for:**
+
+- **The Mac has to be awake and unlocked at 3 a.m.** to click on the screen. Either schedule a wake
+  (`pmset`) and accept the screen-lock problem, or prefer **non-screen routes** (Composio, web
+  fetch) for unattended jobs and save screen control for when someone's there.
+- **No one to confirm at 3 a.m.** Unattended runs should be **read-only by default**. Anything
+  irreversible gets queued for the morning report ("found one; want me to message the seller?").
+- **Missed runs:** follow the scheduler's existing rule. A recently-missed task runs once on wake,
+  older ones are skipped and noted in the report.
+- **Site rules:** automating some sites (Facebook included) can trip their bot protection. Prefer a
+  site's API or Composio toolkit where one exists, and keep runs infrequent.
+
+**Connects to:** #16 (the scheduler it extends), #70 (the agent that runs the work), #51 (the board,
+where reports can land as cards), E (the notification bubble for the report), #66 (the `schedule`
+MCP tool).
+
 ## Sequencing note
 
-> **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation.
+> **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation. **2026-09-11: #66 built (vox-control MCP); next up is #68 — the menu bar item + typing to Vox.**
 
 Most of these rest on two foundations we haven't built yet: the **assistant / LLM (M4)** and **voice output / TTS (M2)**. Those two unlock most of the magic above — worth weighting toward them when we pick what to build next.

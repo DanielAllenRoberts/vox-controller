@@ -617,8 +617,10 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         # does. Keeping the loop alive is also what lets "stop" reach agent.abort().
         def _finished(acted, message):
             try:
-                from vox import tts
-                if message:
+                from vox import sounds, tts
+                if message == agent.SILENT_DONE:  # a plain action you can see happened → chime, no voice
+                    sounds.play(_setting("sound_oneshot", CONFIG.sound_oneshot))
+                elif message:
                     tts.speak(message)
             except Exception:
                 pass

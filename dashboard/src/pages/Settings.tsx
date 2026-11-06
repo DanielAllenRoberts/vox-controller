@@ -374,6 +374,14 @@ export function Settings() {
     );
   }, [data]);
 
+  // `/settings#voice` (the daemon opens this when it can't find a microphone) scrolls to that
+  // group once the cards exist. BrowserRouter doesn't honour hashes on its own.
+  React.useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (!data || !id) return;
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [data]);
+
   return (
     <div>
       <PageHeader
@@ -429,12 +437,14 @@ export function Settings() {
         <Stagger className="grid grid-cols-1 items-start gap-5 xl:grid-cols-2">
           {grouped.map(([group, settings]) => (
             <StaggerItem key={group}>
-              <GroupCard
-                group={group}
-                settings={settings}
-                pendingKey={pendingKey}
-                onChange={handleChange}
-              />
+              <div id={group.toLowerCase().replace(/\s+/g, "-")}>
+                <GroupCard
+                  group={group}
+                  settings={settings}
+                  pendingKey={pendingKey}
+                  onChange={handleChange}
+                />
+              </div>
             </StaggerItem>
           ))}
         </Stagger>

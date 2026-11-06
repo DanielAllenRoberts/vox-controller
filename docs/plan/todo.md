@@ -20,8 +20,8 @@ running Vox at all.
 | B | **Background input delivery** (`input_background_delivery`) | 2026-08-20, uncommitted | off by default, never switched on |
 | C | **Board voice verbs + `TEACH:`** | 2026-08-04 | `grep -c "decision=BOARD" vox.log` → 0 · same for TEACH — see block 1 for the script |
 | D | **Multi-step executor** (commit `e4938a6`) | 2026-08-20 | nothing in the log since |
-| E | **Notification bubble + MCP `notify`** | 2026-08-31 | ✅ ✕-click verified by synthetic click (card closed, frontmost app unchanged); still never used by a real agent mid-task |
-| F | **Vosk grammar fast lane** | 2026-07-16 | `vosk_commands_enabled` still `False`; never live-speech-tested |
+| E | **Notification bubble + MCP `notify`** | 2026-08-31 | ✅ **verified live 2026-10-08** — user confirms it works well in real use |
+| F | **Vosk grammar fast lane** | 2026-07-16 | ✅ **confirmed live 2026-07-20** (`[vosk] ⚡ … FAST LANE (skipped Whisper)`) — this row was stale |
 | G | **Named agents — identity half** (`register_agent` / `whoami` / `list_agents`) | 2026-08-31 | works from a script; never used by a real CLI naming itself |
 | H | **Speech queue** (one voice at a time) | 2026-08-31 | ✅ verified with real TTS in two processes — lock held 0.03→1.71s then 1.74→3.33s, no overlap; not yet tested against the *daemon* speaking |
 

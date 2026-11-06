@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from vox import actions, assistant, dispatch, executor, sounds, tts
-from vox.audio import MicStreamDead, capture_utterance, open_mic_stream
+from vox.audio import MicStreamDead, NoInputDevice, capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
@@ -59,6 +59,16 @@ class _Quit(Exception):
 
 class _Restart(Exception):
     """Raised to re-exec the program (pick up code changes) by voice."""
+
+
+def relaunch() -> None:
+    """Spawn a fresh Vox and hard-exit this one. Used by the voice "restart vox" and the dashboard's
+    Restart button. Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,
+    so the deadlock there meant restart never fired). start_new_session detaches it so it survives
+    this process exiting; stdout still goes to the terminal."""
+    subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True,
+                     env={**os.environ, "VOX_RESTART": "1"})
+    os._exit(0)
 
 
 def _start_dashboard(cfg, out) -> None:
@@ -138,6 +148,40 @@ def _open_dashboard(cfg, out) -> None:
             out.emit(f"🖥  Opening dashboard → {url}")
         except Exception as exc:
             out.emit(f"  [dashboard] couldn't open browser: {exc}")
+
+
+def _open_mic_or_wait(cfg, out):
+    """``open_mic_stream``, but if NO microphone can be opened, keep the daemon alive and wait for one
+    instead of dying at startup (a Mac mini with its AirPods off has no input at all). Opens the
+    dashboard's Settings page at the Voice group — its Microphone dropdown is read live from the Mac —
+    so the user can connect or pick one, then retries every few seconds. The dashboard, scheduler and
+    MCP keep working meanwhile; Vox just can't hear yet."""
+    import sounddevice as sd
+    waiting = False
+    while True:
+        try:
+            stream = open_mic_stream(cfg, out)
+        except NoInputDevice as exc:
+            if not waiting:
+                waiting = True
+                out.emit(f"⚠️  {exc}\n"
+                         f"   {cfg.assistant_name} is up (dashboard, scheduler, MCP) but can't hear. "
+                         f"Connect a microphone or pick one in Settings → Voice → Microphone — "
+                         f"listening starts the moment one appears.")
+                url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}/settings#voice"
+                try:
+                    subprocess.run(["open", url], capture_output=True, text=True)
+                except Exception:
+                    webbrowser.open(url)
+            time.sleep(5)
+            try:
+                sd._terminate(); sd._initialize()  # re-enumerate — PortAudio's device list is frozen at init
+            except Exception:
+                pass
+            continue
+        if waiting:
+            out.emit("🎙️  Microphone found — listening.")
+        return stream
 
 
 def _is_quit(text: str, cfg) -> bool:
@@ -1191,7 +1235,7 @@ def main() -> None:
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
     try:
-        with open_mic_stream(cfg, out) as mic:
+        with _open_mic_or_wait(cfg, out) as mic:
             frames = mic.frames()
             # _Quit/_Restart are handled INSIDE the `with` (not propagated out) so we never run
             # MicStream.__exit__: PortAudio's Pa_StopStream → CoreAudio DeviceStop can deadlock and
@@ -1275,12 +1319,7 @@ def main() -> None:
                 os._exit(0)
             except _Restart:
                 out.emit("\n↻ Restarting Vox…")
-                # Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,
-                # so the deadlock there meant restart never fired). start_new_session detaches it so
-                # it survives this process exiting; stdout still goes to the terminal.
-                subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True,
-                                 env={**os.environ, "VOX_RESTART": "1"})
-                os._exit(0)
+                relaunch()
             except (KeyboardInterrupt, _Quit):
                 sounds.play(cfg.sound_sleep)
                 out.emit("\n👋 Quitting Vox.")
