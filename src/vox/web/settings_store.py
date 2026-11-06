@@ -435,6 +435,15 @@ _SCHEMA_META: list[dict] = [
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
     },
     {
+        "key": "fast_wake",
+        "label": "Fast wake",
+        "group": "Voice",
+        "type": "toggle",
+        "help": "Recognise \"Hey Vox\" and the other wake phrases with a tiny recogniser first, so "
+                "Vox wakes about half a second sooner. Anything it isn't sure of still goes through "
+                "full transcription. Applies live.",
+    },
+    {
         "key": "idle_wake_precheck",
         "label": "Quick wake-word check while idle",
         "group": "Voice",

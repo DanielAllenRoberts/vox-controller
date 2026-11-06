@@ -267,6 +267,7 @@ class Config:
     local_ai_base_url_env: str = "LOCAL_AI1_URL"   # .env var holding the base URL (…/v1)
     local_ai_key_env: str = "LOCAL_AI1"            # .env var holding the API key
     local_ai_model: str = "google/gemma-4-e4b"     # model id the local server exposes
+    fast_wake: bool = True              # idle: whole-utterance Vosk check of the wake phrases before Whisper (~0.6 s faster wake)
     idle_wake_precheck: bool = False    # idle: Vosk keyword check before Whisper (saves CPU; see backends._WAKE_KEYWORDS)
     agent_alerts: str = "bubble"        # Claude Code hook alerts ("David needs your OK"): off | bubble | speak
     agent_done_alerts: bool = False     # also announce when an agent finishes a turn (Stop fires every turn)
