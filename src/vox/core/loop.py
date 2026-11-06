@@ -136,6 +136,30 @@ _IN_APP = os.environ.get("VOX_APP") == "1"
 _APP_BUNDLE_ID = "app.vox.mac"
 
 
+def _start_volume_watch(out) -> None:
+    """Log the Mac's output volume whenever it changes, next to everything else in vox.log. The user
+    reported other apps' audio getting much quieter while Vox runs (logged issue 620b806d). Nothing in
+    Vox sets the volume, AEC (which ducks) is off, and the interface stays at 48 kHz, so this records
+    WHEN it happens and what Vox was doing, instead of guessing. One osascript every 4 s."""
+    def run():
+        last = None
+        while True:
+            try:
+                r = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
+                                   capture_output=True, text=True, timeout=3)
+                v = (r.stdout or "").strip()
+                if v == "missing value":  # e.g. a USB interface with a hardware knob: nothing to watch
+                    return
+                if v and v != last:
+                    if last is not None:
+                        out.emit(f"🔈 system output volume {last} → {v}")
+                    last = v
+            except Exception:
+                pass
+            time.sleep(4)
+    threading.Thread(target=run, name="vox-volume-watch", daemon=True).start()
+
+
 def _open_dashboard(cfg, out) -> None:
     """Open the dashboard in its own window (Arc opens external localhost links as a standalone
     'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
@@ -1347,6 +1371,7 @@ def main() -> None:
         assistant.prewarm_sdk(executor._SYSTEM, "small")
     except Exception:
         pass
+    _start_volume_watch(out)    # diagnostics for "Vox turns my music down" (logged issue 620b806d)
     _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
     _start_scheduler(cfg, out)  # additive; non-fatal if the scheduler module is missing/broken
     _cmd_on_focus = _start_command_cache(cfg, out)  # boot-load the command DB + install query logging

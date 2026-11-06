@@ -317,11 +317,16 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     if db is not None:
         return db
 
-    if actions.parse(text) is not None:
+    if parsed is not None:
         result = actions.handle(text)
         if result is not None and not actions.failed(result):
-            return (True, result)
+            # Most commands succeed silently. These confirm OUT LOUD: the user asked for a spoken
+            # "issue logged" (logged issue 8d656565), and a settings change should be acknowledged.
+            return (parsed[0] not in _SPOKEN_INTENTS, result)
     return None
+
+
+_SPOKEN_INTENTS = {"log_issue", "set_setting"}
 
 
 # --- assistant action-intent gate ---------------------------------------------

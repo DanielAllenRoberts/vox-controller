@@ -69,7 +69,8 @@ _SYSTEM = (
     "(top-right/top-left/bottom-right/bottom-left), fast_wake (true/false). Anything else: CHAT: "
     "that it has to be changed in Vox's settings.\n"
     "To SHOW the user where something is WITHOUT clicking it ('where's the export button', 'show me "
-    "where settings is', 'point at X', 'circle X'): output  POINT: <what to point at>. Vox rings it on "
+    "where settings is', 'point at X', 'circle X', 'circle where Sam's birthday is on my calendar'): "
+    "output  POINT: <what to point at, as it would appear on screen, e.g. Sam's birthday>. Vox rings it on "
     "screen. Use CLICK only when they want it pressed.\n"
     "To CLICK any on-screen control by what the user calls it ('click the play button', 'press "
     "submit', 'tap the menu', 'select Settings'): output  CLICK: <what to click>. This also covers "
@@ -686,10 +687,7 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         target = raw.split(":", 1)[1].strip()
         from vox import ax
         with ax.pinned_to(*(aim or (0, ""))):
-            result = actions.point_at(target)
-            if not result.startswith("There's"):
-                # Not found by name: LOOK at the screen before giving up, like clicking does.
-                result = _point_by_vision(target) or result
+            result = actions.point_at(target)  # falls back to looking at the screen itself
         assistant._dbg("[executor]", f"decision=POINT target={target!r} → {result!r}")
         return result.startswith("There's"), result
     if upper.startswith("DICTATE"):  # user wants to type by voice → tell the loop to enter dictation

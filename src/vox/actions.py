@@ -233,7 +233,10 @@ def _parse(text: str) -> tuple[str, str] | None:
                      m.group(1).strip())
         # A vague target ("circle something on the screen") isn't a label to search for; the brain
         # decides what to show. Seen live: it searched for an element called "something on the screen".
-        if tgt and tgt not in {"it", "that", "this"} and not re.match(r"(?:something|anything|stuff|whatever|things?)\b", tgt):
+        # Descriptive targets ("where jc's birthday is on my calendar", "where I should study") aren't
+        # labels to search for: the brain + vision handle those (seen live in Notion Calendar).
+        if (tgt and tgt not in {"it", "that", "this"} and len(tgt.split()) <= 4
+                and not re.match(r"(?:something|anything|stuff|whatever|things?|where|what|which|how|when|who)\b", tgt)):
             return ("point", tgt)
 
     # Right / double click, by control label or by a badge number from the overlay.
@@ -1851,12 +1854,12 @@ def _log_issue(text: str) -> str:
         return "Say 'log an issue' and then what went wrong, in one go."
     from vox import issues
     issues.add(text)
-    try:  # one-shots succeed silently, so confirm on screen (quietly) that it was saved
+    try:  # confirmed out loud by dispatch (_SPOKEN_INTENTS) and quietly on screen too
         from vox import bubble
         bubble.show(f"Issue logged: {text[:120]}", source="Vox", duration=4)
     except Exception:
         pass
-    return "Logged it."
+    return "Issue logged."
 
 
 def point_at(target: str) -> str:
@@ -1885,6 +1888,13 @@ def point_at(target: str) -> str:
         except Exception:
             hit = None
     if hit is None:
+        try:  # not found by name: look at the screen (vision badge pick) before giving up
+            from vox import executor
+            seen = executor._point_by_vision(target)
+            if seen:
+                return seen
+        except Exception:
+            pass
         return f"I couldn't find {target!r} on screen."
     label, (x, y, w, h) = hit
     try:

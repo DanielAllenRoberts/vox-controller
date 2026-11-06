@@ -84,7 +84,7 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
     ("input-primitives", "Control", "Scroll / press keys / right-click / drag",
      "'scroll down', 'press command R', 'right click Submit', 'drag 3 to 7'.", "code"),
     ("log-issue", "Control", "Log an issue by voice",
-     "Say 'log an issue, <what went wrong>'. Vox says 'Logged it' and it appears under Testing → Logged issues with what was on screen.", "code"),
+     "Say 'log an issue, <what went wrong>'. Vox says 'Issue logged' and it appears under Testing → Logged issues with what was on screen.", "code"),
     ("point-vision", "Control", "Pointing looks at the screen",
      "'point at <something only visible, not a button>': if it's not found by name, Vox looks at the screen and rings it.", "code"),
     ("media-background", "Control", "Music control in the background",
