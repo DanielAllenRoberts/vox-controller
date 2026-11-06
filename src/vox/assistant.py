@@ -443,6 +443,8 @@ def complete(text: str, history=None, *, brain: str = "small", system: str | Non
         raw = _openai(text, history, model, system, brain, kind)
     elif provider == "local_ai":
         raw = _local_ai(text, history, model, system, brain, kind)
+    elif provider == "chatgpt":
+        raw = _chatgpt(text, history, model, system, brain, kind)
     else:
         raw = _anthropic(text, history, model, system, brain, kind)
     # Debug: dump the COMPLETE raw response, BEFORE any [OPEN]/[DONE]/[BIG]/SAY:/MEMORY[...]
@@ -554,8 +556,13 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
         # voice loop — the client otherwise defaults to ~10 min.
         create = client.with_options(timeout=45.0).chat.completions.create
         thinking_off = _deepseek_thinking_off(model, brain)
-        resp = create(model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs,
-                      extra_body={"thinking": {"type": "disabled"}} if thinking_off else None)
+        if label == "chatgpt":
+            # OpenAI's current models take max_completion_tokens (not max_tokens), and reasoning
+            # models count their hidden thinking against it, so give them room to still answer.
+            resp = create(model=model, max_completion_tokens=max(CONFIG.llm_max_tokens, 4000), messages=msgs)
+        else:
+            resp = create(model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs,
+                          extra_body={"thinking": {"type": "disabled"}} if thinking_off else None)
         out = (resp.choices[0].message.content or "").strip()
         if not out and not thinking_off and resp.choices[0].finish_reason == "length" \
                 and "deepseek" in (model or "").lower():
@@ -580,6 +587,40 @@ def _openai(text, history, model, system, brain="small", kind="chat"):
     if not key:
         return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
     return _openai_call(text, history, model, system, brain, kind, CONFIG.llm_base_url, key)
+
+
+def _chatgpt(text, history, model, system, brain="small", kind="chat"):
+    """OpenAI's own models (the ChatGPT brain), on the user's OpenAI API key."""
+    key = os.environ.get(CONFIG.openai_key_env)
+    if not key:
+        return "I need an OpenAI API key for ChatGPT. Add it in Settings, Brains."
+    return _openai_call(text, history, model, system, brain, kind, CONFIG.openai_base_url, key, label="chatgpt")
+
+
+_CHATGPT_MODELS: dict = {"at": 0.0, "ids": []}
+
+
+def chatgpt_models() -> list[str]:
+    """Chat models this OpenAI key can use, newest-looking first, cached 10 minutes. [] without a key
+    or on error. Read from OpenAI rather than hard-coded: model names change faster than Vox does."""
+    key = os.environ.get(CONFIG.openai_key_env)
+    if not key:
+        return []
+    if _CHATGPT_MODELS["ids"] and time.monotonic() - _CHATGPT_MODELS["at"] < 600:
+        return _CHATGPT_MODELS["ids"]
+    try:
+        client = _openai_client_for(CONFIG.openai_base_url, key)
+        ids = [m.id for m in client.with_options(timeout=10.0).models.list()]
+    except Exception as exc:
+        _dbg("[chatgpt]", f"couldn't list models: {exc}")
+        return []
+    skip = ("audio", "realtime", "transcribe", "tts", "image", "embedding", "moderation", "search",
+            "whisper", "dall-e", "davinci", "babbage", "instruct", "codex")
+    chat = sorted((i for i in ids if i.startswith(("gpt-", "o")) and not any(s in i for s in skip)
+                   and not re.search(r"-\d{4}-\d{2}-\d{2}$", i)),  # dated snapshots duplicate the alias
+                  reverse=True)
+    _CHATGPT_MODELS.update(at=time.monotonic(), ids=chat)
+    return chat
 
 
 def _local_ai(text, history, model, system, brain="small", kind="chat"):

@@ -129,6 +129,14 @@ final class AppModel {
 
     // MARK: Settings
 
+    /// Models the ChatGPT provider offers, read live from OpenAI for the saved key ([] without one).
+    var chatgptModels: [String] = []
+
+    func loadChatGPTModels() async {
+        struct R: Decodable { var models: [String] }
+        if let r: R = try? await api.get("brain/models?provider=chatgpt") { chatgptModels = r.models }
+    }
+
     func reloadSettings() async {
         do { settings = try await api.settings(); settingsError = nil }
         catch { settingsError = error.localizedDescription }

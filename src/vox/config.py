@@ -259,6 +259,8 @@ class Config:
 
     llm_base_url: str = "https://api.deepseek.com"  # openai-compatible providers (DeepSeek, Ollama, LM Studio); "" for none
     llm_api_key_env: str = "DEEPSEEK_API_KEY"   # env var holding the API key for the "openai" provider (DeepSeek etc.)
+    openai_key_env: str = "OPENAI_API_KEY"         # the "chatgpt" provider: OpenAI's own API
+    openai_base_url: str = "https://api.openai.com/v1"
     anthropic_key_env: str = "ANTHROPIC_API_KEY"  # the "anthropic" provider's OWN key env — separate from llm_api_key_env so a DeepSeek (openai) brain + a Claude/Haiku (anthropic) brain can run at once
 
     # Local AI — a self-hosted OpenAI-compatible /v1 endpoint (LM Studio / Ollama / vLLM, e.g. a home

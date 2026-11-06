@@ -33,6 +33,7 @@ _PROVIDER_OPTIONS = [
     {"value": "claude_sdk", "label": "Claude (subscription / SDK)"},
     {"value": "anthropic", "label": "Anthropic API"},
     {"value": "openai", "label": "OpenAI-compatible (DeepSeek / Ollama / LM Studio)"},
+    {"value": "chatgpt", "label": "ChatGPT (OpenAI API key)"},
     {"value": "local_ai", "label": "Local AI (your own GPU / endpoint)"},
     {"value": "claude_cli", "label": "Claude CLI"},
 ]

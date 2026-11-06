@@ -9,7 +9,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ◐ **Reminders page didn't show a reminder Vox had set** (it fired on time). Cause: the page loaded
   once and never refreshed; one-off reminders are deleted after firing. Fix: pages reload on appear,
   on app activation and on ⌘R (review finding #9, in progress).
-- ☐ **~1.5 s between "hey vox" and the ready sound.** Measured: 0.5 s end-of-speech wait + ~0.6 s idle
+- ☑ **~1.5 s between "hey vox" and the ready sound.** (fast wake built and on: `fast_wake`; caught
+  80/108 wake recordings at ~5 ms with 0/195 false wakes; Whisper remains the fallback.) Measured: 0.5 s end-of-speech wait + ~0.6 s idle
   Whisper pass. Plan: a whole-utterance Vosk check of the wake phrases first (3 ms), so a confident
   match wakes instantly; Whisper stays the fallback. Measure on the Voice Lab recordings.
 - ☑ **Personality page: picking a character resizes the top card and shoves the grid down.** The card
@@ -38,7 +39,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   actions in the chat (what got clicked, opened, typed).
 
 ## Features
-- ☐ **Testing tracker in Insights:** every feature with a status (untested / works / broken) and a
+- ☑ **Testing tracker in Insights:** every feature with a status (untested / works / broken) and a
   comment box the user can fill in, replacing the to-test.md checklist.
 - ☑ **Commands page reorganised:** opens on a grid of apps with counts; click in for details; the
   "Open GitHub / Open Gmail…" commands collapse into one row. **Blocked** list below the grid: Vox won't open
@@ -73,8 +74,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   open, then inspect the Claude app's AX frames read-only (pinned pid, no focus change).
 - ☐ **Composio** isn't integrated in Vox yet (only planned in ideas #70 step 3: Vox's own Composio
   account as the agent's app layer). Belongs to the agent-system work; add to the test list once built.
-- ☐ **ChatGPT / OpenAI as a brain option** alongside Claude and DeepSeek.
-- ☐ **Expand the task board** (more than lists + cards; scope to discuss).
+- ☑ **ChatGPT / OpenAI as a brain option** alongside Claude and DeepSeek: provider `chatgpt` (OpenAI API,
+  `OPENAI_API_KEY`, `max_completion_tokens` with room for reasoning). Model menu read live from OpenAI's
+  model list for the key (no guessed model names). Keys can now be added in Settings → Brains. Not yet
+  live-tested: no OpenAI key is set (the .env entry is empty). Vision ("look at the screen") still needs Claude.
+- ☑ **Expand the task board**: see the Trello-style board entry (deadlines, multi-select, tags, checklists, archive).
 
 ## Round 1c
 - ☑ **Change settings by voice** (allow-listed: speak replies, voice, learning, auto-typing, thinking,

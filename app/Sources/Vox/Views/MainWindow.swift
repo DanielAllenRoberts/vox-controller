@@ -76,6 +76,7 @@ enum BrainNames {
         case "anthropic": "Anthropic API"
         case "local_ai": "Local model"
         case "openai": model.lowercased().contains("deepseek") ? "DeepSeek" : "OpenAI-compatible"
+        case "chatgpt": "ChatGPT"
         default: p
         }
     }
@@ -91,7 +92,13 @@ enum BrainNames {
             "deepseek-v4-pro": "DeepSeek V4 Pro",
             "deepseek-chat": "DeepSeek Chat",
         ]
-        return known[m] ?? m
+        if let name = known[m] { return name }
+        // "gpt-5.6-terra" → "GPT-5.6 Terra": OpenAI's ids, readable, without a table to keep current.
+        if m.hasPrefix("gpt-") {
+            let parts = m.dropFirst(4).split(separator: "-")
+            return (["GPT-" + (parts.first.map(String.init) ?? "")] + parts.dropFirst().map { $0.capitalized }).joined(separator: " ")
+        }
+        return m
     }
 
     static func short(_ b: BrainRef) -> String { model(b.model) }
@@ -102,6 +109,7 @@ enum BrainNames {
         case "claude_sdk": "Claude subscription (Pro / Max)"
         case "anthropic": "Anthropic API key"
         case "openai": "DeepSeek or another OpenAI-compatible API"
+        case "chatgpt": "ChatGPT (OpenAI API key)"
         case "local_ai": "Local model (Ollama, LM Studio)"
         case "claude_cli": "Claude CLI"
         default: p

@@ -135,6 +135,10 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "In any app: 'save this' (⌘S), 'undo that' (⌘Z), 'reopen the tab I closed' (⌘⇧T). For app-specific commands Vox uses the app's own menus: in Zen 'open the developer tools', 'zoom in'; in Pages/Preview 'export as PDF'.", "code"),
     ("memory-quality", "Memory", "Long-term memory keeps facts about you",
      "Hey Vox: 'my sister Jess lives in Durban' and 'remember that I'm vegetarian' → Memory → long-term. 'From now on when I say refresh press command R' and 'remember to call the bank' → not long-term (today's notes only). Saying the same fact twice keeps one.", "code"),
+    ("chatgpt-brain", "Vox.app", "ChatGPT as a brain",
+     "Settings → Brains → API keys: paste an OpenAI key. Then Quick replies → Provider → ChatGPT; the Model menu lists the models your key can use (read from OpenAI). Ask Vox something: it answers via ChatGPT (Activity shows 'chatgpt').", "code"),
+    ("api-keys-settings", "Vox.app", "API keys in Settings",
+     "Settings → Brains → API keys shows which keys are saved (never the key itself); paste to add, Remove… to delete. No restart needed.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),

@@ -283,7 +283,16 @@ def create_app() -> FastAPI:
 
     # --- Setup: API keys + a brain test (used by the app's onboarding) ---
     def _secret_names() -> list[str]:
-        return sorted({CONFIG.anthropic_key_env, CONFIG.llm_api_key_env, CONFIG.local_ai_key_env})
+        return sorted({CONFIG.anthropic_key_env, CONFIG.llm_api_key_env, CONFIG.local_ai_key_env,
+                       CONFIG.openai_key_env})
+
+    @app.get("/api/brain/models")
+    async def brain_models(provider: str = "chatgpt") -> dict:
+        """Models a provider offers, read live (only ChatGPT for now: OpenAI's list for this key)."""
+        if provider != "chatgpt":
+            return {"provider": provider, "models": []}
+        from .. import assistant
+        return {"provider": provider, "models": await asyncio.to_thread(assistant.chatgpt_models)}
 
     @app.get("/api/secrets")
     def get_secrets() -> dict:

@@ -25,6 +25,7 @@ struct SettingsView: View {
         case .advanced: AdvancedPane()
         case .general: CatalogPane(tab: t) { AppBehaviourSection() }
         case .listening: CatalogPane(tab: t) { HoldToTalkSection() }
+        case .brains: CatalogPane(tab: t) { APIKeysSection() }
         default: CatalogPane(tab: t) { EmptyView() }
         }
     }
@@ -141,9 +142,9 @@ struct SettingRow: View {
             model.set(s.key, .string(provider))
             let modelKey = "\(brain)_model"
             let current = model.value(modelKey).string
-            if !Self.runs(current, on: provider),
-               let pick = model.setting(modelKey)?.options?.first(where: { Self.runs($0.value, on: provider) }) {
-                model.set(modelKey, .string(pick.value))
+            let choices = provider == "chatgpt" ? model.chatgptModels : (model.setting(modelKey)?.options ?? []).map(\.value)
+            if !Self.runs(current, on: provider), let pick = choices.first(where: { Self.runs($0, on: provider) }) {
+                model.set(modelKey, .string(pick))
             }
         })
     }
@@ -151,6 +152,7 @@ struct SettingRow: View {
     static func runs(_ modelID: String, on provider: String) -> Bool {
         switch provider {
         case "claude_sdk", "anthropic", "claude_cli": modelID.hasPrefix("claude")
+        case "chatgpt": modelID.hasPrefix("gpt-") || modelID.range(of: #"^o\d"#, options: .regularExpression) != nil
         case "openai": !modelID.hasPrefix("claude") && !modelID.contains("/")
         case "local_ai": modelID.contains("/")
         default: true
@@ -164,6 +166,7 @@ struct SettingRow: View {
         let brain = s.key.hasPrefix("small_brain") ? "small_brain" : s.key.hasPrefix("big_brain") ? "big_brain" : nil
         if let brain, s.key.hasSuffix("_model") {
             let provider = model.value("\(brain)_provider").string
+            if provider == "chatgpt" { opts = model.chatgptModels.map { SettingOption(value: $0, label: $0) } }
             opts = opts.filter { Self.runs($0.value, on: provider) }
             opts = opts.map { SettingOption(value: $0.value, label: BrainNames.model($0.value)) }
         }
@@ -377,5 +380,76 @@ private struct AdvancedPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// API keys for the brains that need one. Saved to Vox's own .env (owner-only) and used at once;
+/// the values never come back from the engine, only whether each is set.
+private struct APIKeysSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var keys: [String: Bool] = [:]
+    @State private var drafts: [String: String] = [:]
+    @State private var error: String?
+    @State private var removing: String?
+
+    private static let names: [(env: String, label: String, help: String)] = [
+        ("OPENAI_API_KEY", "OpenAI (ChatGPT)", "platform.openai.com → API keys"),
+        ("ANTHROPIC_API_KEY", "Anthropic (Claude API)", "console.anthropic.com → API keys"),
+        ("DEEPSEEK_API_KEY", "DeepSeek", "platform.deepseek.com → API keys"),
+    ]
+
+    var body: some View {
+        Section {
+            ForEach(Self.names.filter { keys[$0.env] != nil }, id: \.env) { k in
+                LabeledContent {
+                    if keys[k.env] == true {
+                        HStack(spacing: 8) {
+                            Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green).labelStyle(.titleAndIcon)
+                            Button("Remove…") { removing = k.env }
+                        }
+                    } else {
+                        HStack(spacing: 8) {
+                            SecureField("", text: Binding(get: { drafts[k.env] ?? "" }, set: { drafts[k.env] = $0 }),
+                                        prompt: Text("Paste key"))
+                                .frame(width: 200)
+                                .onSubmit { Task { await save(k.env, drafts[k.env] ?? "") } }
+                            Button("Save") { Task { await save(k.env, drafts[k.env] ?? "") } }
+                                .disabled((drafts[k.env] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(k.label)
+                        Text(k.help).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            Text("API keys")
+        } footer: {
+            if let error { Text(error).foregroundStyle(.red) }
+            else { Text("Only needed for the brains you pick below. Keys stay on this Mac.").foregroundStyle(.secondary) }
+        }
+        .task { await load() }
+        .confirmationDialog("Remove this API key?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            titleVisibility: .visible) {
+            Button("Remove Key", role: .destructive) { if let r = removing { Task { await save(r, "") } } }
+        } message: {
+            Text("Brains that use it stop working until you add a key again.")
+        }
+    }
+
+    private func load() async {
+        if let k: [String: Bool] = try? await model.api.get("secrets") { keys = k }
+        await model.loadChatGPTModels()
+    }
+
+    private func save(_ name: String, _ value: String) async {
+        do {
+            try await model.api.post("secrets", ["name": .string(name), "value": .string(value.trimmingCharacters(in: .whitespacesAndNewlines))])
+            drafts[name] = ""
+            error = nil
+            await load()
+        } catch { self.error = ErrorWords.message("Couldn't save that key.", error) }
     }
 }
