@@ -44,19 +44,26 @@ struct OnboardingView: View {
         .onChange(of: step) { _, s in if s == .engine { startEngine() } }
     }
 
+    /// Fixed-width buttons, kept out of the step animation: when the label changed ("Get Started" →
+    /// "Continue") the width animated with the page slide and the hover highlight drew at the wrong
+    /// size.
     private var footer: some View {
-        HStack {
+        HStack(spacing: 10) {
             if step != .welcome && step != .done {
-                Button("Back") { go(-1) }.keyboardShortcut(.cancelAction)
+                Button { go(-1) } label: { Text("Back").frame(minWidth: 70) }
+                    .keyboardShortcut(.cancelAction)
             }
             Spacer()
-            if let skip = skipLabel { Button(skip) { go(1) } }
-            Button(primaryLabel) { primary() }
+            if let skip = skipLabel {
+                Button { go(1) } label: { Text(skip).frame(minWidth: 110) }
+            }
+            Button { primary() } label: { Text(primaryLabel).frame(minWidth: 110) }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .disabled(!canContinue)
         }
         .controlSize(.large)
+        .transaction { $0.animation = nil }
     }
 
     private var primaryLabel: String {

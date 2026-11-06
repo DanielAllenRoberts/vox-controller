@@ -6,9 +6,9 @@
 #   app/build.sh --bundle-engine  self-contained app for download: ships the engine source and uv,
 #                                 so first launch installs everything (implies --release)
 #
-# Signing is ad-hoc. macOS ties privacy permissions to the signature, and an ad-hoc signature
-# changes on every build, so after rebuilding you may need to re-allow Microphone/Accessibility
-# (or `tccutil reset All app.vox.mac`). A release for other people needs a Developer ID + notarising.
+# Signing is ad-hoc with a bundle-id designated requirement, so privacy permissions survive
+# rebuilds (see the codesign line at the end). A release for other people needs a Developer ID +
+# notarising.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -76,5 +76,10 @@ if [ "$bundle_engine" = 1 ]; then
   cp "$uv_bin" "$app/Contents/Resources/bin/uv"
 fi
 
-codesign --force --deep --sign - "$app" >/dev/null
+# Ad-hoc signing pins the app's identity to this exact build's hash, so macOS dropped the Microphone
+# and Accessibility grants on every rebuild ("Failed to match existing code requirement" in tccd's
+# log, while System Settings still showed Vox switched on). An explicit designated requirement makes
+# macOS recognise Vox by its bundle id instead, so grants survive rebuilds. Fine for a local build;
+# a build for other people should be Developer ID signed and notarised.
+codesign --force --deep --sign - -r='designated => identifier "app.vox.mac"' "$app" >/dev/null
 echo "built $app ($config$( [ "$bundle_engine" = 1 ] && echo ', engine bundled'))"
