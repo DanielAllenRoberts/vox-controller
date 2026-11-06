@@ -6,6 +6,7 @@ sleep phrase). The assistant label enters ASSISTANT mode (one-shot LLM request).
 See docs/plan/modes.md.
 """
 
+from vox.paths import DATA_DIR
 import os
 import signal
 import subprocess
@@ -13,11 +14,10 @@ import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vox import actions, assistant, dispatch, executor, sounds, tts
+from vox import actions, assistant, auto_dictation, dispatch, executor, sounds, tts
 from vox.audio import MicStreamDead, NoInputDevice, capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
@@ -130,11 +130,21 @@ def _start_focus_watch(cfg, out, on_change=None) -> None:
             out.emit(f"  [focus] not started: {exc}")
 
 
+# Set by Vox.app when it launched this engine. The app replaces the browser dashboard, so "open
+# dashboard" brings the app forward instead of opening a tab.
+_IN_APP = os.environ.get("VOX_APP") == "1"
+_APP_BUNDLE_ID = "app.vox.mac"
+
+
 def _open_dashboard(cfg, out) -> None:
     """Open the dashboard in its own window (Arc opens external localhost links as a standalone
     'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
     stacks. Closing is non-disruptive — actions.close_dashboard presses the window's close button
     via accessibility (no Space-switch). Guarded so a failure can't break the wake loop."""
+    if _IN_APP:
+        subprocess.run(["open", "-b", _APP_BUNDLE_ID], capture_output=True, text=True)
+        out.emit("🖥  Showing Vox")
+        return
     url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
     try:
         if actions._focus_dashboard(url):  # reuse the existing dashboard window/tab
@@ -169,10 +179,11 @@ def _open_mic_or_wait(cfg, out):
                          f"Connect a microphone or pick one in Settings → Voice → Microphone — "
                          f"listening starts the moment one appears.")
                 url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}/settings#voice"
-                try:
-                    subprocess.run(["open", url], capture_output=True, text=True)
-                except Exception:
-                    webbrowser.open(url)
+                if not _IN_APP:  # the app already shows "can't hear" in its status
+                    try:
+                        subprocess.run(["open", url], capture_output=True, text=True)
+                    except Exception:
+                        webbrowser.open(url)
             time.sleep(5)
             try:
                 sd._terminate(); sd._initialize()  # re-enumerate — PortAudio's device list is frozen at init
@@ -333,6 +344,10 @@ _MISSED_GRAMMAR: list = []  # phrase set from the last Vosk miss, consumed by th
 
 
 def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
+    from vox import runtime
+    if runtime.is_typed(audio):
+        out.emit(f"  ⌨  you (typed): {audio.text!r}")
+        return audio.text
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
         text = transcriber.transcribe(audio, hotwords=hotwords)
@@ -502,6 +517,9 @@ def _recognize(audio, cfg, transcriber, out, hotwords: str = "") -> str:
     returns instantly (no Whisper, no LLM) and snaps mis-hears to the nearest command
     ("necks tab" → "next tab"). Anything Vosk can't match falls through to Whisper. Fully guarded —
     any Vosk problem uses the Whisper lane. All `[vosk]` lines go to vox.log for visibility."""
+    from vox import runtime
+    if runtime.is_typed(audio):
+        return _transcribe(transcriber, audio, cfg, out, hotwords=hotwords)
     if _setting("vosk_commands_enabled", getattr(cfg, "vosk_commands_enabled", False)):
         try:
             from vox import command_cache
@@ -546,7 +564,13 @@ def _passes_interrupt_gate(audio, text, cfg) -> bool:
     audio to be sustained ≥ interrupt_min_seconds AND carry ≥ interrupt_min_words transcribed
     words — mirrors livekit min_interruption_duration/min_interruption_words + pipecat's
     MinWords strategy. Ambient TV/chatter that leaks one short word no longer cancels the call.
-    Read via the guarded _setting path so defaults are pure wins and dashboard toggles apply live."""
+    Read via the guarded _setting path so defaults are pure wins and dashboard toggles apply live.
+
+    Typed input and hold-to-talk are deliberate by construction, so they always pass. A typed
+    utterance is one sample of "audio" and would otherwise be silently dropped as a blip."""
+    from vox import runtime
+    if runtime.is_typed(audio) or runtime.last_capture_ptt:
+        return True
     min_secs = _setting("interrupt_min_seconds", cfg.interrupt_min_seconds)
     if min_secs and len(audio) / cfg.sample_rate < min_secs:
         return False
@@ -683,20 +707,48 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
         done.wait()  # the speak thread BLOCKS to completion; if we cut it, stop_speaking already fired
 
 
+def _floor(text: str, cfg, check, phrases, in_field: bool) -> bool:
+    """A mode-floor test (sleep / quit / mode switch). Normally ``check`` — a SUBSTRING match, so
+    "okay go to sleep" still works. With auto dictation typing into a text field it's whole-utterance
+    only: otherwise dictating "see you later" or "never mind" into a message drops Vox to sleep and
+    swallows the sentence (research/command-vs-dictation.md, L0)."""
+    return auto_dictation.whole_utterance(text, phrases) if in_field else check(text, cfg)
+
+
 def _control_mode(frames, cfg, transcriber, out, mic) -> None:
     out.emit(f'● CONTROL MODE — e.g. "open Safari" or "go to GitHub". Say "{cfg.sleep_spoken}" to stop.')
     pending = []  # short clarification memory: when the brain asks a question, the next answer gets context
     redirect = None  # a clear command captured mid-LLM-call, to run instead of the cancelled one
+    auto_dictation.reset()  # no chunk history / unanswered "Close tab?" carried over from a past session
+
+    def _say(msg: str) -> None:  # auto dictation's spoken prompts ("Close tab?"), then drop our echo
+        out.emit(f"  🔊 {msg}")
+        tts.speak(msg)
+        mic.flush()
+
     while True:
+        auto_on, target = False, None  # auto dictation (off by default): on + the focused field
         if redirect is not None:
-            text, redirect = redirect, None
+            text, redirect = redirect, None  # said over the brain, or "that was a command" → a command
         else:
             audio = capture_utterance(frames, cfg)
             if audio is None:
                 continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
-            text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
+            from vox import runtime
+            auto_on = (bool(_setting("auto_dictation", getattr(cfg, "auto_dictation", False)))
+                       and not runtime.is_typed(audio))  # typed input is always addressed to Vox
+            target = auto_dictation.probe() if auto_on else None
+            if target is not None and target.get("editable"):
+                # In a text field Whisper is the arbiter, with no command hotwords — the same pass
+                # dictation mode uses. The Vosk grammar force-aligns whatever it hears onto its
+                # nearest phrase (issues.md O21: "scroll down" → "stand down" at conf 1.0), which in
+                # a text field would turn a typed sentence into a command.
+                text = _transcribe(transcriber, audio, cfg, out)
+            else:
+                text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
             if not text:
                 continue
+        in_field = bool(target and target.get("editable"))
         # An agent run (idea #57) works the screen for up to a minute on its own thread. While one
         # is in flight a plain "stop" should cancel IT and leave us in control mode — not drop Vox
         # to idle, which is what the same word means the rest of the time.
@@ -707,36 +759,46 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             out.emit("🛑 Stopping the agent.")
             pending = []
             continue
-        if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
+        # In a text field every floor check is whole-utterance: dictating "…and then stop everything"
+        # or "can you open the dashboard and check the numbers" must be typed, not obeyed.
+        if _floor(text, cfg, _is_abort, cfg.abort_phrases, in_field):  # emergency stop → idle
             sounds.play(cfg.sound_abort)
             out.emit("🛑 Stopped.")
             return None
-        if _is_quit(text, cfg):
+        if _floor(text, cfg, _is_quit, cfg.quit_phrases, in_field):
             raise _Quit
-        if _is_restart(text, cfg):
+        if _floor(text, cfg, _is_restart, cfg.restart_phrases, in_field):
             raise _Restart
-        if _is_sleep(text, cfg):
+        if _floor(text, cfg, _is_sleep, cfg.sleep_phrases, in_field):
             sounds.play(cfg.sound_sleep)
             out.emit("○ Sleeping.")
             return None
-        if _is_assistant(text, cfg):
+        if _floor(text, cfg, _is_assistant, cfg.assistant_phrases, in_field):
             out.emit("→ switching to assistant…")
             return "assistant"
-        if _is_dictate(text, cfg):
+        if _floor(text, cfg, _is_dictate, cfg.dictate_phrases, in_field):
             out.emit("→ entering dictation…")
             return "dictation"
         # Dashboard open/close also work from CONTROL mode (not just idle) — caught before the
         # generic "open <app>" parser, which would otherwise try to open an app called "dashboard".
-        if _is_open_dashboard(text, cfg):
+        if _floor(text, cfg, _is_open_dashboard, cfg.open_dashboard_phrases, in_field):
             sounds.play(cfg.sound_dashboard_open)
             _open_dashboard(cfg, out)
             pending = []
             continue
-        if _is_close_dashboard(text, cfg):
+        if _floor(text, cfg, _is_close_dashboard, getattr(cfg, "close_dashboard_phrases", ()), in_field):
             sounds.play(cfg.sound_dashboard_close)
             out.emit(f"🖥  {actions.close_dashboard()}")
             pending = []
             continue
+        if auto_on:
+            # Auto dictation: type it, or hand back the command to run below. Never reaches the LLM
+            # unless it comes back as a command ("Vox, …", or "that was a command").
+            cmd = auto_dictation.route(text, target, out=out, speak=_say, pending=bool(pending),
+                                       extra_phrases=_fast_lane_extra_phrases(cfg))
+            if cmd is None:
+                continue
+            text = cmd
         out.emit(f"  you: {text!r}")
         _record_turn("user", text)
         # Shared deterministic layer (vox.dispatch) — ONE place for all three modes: "what app is
@@ -1092,7 +1154,7 @@ def _dictation_mode(frames, cfg, transcriber, out, mic=None, return_to=None):
 # Vox restarts itself by spawning a detached process (start_new_session=True), so after a voice
 # "restart" or an auto-restart it's no longer attached to the terminal and Ctrl+C can't reach it.
 # A PID file gives a reliable way to stop it (`vox --stop` / `vox --replace`) regardless.
-_PIDFILE = Path(__file__).resolve().parents[3] / "data" / "vox.pid"
+_PIDFILE = DATA_DIR / "vox.pid"
 
 
 def _write_pidfile() -> None:
@@ -1195,6 +1257,8 @@ def main() -> None:
         return
 
     load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
+    from vox.paths import ENV_FILE
+    load_dotenv(ENV_FILE)  # installed app: keys saved during setup live beside the data
 
     # Single-instance guard: a second daemon fights the first over the mic + ducks the audio (and
     # leaves the dashboard served by a stale process). Refuse to start a second copy — EXCEPT on a
@@ -1218,15 +1282,21 @@ def main() -> None:
             )
             return
 
+    from vox import runtime
     _write_pidfile()  # we're cleared to run — record our PID so `--stop`/`--replace` can find us
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
         transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type,
-                                         cpu_threads=cfg.whisper_cpu_threads)
+                                         cpu_threads=cfg.whisper_cpu_threads,
+                                         beam_size=cfg.whisper_beam_size)
         wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
 
+    try:  # Claude-subscription brain: connect a client now so the first command skips the cold start
+        assistant.prewarm_sdk(executor._SYSTEM, "small")
+    except Exception:
+        pass
     _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
     _start_scheduler(cfg, out)  # additive; non-fatal if the scheduler module is missing/broken
     _cmd_on_focus = _start_command_cache(cfg, out)  # boot-load the command DB + install query logging
@@ -1243,6 +1313,7 @@ def main() -> None:
             # frees the mic when we exit, so a clean re-open works.
             try:
                 while True:
+                    runtime.set_mode("idle")
                     label = wake.listen(frames, mic)
                     if label == "quit":
                         raise _Quit
@@ -1295,6 +1366,7 @@ def main() -> None:
                     # it returns to control when done (instead of idling).
                     from_control = False
                     while label in ("control", "assistant", "dictation"):
+                        runtime.set_mode(label)
                         if label == "control":
                             sounds.play(cfg.sound_control)
                             label = _control_mode(frames, cfg, transcriber, out, mic)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -29,10 +30,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..config import CONFIG
+from ..paths import DATA_DIR
 from . import settings_store, usage
 
 # Process start time → uptimeSeconds in /api/status.
@@ -40,6 +42,35 @@ _STARTED_AT = time.monotonic()
 # True only when the voice daemon started us (start_in_background). Standalone `python -m
 # vox.web.server` has no daemon to restart, so /api/restart refuses there.
 _IN_DAEMON = False
+
+
+def _engine_permissions() -> dict:
+    """The engine's OWN view of its privacy permissions. It inherits them from Vox.app, but a
+    process keeps the answer it started with, so after a grant (or an ad-hoc rebuild, which
+    re-identifies the app) the app and the engine can disagree until the engine restarts."""
+    out = {}
+    try:
+        import ctypes
+        lib = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        out["accessibility"] = bool(lib.AXIsProcessTrusted())
+    except Exception:
+        pass
+    try:
+        import Quartz
+        out["screenRecording"] = bool(Quartz.CGPreflightScreenCaptureAccess())
+    except Exception:
+        pass
+    return out
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("vox")
+    except Exception:
+        return "dev"
 
 # Built frontend lives at <repo>/dashboard/dist. This file is
 # src/vox/web/server.py → parents[3] is the repo root.
@@ -167,12 +198,31 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # A plain-text or form POST is a CORS "simple request": a browser sends it to localhost from
+    # ANY web page without asking first, so a malicious page could change settings, teach Vox a
+    # command or type into it. Requiring a JSON content type on every state-changing request forces
+    # a preflight, which the CORS policy above refuses for foreign origins. (PATCH/PUT/DELETE always
+    # preflight, but they're held to the same rule for consistency.)
+    @app.middleware("http")
+    async def _json_only_writes(request: Request, call_next):
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/")
+                and "application/json" not in request.headers.get("content-type", "")):
+            return JSONResponse({"ok": False, "error": "expected application/json"}, status_code=415)
+        return await call_next(request)
+
     # --- Status ---
     @app.get("/api/status")
     def get_status() -> dict:
+        from vox import runtime
+        mode, since = runtime.mode() if _IN_DAEMON else ("standalone", time.time())
         return {
             "running": True,
-            "mode": "idle",
+            "mode": mode,
+            "modeSince": since,
+            "paused": runtime.paused,
+            "pid": os.getpid(),
+            "version": _version(),
+            "permissions": _engine_permissions(),
             "smallBrain": _brain("small_brain"),
             "bigBrain": _brain("big_brain"),
             "personality": settings_store.get("personality") or "",
@@ -195,6 +245,136 @@ def create_app() -> FastAPI:
         print("↻ Restarting Vox (dashboard)…")
         threading.Timer(0.5, loop.relaunch).start()
         return {"ok": True}
+
+    # --- Typed input + pause (ideas #68) ---
+    @app.post("/api/say")
+    async def post_say(request: Request):
+        """Feed text to Vox as if it had been spoken: it's heard in whatever mode Vox is in (from
+        idle it runs as a one-shot). Replies arrive on the conversation feed, as they do for speech."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        if not _IN_DAEMON:
+            raise HTTPException(status_code=409, detail="no daemon running to hear it")
+        from vox import runtime
+        if not runtime.submit(str(body.get("text", ""))):
+            raise HTTPException(status_code=400, detail="empty text, or too many queued")
+        return {"ok": True}
+
+    @app.post("/api/ptt")
+    async def post_ptt(request: Request):
+        """Hold-to-talk: {"held": true} while the talk key is down, {"held": false} on release."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime
+        runtime.set_ptt(bool(body.get("held")))
+        return {"ok": True}
+
+    @app.post("/api/listening")
+    async def post_listening(request: Request):
+        """Pause / resume the mic ({"paused": true}). Typed input keeps working while paused."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime
+        runtime.set_paused(bool(body.get("paused")))
+        return {"ok": True, "paused": runtime.paused}
+
+    # --- Setup: API keys + a brain test (used by the app's onboarding) ---
+    def _secret_names() -> list[str]:
+        return sorted({CONFIG.anthropic_key_env, CONFIG.llm_api_key_env, CONFIG.local_ai_key_env})
+
+    @app.get("/api/secrets")
+    def get_secrets() -> dict:
+        """Which API keys are set. Never returns the values."""
+        return {n: bool(os.environ.get(n)) for n in _secret_names()}
+
+    @app.post("/api/secrets")
+    async def post_secret(request: Request):
+        """Save one API key to the .env file (owner-only) and apply it now, no restart needed."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        name, value = str(body.get("name", "")), str(body.get("value", "")).strip()
+        if name not in _secret_names():
+            raise HTTPException(status_code=400, detail=f"unknown key name; expected one of {_secret_names()}")
+        from dotenv import set_key, unset_key
+        from ..paths import ENV_FILE
+        ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ENV_FILE.touch(mode=0o600, exist_ok=True)
+        if value:
+            set_key(str(ENV_FILE), name, value)
+            os.environ[name] = value
+        else:
+            unset_key(str(ENV_FILE), name)
+            os.environ.pop(name, None)
+        os.chmod(ENV_FILE, 0o600)
+        return {"ok": True, "set": bool(value)}
+
+    @app.post("/api/brain/test")
+    async def post_brain_test(request: Request):
+        """One tiny round-trip to a brain, so setup can prove it works and show how fast it is."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        brain = "big" if body.get("brain") == "big" else "small"
+        from .. import assistant
+
+        def call():
+            t0 = time.monotonic()
+            reply = assistant.complete("Are you there?", brain=brain, kind="test",
+                                       system="Reply with exactly the word: ready")
+            return reply, (time.monotonic() - t0) * 1000
+
+        reply, ms = await asyncio.to_thread(call)
+        failed = (not reply) or reply.startswith("(LLM error") or reply.startswith("I need ")
+        return {"ok": not failed, "reply": reply[:300], "ms": round(ms)}
+
+    # --- Agent hooks: "David needs you" (research/agent-messaging.md, feature 1) ---
+    @app.post("/api/agents/event")
+    async def post_agent_event(request: Request):
+        """Receives Claude Code hook events (configure a `type: "http"` hook pointing here). A
+        Notification means an agent is blocked on you (a permission prompt, or idle waiting for
+        input); Vox says which agent, by the name it registered. This works without trusting the
+        model to announce itself."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        event = str(body.get("hook_event_name", ""))
+        how = settings_store.get("agent_alerts") or getattr(CONFIG, "agent_alerts", "bubble")
+        # Empty 204 replies: Claude Code parses a JSON response body as hook *output*.
+        if how == "off" or event not in ("Notification", "Stop"):
+            return Response(status_code=204)
+        if event == "Stop" and not (settings_store.get("agent_done_alerts") or False):
+            return Response(status_code=204)
+        from .. import agents
+        who = agents.name_for(str(body.get("session_id", "")), str(body.get("cwd", ""))) or "An agent"
+        folder = os.path.basename(str(body.get("cwd", "")).rstrip("/"))
+        if event == "Stop":
+            text = f"{who} is done" + (f" in {folder}." if folder and who == "An agent" else ".")
+        else:
+            msg = str(body.get("message", "")).strip()
+            kind = str(body.get("notification_type", ""))
+            if "permission" in (kind + msg).lower():
+                # "Claude needs your permission to use Bash" → "David needs your OK to use Bash"
+                rest = re.sub(r"^claude needs your permission\s*", "", msg, flags=re.I).strip()
+                text = f"{who} needs your OK" + (f" {rest}" if rest else ".")
+            else:
+                text = f"{who} is waiting for you" + (f" in {folder}." if folder else ".")
+        def deliver():
+            try:
+                if how == "speak":
+                    from .. import tts
+                    tts.speak(text)
+                else:
+                    from .. import bubble
+                    bubble.show(text, source=who if who != "An agent" else "")
+            except Exception:
+                pass
+        threading.Thread(target=deliver, daemon=True).start()
+        print(f"🔔 agent alert: {text}")
+        return Response(status_code=204)
 
     # --- Settings ---
     @app.get("/api/settings")
@@ -1119,7 +1299,7 @@ def _memory_dir() -> Path:
                     return Path(val).resolve()
             except Exception:
                 pass
-    return (_REPO_ROOT / "data" / "memory").resolve()
+    return (DATA_DIR / "memory").resolve()
 
 
 def _mcp_config() -> dict:

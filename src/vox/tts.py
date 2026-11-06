@@ -219,7 +219,19 @@ def _get_kokoro():
     from kokoro_onnx import Kokoro  # deferred: only imported on the kokoro path
     model_path = _ensure_file(_KOKORO_MODEL_URL, "kokoro-v1.0.onnx")
     voices_path = _ensure_file(_KOKORO_VOICES_URL, "voices-v1.0.bin")
-    _KOKORO = Kokoro(model_path, voices_path)
+    threads = CONFIG.kokoro_threads
+    if threads > 0:
+        # Kokoro(...) builds its InferenceSession with default options = one thread per core (all 10
+        # on an M4, E-cores included), so TTS fought STT and barge-in for the whole machine. Measured
+        # on a 1.8 s reply: default 0.61 s wall / 2.9 CPU-s vs 4 threads 0.54 s / 2.1 CPU-s.
+        import onnxruntime as rt
+        so = rt.SessionOptions()
+        so.intra_op_num_threads = threads
+        so.inter_op_num_threads = 1  # one sequential graph; inter-op threads would only idle-spin
+        sess = rt.InferenceSession(model_path, sess_options=so, providers=["CPUExecutionProvider"])
+        _KOKORO = Kokoro.from_session(sess, voices_path)
+    else:
+        _KOKORO = Kokoro(model_path, voices_path)
     return _KOKORO
 
 

@@ -52,6 +52,9 @@ _SYSTEM = (
     "kind of text it is — the selection is fetched and rewritten automatically.\n"
     "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
     "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
+    "To SHOW the user where something is WITHOUT clicking it ('where's the export button', 'show me "
+    "where settings is', 'point at X', 'circle X'): output  POINT: <what to point at>. Vox rings it on "
+    "screen. Use CLICK only when they want it pressed.\n"
     "To CLICK any on-screen control by what the user calls it ('click the play button', 'press "
     "submit', 'tap the menu', 'select Settings'): output  CLICK: <what to click>. This also covers "
     "items INSIDE the current app — a Slack/Discord/Teams channel or DM, a chat, a conversation, a "
@@ -93,7 +96,8 @@ _SYSTEM = (
     "below when it has anything on it. To ANSWER a question about it ('what's on my board', 'what "
     "am I doing', 'how many issues are open'), read it off what you can see and reply with "
     "CHAT: <your answer> — the CHAT: prefix is required for anything spoken, never bare prose. "
-    "To CHANGE it, output  BOARD: <verb> | <arg> | <arg>  using exactly one of:\n"
+    "To CHANGE it, output  BOARD: <verb> | <arg> | <arg>  (one line per change; for several changes "
+    "output several BOARD: lines) using:\n"
     "  BOARD: add_card | <list> | <title>        ·  BOARD: move_card | <card> | <list>\n"
     "  BOARD: update_card | <card> | <new title> ·  BOARD: note | <card> | <text to append>\n"
     "  BOARD: delete_card | <card>               ·  BOARD: add_list | <name>\n"
@@ -304,6 +308,27 @@ _CLICK_VISION_PROMPT = (
 )
 
 
+_POSITIONAL = re.compile(r"\b(first|second|third|last|top|bottom|left|right|middle|next|previous|"
+                         r"one|icon|image|picture|colou?r|red|blue|green|at|from|under|above|below|near)\b")
+
+
+def _plain_label(target: str) -> bool:
+    """A request that names a control ("Later", "save draft"), as opposed to describing where it is
+    ("the second message", "the blue icon at the top"). Only plain labels can be label-checked."""
+    t = (target or "").lower().strip()
+    return 0 < len(t.split()) <= 3 and not _POSITIONAL.search(t)
+
+
+def _labels_agree(said: str, label: str) -> bool:
+    import difflib
+    a, b = said.lower().strip(), label.lower().strip()
+    if a in b or b in a:
+        return True
+    if {w for w in a.split() if len(w) > 2} & {w for w in b.split() if len(w) > 2}:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.6
+
+
 def _click_by_vision(target: str, items) -> str | None:
     """Vision escalation for clicking (idea #37's set-of-marks, off the back of #52).
 
@@ -342,6 +367,13 @@ def _click_by_vision(target: str, items) -> str | None:
             # Trusting it would click an arbitrary element, so give up and let the caller fall back.
             assistant._dbg("[executor]", f"click-by-vision: badge {n} out of range 1..{len(items)}")
             return None
+        picked = (items[n - 1].get("label") or "").strip()
+        if picked and _plain_label(target) and not _labels_agree(target, picked):
+            # Seen live: asked for "Later", vision picked badge 11 ("Got it") and it got clicked.
+            # When the request was a plain label, a pick whose label plainly isn't it is a misread,
+            # so ask instead. A 'yes' next turn clicks it via _confirmed_click_target.
+            assistant._dbg("[executor]", f"click-by-vision: picked {picked!r} for {target!r}, labels disagree → confirm")
+            return f"Did you mean {picked}?"
         from vox import targets
         res = targets.click_index(n - 1)  # badge N ↔ items[N-1], same as the overlay
         if res and res[0] == "clicked":
@@ -349,6 +381,27 @@ def _click_by_vision(target: str, items) -> str | None:
         return None
     except Exception:
         return None
+
+
+_BOARD_OK = ("Added", "Moved", "Renamed", "Deleted", "Created")
+
+
+def _board_summary(msgs: list[str]) -> str:
+    """One spoken sentence for several board changes: "Added 3 cards to Doing." when they're all
+    adds to one list, otherwise the individual results in order."""
+    if len(msgs) == 1:
+        return msgs[0]
+    adds = [re.match(r"Added '.*' to (.+)\.$", m) for m in msgs]
+    if all(adds) and len({a.group(1) for a in adds}) == 1:
+        return f"Added {len(msgs)} cards to {adds[0].group(1)}."
+    return " ".join(msgs)
+
+
+def _plainly_named(said: str, title: str) -> bool:
+    """Did the user name this card, or did fuzzy matching guess it? Deletes require the former:
+    replaying real traffic showed garbled speech producing confident delete guesses."""
+    s, t = said.strip().lower().lstrip("#"), (title or "").strip().lower()
+    return bool(s) and (s in t or t in s)
 
 
 def _board(body: str) -> str:
@@ -396,6 +449,8 @@ def _board(body: str) -> str:
             card = board_store.find_card(conn, a1)
             if card is None:
                 return f"I couldn't find a card called {a1!r}."
+            if not (a1.strip().lstrip("#").isdigit() or _plainly_named(a1, card["title"])):
+                return f"Did you mean {card['title']!r}? Say its name to delete it."
             board_store.delete_card(conn, card["id"])
             return f"Deleted {card['title']!r}."
         if verb in ("add_list", "new_list"):
@@ -539,6 +594,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
         return False, reply
+    if upper.startswith("POINT:"):  # show where something is, without pressing it (ideas #69.2)
+        target = raw.split(":", 1)[1].strip()
+        from vox import ax
+        with ax.pinned_to(*(aim or (0, ""))):
+            result = actions.point_at(target)
+        assistant._dbg("[executor]", f"decision=POINT target={target!r} → {result!r}")
+        return result.startswith("There's"), result
     if upper.startswith("DICTATE"):  # user wants to type by voice → tell the loop to enter dictation
         assistant._dbg("[executor]", "decision=DICTATE → enter dictation mode")
         return True, ENTER_DICTATION
@@ -593,10 +655,18 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         assistant._dbg("[executor]", f"decision=SCHEDULE {body!r} → {msg!r}")
         return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
     if upper.startswith("BOARD:"):
-        body = raw.split(":", 1)[1].strip()
-        msg = _board(body)
-        assistant._dbg("[executor]", f"decision=BOARD {body!r} → {msg!r}")
-        return False, msg
+        # Several changes in one sentence ("add cards for X, Y and Z") arrive as several BOARD:
+        # lines. Board edits are visible and easy to undo, so run them all, in order, stopping at
+        # the first failure. Everything else stays first-directive-wins (todo.md §1b).
+        bodies = [ln.split(":", 1)[1].strip() for ln in raw.splitlines()
+                  if ln.strip().upper().startswith("BOARD:")][:10]
+        msgs = []
+        for body in bodies:
+            msgs.append(_board(body))
+            assistant._dbg("[executor]", f"decision=BOARD {body!r} → {msgs[-1]!r}")
+            if not msgs[-1].startswith(_BOARD_OK):
+                break
+        return False, _board_summary(msgs)
     if upper.startswith("TEACH:"):
         body = raw.split(":", 1)[1].strip()
         phrase, _, action = body.partition("|")

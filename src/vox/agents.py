@@ -16,13 +16,13 @@ from the CLI that launched it.
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import json
 import os
 import time
-from pathlib import Path
 
-# src/vox/agents.py → parents[2] is the repo root, matching settings_store's convention.
-_PATH = Path(__file__).resolve().parents[2] / "data" / "agents.json"
+_PATH = DATA_DIR / "agents.json"
 
 
 def _read() -> dict:
@@ -84,6 +84,30 @@ def register(name: str, **meta) -> dict:
             except Exception:
                 pass
     return entry
+
+
+def name_for(session_id: str = "", cwd: str = "") -> str:
+    """Which named agent a Claude Code hook came from. Hooks carry the session id and working
+    directory but not a name; an MCP server registers its name with its own cwd, so a cwd shared by
+    exactly one registered agent identifies it. The answer is remembered against the session id so
+    later hooks from that session resolve even if a second agent registers in the same folder."""
+    data = _read()
+    if session_id:
+        for e in data.values():
+            if session_id in e.get("sessions", []):
+                return e["name"]
+    matches = [e for e in data.values() if cwd and e.get("cwd") == cwd]
+    if len(matches) != 1:
+        return ""
+    entry = matches[0]
+    if session_id:
+        entry["sessions"] = (entry.get("sessions", []) + [session_id])[-20:]
+        data[entry["name"].lower()] = entry
+        try:
+            _write(data)
+        except Exception:
+            pass
+    return entry["name"]
 
 
 def get(name: str) -> dict | None:

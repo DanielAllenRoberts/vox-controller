@@ -22,6 +22,28 @@ class NoInputDevice(Exception):
     catches this and waits for a mic to appear instead of dying at startup."""
 
 
+# Most audio the mic queue holds before dropping the OLDEST frame. The loop flushes after every reply
+# and idle transcription, so normal use never gets near this; it only bites when the consumer stalls
+# (CPU starvation, issues O15/O17), where an unbounded queue grew ~32 KB/s and then got replayed as
+# stale "speech". 30 s of 80 ms frames is ~1 MB.
+_MAX_QUEUE_SECONDS = 30.0
+
+
+def _put_latest(q: "queue.Queue[np.ndarray]", frame: np.ndarray) -> None:
+    """Queue `frame` from the audio thread without ever blocking it: when full, drop the oldest."""
+    try:
+        q.put_nowait(frame)
+    except queue.Full:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(frame)
+        except queue.Full:
+            pass
+
+
 class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
@@ -32,7 +54,8 @@ class MicStream:
         self._device = device
         self._on_log = on_log                    # surface recovery events to vox.log, not just stdout
         self._stall_restart_seconds = stall_restart_seconds
-        self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._queue: "queue.Queue[np.ndarray]" = queue.Queue(
+            maxsize=int(_MAX_QUEUE_SECONDS * sample_rate / frame_samples))
         self._stall_since: float | None = None   # monotonic time the current stall began (None = healthy)
         self._ever_healthy = False               # have we EVER received a frame? (guards restart loops)
         self._recovering = False                 # a background re-open is in flight
@@ -59,7 +82,7 @@ class MicStream:
 
     def _callback(self, indata, frames, time_info, status) -> None:
         # indata: shape (frame_samples, 1) int16 — copy out of the driver buffer.
-        self._queue.put(indata[:, 0].copy())
+        _put_latest(self._queue, indata[:, 0].copy())
 
     def frames(self):
         """Generator yielding one int16 frame at a time. Healthy streams deliver a frame every
@@ -175,7 +198,8 @@ class VPIOMicStream:
         # Lazy import — only on the AEC path. Any ImportError propagates to the caller's fallback.
         import AVFoundation as AV
 
-        self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._queue: "queue.Queue[np.ndarray]" = queue.Queue(
+            maxsize=int(_MAX_QUEUE_SECONDS * sample_rate / frame_samples))
         # Carries leftover int16 samples between tap callbacks so we can emit exact frame_samples frames.
         self._residual = np.empty(0, dtype=np.int16)
         self._residual_lock = __import__("threading").Lock()
@@ -268,7 +292,7 @@ class VPIOMicStream:
             buf = np.concatenate((self._residual, i16)) if self._residual.size else i16
             n_full = buf.size // fs
             for k in range(n_full):
-                self._queue.put(buf[k * fs:(k + 1) * fs].copy())
+                _put_latest(self._queue, buf[k * fs:(k + 1) * fs].copy())
             self._residual = buf[n_full * fs:].copy()
 
     def frames(self):
@@ -413,6 +437,16 @@ def rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
 
 
+def voiced_ms(audio: np.ndarray) -> int:
+    """Milliseconds of `audio` (16 kHz int16) that Silero VAD rates as speech (prob >= 0.5, the
+    threshold faster-whisper's own vad_filter uses). Reuses faster-whisper's cached single-threaded
+    Silero session, so it costs ~14 ms CPU for an 8 s capture."""
+    from faster_whisper.vad import get_vad_model
+    a = audio.astype(np.float32) / 32768.0
+    a = np.pad(a, (0, 512 - a.shape[0] % 512))  # Silero scores 512-sample (32 ms) windows
+    return int((get_vad_model()(a) >= 0.5).sum()) * 32
+
+
 def _setting(key: str, fallback):
     """Read a runtime override from the dashboard's settings_store, else fall back. Fully guarded
     (mirrors loop/tts/assistant._setting): if vox.web.settings_store is missing or errors, return
@@ -470,11 +504,22 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
     min_silent = max(1, int(_setting("min_endpointing_delay", cfg.min_endpointing_delay) * sr / fs))
     max_silent = max(min_silent, int(_setting("max_endpointing_delay", cfg.max_endpointing_delay) * sr / fs))
 
+    from vox import runtime  # typed input + pause (ideas #68)
+
     pre_roll = deque(maxlen=cfg.preroll_frames)
     waited = 0
+    ptt = False  # hold-to-talk (ideas #69.1): the key, not the volume, decides start and end
+    runtime.last_capture_ptt = False
     while True:
         frame = next(frames)
-        if rms(frame) >= cfg.speech_rms:
+        typed = runtime.take()
+        if typed is not None:
+            return typed
+        if runtime.ptt_down():
+            ptt = True
+            max_frames = int(cfg.max_utterance_seconds * sr / fs)  # idle's short cap doesn't apply
+            break
+        if not runtime.paused and rms(frame) >= cfg.speech_rms:
             break
         pre_roll.append(frame)
         waited += 1
@@ -484,9 +529,16 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
     collected = list(pre_roll) + [frame]
     silent = 0
     next_check = min_silent  # next trailing-silence frame-count at which to consult smart-turn
+    runtime.last_capture_ptt = ptt
     while len(collected) < max_frames:
         frame = next(frames)
         collected.append(frame)
+        if ptt:
+            # Releasing the key IS the end of the turn: no silence wait, and pausing to think
+            # mid-sentence can't cut you off.
+            if not runtime.ptt_down():
+                break
+            continue
         if rms(frame) < end_rms:
             silent += 1
             if smart_on:

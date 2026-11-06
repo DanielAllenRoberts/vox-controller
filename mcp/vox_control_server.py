@@ -287,6 +287,15 @@ def double_click(target: str) -> str:
     return _intent("double_click", target, "double_click needs a label or number")
 
 
+@mcp.tool(annotations=_RO)
+def point(target: str) -> str:
+    """Show the user WHERE something is without clicking it: a glowing ring flies from the mouse
+    pointer to the control and pulses for a few seconds. Use it while explaining ("the export
+    button is here"), or to confirm a target before you click it. `target` is a control label
+    ("Export") or a badge number from clickable_elements. Click-through; never takes focus."""
+    return _intent("point", target, "point needs a label or number")
+
+
 @mcp.tool()
 def type_text(text: str) -> str:
     """Type text at the current cursor position, verbatim (pasted, so it's fast and exact; the

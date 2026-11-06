@@ -233,6 +233,137 @@ def _run_helper(path: str, ttl: float = 45.0) -> None:
     app.run()
 
 
+# --- Pointing (ideas #69.2): show WHERE something is, without clicking it ------------------------
+
+_point_proc: subprocess.Popen | None = None
+
+
+def point(items, ttl: float = 4.5) -> int:
+    """Ring each element in ``items`` (dicts with x/y/w/h in AX top-left screen coords, optional
+    ``label``) with a glowing outline that flies in from the mouse pointer, pulses, then fades.
+    Click-through and never takes focus. Replaces any pointing already on screen. Returns the count.
+    Raises OverlayUnavailable if the helper can't be spawned."""
+    global _point_proc
+    items = [it for it in (items or []) if float(it.get("w", 0)) > 0 and float(it.get("h", 0)) > 0]
+    if not items:
+        raise OverlayUnavailable("nothing to point at")
+    if _point_proc is not None and _point_proc.poll() is None:
+        _point_proc.terminate()
+    payload = {"ttl": float(ttl), "items": [{"x": float(it["x"]), "y": float(it["y"]), "w": float(it["w"]),
+                                            "h": float(it["h"]), "label": str(it.get("label") or "")[:60]}
+                                           for it in items[:8]]}
+    fd, path = tempfile.mkstemp(suffix=".json", prefix="vox_point_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f)
+        _point_proc = subprocess.Popen([sys.executable, "-m", "vox.overlay", "--point", path],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        raise OverlayUnavailable(f"couldn't spawn pointer helper: {exc}") from exc
+    return len(payload["items"])
+
+
+def _run_pointer(path: str) -> None:
+    """Child entry point for ``point``: one transparent window per display, a ring per target."""
+    try:
+        with open(path) as f:
+            spec = json.load(f)
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    items, ttl = spec.get("items") or [], float(spec.get("ttl", 4.5))
+    if not items:
+        return
+
+    import AppKit
+    import objc
+    from Foundation import NSTimer
+
+    CABasicAnimation = objc.lookUpClass("CABasicAnimation")
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyProhibited)
+
+    screens = AppKit.NSScreen.screens()
+    primary_h = screens[0].frame().size.height
+    windows = [(_build_window(AppKit, sc.frame()), sc.frame()) for sc in screens]
+    accent = AppKit.NSColor.controlAccentColor()
+    mouse = AppKit.NSEvent.mouseLocation()  # Cocoa global, bottom-left origin
+    pad = 6.0
+
+    for it in items:
+        # AX (top-left origin) → Cocoa global (bottom-left origin).
+        x, w, h = it["x"] - pad, it["w"] + pad * 2, it["h"] + pad * 2
+        y = primary_h - it["y"] - it["h"] - pad
+        cx, cy = x + w / 2, y + h / 2
+        for win, sf in windows:
+            if not (sf.origin.x <= cx < sf.origin.x + sf.size.width and sf.origin.y <= cy < sf.origin.y + sf.size.height):
+                continue
+            ox, oy = sf.origin.x, sf.origin.y
+            target = AppKit.NSMakeRect(x - ox, y - oy, w, h)
+            ring = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(mouse.x - ox - 14, mouse.y - oy - 14, 28, 28))  # starts at the pointer
+            ring.setWantsLayer_(True)
+            layer = ring.layer()
+            layer.setCornerRadius_(min(14.0, h / 2))
+            layer.setBorderWidth_(3.5)
+            layer.setBorderColor_(accent.CGColor())
+            layer.setBackgroundColor_(accent.colorWithAlphaComponent_(0.10).CGColor())
+            layer.setShadowColor_(accent.CGColor())
+            layer.setShadowOpacity_(0.9)
+            layer.setShadowRadius_(12.0)
+            layer.setShadowOffset_((0.0, 0.0))
+            win.contentView().addSubview_(ring)
+
+            label_view = None
+            if it.get("label"):
+                label_view = AppKit.NSTextField.labelWithString_(f"  {it['label']}  ")
+                label_view.setFont_(AppKit.NSFont.systemFontOfSize_weight_(13, AppKit.NSFontWeightSemibold))
+                label_view.setTextColor_(AppKit.NSColor.whiteColor())
+                label_view.setWantsLayer_(True)
+                label_view.layer().setBackgroundColor_(accent.CGColor())
+                label_view.layer().setCornerRadius_(9.0)
+                label_view.sizeToFit()
+                lw, lh = label_view.frame().size.width, max(22.0, label_view.frame().size.height + 4)
+                above = target.origin.y + target.size.height + 6
+                ly = above if above + lh < sf.size.height else target.origin.y - lh - 6  # below if no room above
+                label_view.setFrame_(AppKit.NSMakeRect(target.origin.x, ly, lw, lh))
+                label_view.setAlphaValue_(0.0)
+                win.contentView().addSubview_(label_view)
+
+            def fly(_t, ring=ring, target=target, label_view=label_view):
+                def anim(ctx):
+                    ctx.setDuration_(0.45)
+                    ctx.setTimingFunction_(objc.lookUpClass("CAMediaTimingFunction").functionWithName_("easeInEaseOut"))
+                    ring.animator().setFrame_(target)
+                    if label_view is not None:
+                        label_view.animator().setAlphaValue_(1.0)
+                AppKit.NSAnimationContext.runAnimationGroup_completionHandler_(anim, None)
+                pulse = CABasicAnimation.animationWithKeyPath_("shadowRadius")
+                pulse.setFromValue_(6.0)
+                pulse.setToValue_(18.0)
+                pulse.setDuration_(0.8)
+                pulse.setAutoreverses_(True)
+                pulse.setRepeatCount_(1e9)
+                ring.layer().addAnimation_forKey_(pulse, "pulse")
+            NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.02, False, fly)
+            break
+
+    for win, _sf in windows:
+        win.orderFrontRegardless()
+
+    def fade(_t):
+        def anim(ctx):
+            ctx.setDuration_(0.4)
+            for win, _sf in windows:
+                win.animator().setAlphaValue_(0.0)
+        AppKit.NSAnimationContext.runAnimationGroup_completionHandler_(anim, lambda: app.terminate_(None))
+    NSTimer.scheduledTimerWithTimeInterval_repeats_block_(max(1.0, ttl), False, fade)
+    NSTimer.scheduledTimerWithTimeInterval_repeats_block_(max(1.0, ttl) + 2.0, False, lambda _t: app.terminate_(None))
+    app.run()
+
+
 # --- CLI: `--helper <json>` is the child; no args = standalone test over the frontmost app -------
 
 if __name__ == "__main__":
@@ -240,10 +371,13 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Vox numbered clickable overlay (idea #52)")
     ap.add_argument("--helper", help="internal: run as the overlay helper on this JSON badge file")
+    ap.add_argument("--point", help="internal: run as the pointer helper on this JSON file")
     ap.add_argument("--delay", type=float, default=3.0, help="standalone test: focus delay (s)")
     _a = ap.parse_args()
 
-    if _a.helper:
+    if _a.point:
+        _run_pointer(_a.point)
+    elif _a.helper:
         _run_helper(_a.helper)
     else:
         import time

@@ -16,14 +16,14 @@ any error returns the text unchanged (exactly today's behaviour).
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import json
 import re
 import threading
 import uuid
-from pathlib import Path
 
-# Runtime store lives under data/ (gitignored). This file is src/vox/vocab.py → parents[2] is root.
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "vocab.json"
 
 _LOCK = threading.RLock()

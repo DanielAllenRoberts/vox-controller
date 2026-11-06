@@ -468,6 +468,18 @@ def _openai_client_for(base_url, key):
     return client
 
 
+def _deepseek_thinking_off(model: str, brain: str) -> bool:
+    """DeepSeek V4 models think before answering by default, and that hidden reasoning is most of
+    the small brain's latency: replaying 60 real router calls from vox.log gave p90 4.7s with
+    thinking vs 1.3s without (scripts/replay_router.py). Off is faster and handles plain commands
+    just as well; on is more careful with vague or garbled requests. The budget can't be bounded:
+    the API ignores budget_tokens and reasoning_effort. Only DeepSeek models get the flag, because
+    other OpenAI-compatible servers may reject unknown fields."""
+    if brain != "small" or "deepseek" not in (model or "").lower():
+        return False
+    return _setting("small_brain_thinking", CONFIG.small_brain_thinking) == "off"
+
+
 def _openai_call(text, history, model, system, brain, kind, base_url, key, label="openai"):
     """One completion against any OpenAI-compatible endpoint. `label` tags the usage record."""
     client = _openai_client_for(base_url, key)
@@ -478,13 +490,25 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
     try:
         # 45s cap (matches the SDK/anthropic paths) so a stalled remote/local call can't freeze the
         # voice loop — the client otherwise defaults to ~10 min.
-        resp = client.with_options(timeout=45.0).chat.completions.create(
-            model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs)
+        create = client.with_options(timeout=45.0).chat.completions.create
+        thinking_off = _deepseek_thinking_off(model, brain)
+        resp = create(model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs,
+                      extra_body={"thinking": {"type": "disabled"}} if thinking_off else None)
+        out = (resp.choices[0].message.content or "").strip()
+        if not out and not thinking_off and resp.choices[0].finish_reason == "length" \
+                and "deepseek" in (model or "").lower():
+            # Hidden reasoning ate the whole budget and left no answer (12% of small-brain calls in
+            # usage.jsonl, median 8.3s). Retry once without thinking: ~1s, instead of handing an
+            # empty reply to the caller's slower fallback.
+            _dbg("[thinking]", f"{model}: reasoning hit max_tokens with no answer — retrying with thinking off")
+            resp = create(model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs,
+                          extra_body={"thinking": {"type": "disabled"}})
+            out = (resp.choices[0].message.content or "").strip()
         u = getattr(resp, "usage", None)
         _record_usage(label, model, brain, kind,
                       (u.prompt_tokens, u.completion_tokens) if u else None,
                       (time.monotonic() - t0) * 1000)
-        return (resp.choices[0].message.content or "").strip()
+        return out
     except Exception as exc:
         return f"(LLM error: {exc})"
 
@@ -508,40 +532,168 @@ def _local_ai(text, history, model, system, brain="small", kind="chat"):
     return _openai_call(text, history, mdl, system, brain, kind, base, key, label="local_ai")
 
 
+class _SdkPool:
+    """Pre-warmed Claude Agent SDK clients: the subscription brain without the cold start.
+
+    ``query()`` launches a fresh Claude Code process for every utterance (process start, auth,
+    tool discovery): 5.4 s median for a one-line Haiku reply on this machine. Here a client is
+    connected in the background *before* it's needed, each query takes the ready one, and a
+    replacement starts warming while the user is still talking. Measured: 1.2 s median.
+
+    Each client answers exactly ONE query and is then discarded. That's deliberate. A long-lived
+    session would accumulate stale context, and after a barge-in its unread messages would pair
+    with the next query, so every answer arrives one question late (ideas #64). One-shot clients
+    can't desync: an interrupted one is simply thrown away.
+
+    Clients live on one background asyncio loop. At most ``_MAX_KEYS`` (model, system prompt)
+    pairs are kept warm; the least recently used is dropped, except pinned keys (the command
+    router, warmed at startup). Only prompts that recur are worth warming: chat builds a new system
+    prompt every turn (memory, recent actions), so warming for it would just spawn throwaway
+    processes and evict the router's client.
+    """
+
+    _MAX_KEYS = 2
+
+    def __init__(self):
+        import asyncio
+        import threading
+        self._loop = asyncio.new_event_loop()
+        self._ready: dict = {}   # key -> concurrent Future[ClaudeSDKClient]
+        self._seen: dict = {}    # key -> times used (bounded), to tell recurring prompts from one-offs
+        self._pinned: set = set()
+        self._lock = threading.Lock()
+        threading.Thread(target=self._loop.run_forever, name="vox-sdk-pool", daemon=True).start()
+
+    def run(self, coro, timeout: float):
+        import asyncio
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
+
+    def recurs(self, key) -> bool:
+        """Count a use of ``key``; True once it has been used before (or was pinned)."""
+        with self._lock:
+            self._seen[key] = self._seen.pop(key, 0) + 1
+            while len(self._seen) > 32:
+                self._seen.pop(next(iter(self._seen)))
+            return key in self._pinned or self._seen[key] > 1
+
+    def warm(self, key, options, pin: bool = False) -> None:
+        """Start connecting a client for ``key`` unless one is already ready or on the way."""
+        import asyncio
+        with self._lock:
+            if pin:
+                self._pinned.add(key)
+            if key in self._ready:
+                self._ready[key] = self._ready.pop(key)  # mark as recently used
+                return
+            self._ready[key] = asyncio.run_coroutine_threadsafe(self._connect(options), self._loop)
+            while len(self._ready) > self._MAX_KEYS:
+                victim = next((k for k in self._ready if k not in self._pinned), None)
+                if victim is None:
+                    break
+                old = self._ready.pop(victim)
+                old.add_done_callback(lambda f: self._discard(f.result()) if not f.exception() else None)
+
+    def take(self, key, options):
+        """A connected client for ``key``: the pre-warmed one if it's ready, else a fresh one."""
+        with self._lock:
+            fut = self._ready.pop(key, None)
+        if fut is not None:
+            try:
+                return fut.result(timeout=20)
+            except Exception:
+                pass  # warming failed (CLI missing, auth) → try once more inline for a real error
+        return self.run(self._connect(options), timeout=30)
+
+    def _discard(self, client) -> None:
+        import asyncio
+        asyncio.run_coroutine_threadsafe(self._close(client), self._loop)
+
+    @staticmethod
+    async def _connect(options):
+        from claude_agent_sdk import ClaudeSDKClient
+        client = ClaudeSDKClient(options)
+        await client.connect()
+        return client
+
+    @staticmethod
+    async def _close(client):
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+_sdk_pool: _SdkPool | None = None
+
+
+def _sdk_options(model, system, brain):
+    """Lean options for a voice turn. Every option here was measured to cut latency:
+    ``setting_sources=[]`` skips loading CLAUDE.md and user settings, ``tools=[]`` drops every tool
+    definition from the prompt, and the small brain doesn't think unless asked
+    (``small_brain_thinking``), the same trade-off as the DeepSeek small brain."""
+    from claude_agent_sdk import ClaudeAgentOptions, ThinkingConfigDisabled
+    kw = dict(system_prompt=system, allowed_tools=[], tools=[], setting_sources=[], max_turns=6, model=model)
+    if brain == "small" and _setting("small_brain_thinking", CONFIG.small_brain_thinking) != "on":
+        kw["thinking"] = ThinkingConfigDisabled(type="disabled")
+    return ClaudeAgentOptions(**kw)
+
+
+def prewarm_sdk(system: str, brain: str = "small") -> None:
+    """Warm a client for the prompt Vox is about to use (called at startup), so even the first
+    utterance skips the cold start. No-op unless that brain runs on the Claude subscription."""
+    provider, model = _brain(brain)
+    if provider != "claude_sdk":
+        return
+    try:
+        global _sdk_pool
+        _sdk_pool = _sdk_pool or _SdkPool()
+        _sdk_pool.warm((model, system, brain), _sdk_options(model, system, brain), pin=True)
+    except Exception as exc:
+        _dbg("[sdk]", f"prewarm failed: {exc}")
+
+
 def _claude_sdk(text, history, model, system, brain="big", kind="chat"):
-    # Claude Code via the Agent SDK — runs on your Claude subscription, no API key.
+    # Claude Code via the Agent SDK: runs on your Claude subscription, no API key.
     import asyncio
 
-    from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+    from claude_agent_sdk import AssistantMessage, TextBlock
 
+    global _sdk_pool
+    _sdk_pool = _sdk_pool or _SdkPool()
     convo = "\n".join(f"{'You' if r == 'user' else 'Vox'}: {c}" for r, c in (history or []))
     prompt = f"{convo + chr(10) if convo else ''}You: {text}"
-    opts = ClaudeAgentOptions(system_prompt=system, allowed_tools=[], max_turns=6, model=model)
+    key, opts = (model, system, brain), _sdk_options(model, system, brain)
     captured = {}  # tokens from the ResultMessage if the SDK exposes usage
 
-    async def _run():
+    async def _ask(client):
         parts = []
-        async for msg in query(prompt=prompt, options=opts):
+        await client.query(prompt)
+        async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
                 parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
-            # The ResultMessage (has total_cost_usd) carries the cumulative usage.
-            if hasattr(msg, "total_cost_usd"):
+            if hasattr(msg, "total_cost_usd"):  # the ResultMessage carries cumulative usage
                 got = _sdk_extract_tokens(msg)
                 if got is not None:
                     captured["usage"] = got
         return "".join(parts).strip()
 
     t0 = time.monotonic()
+    client = None
     try:
-        reply = asyncio.run(asyncio.wait_for(_run(), timeout=45)) or "(no response)"
-        # Subscription call: tokens recorded only if the SDK exposed them (else None → cost 0).
+        client = _sdk_pool.take(key, opts)
+        if _sdk_pool.recurs(key):
+            _sdk_pool.warm(key, opts)  # the next utterance's client starts warming now
+        reply = _sdk_pool.run(asyncio.wait_for(_ask(client), timeout=45), timeout=50) or "(no response)"
         _record_usage("claude_sdk", model, brain, kind, captured.get("usage"),
                       (time.monotonic() - t0) * 1000)
         return reply
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         return "(the brain timed out — try again)"  # never hang the loop on a wedged call
     except Exception as exc:
         return f"(claude SDK error: {exc})"
+    finally:
+        if client is not None:
+            _sdk_pool._discard(client)  # one query per client: no stale context, no desync
 
 
 def _claude_cli(text, history, model, system, brain="small", kind="chat"):

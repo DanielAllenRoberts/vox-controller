@@ -56,3 +56,7 @@ node_modules/
 
 # graphify knowledge-graph output (regenerable, can go stale)
 graphify-out/
+
+# Vox.app build output (SwiftPM + bundle assembly)
+app/.build*/
+app/build/

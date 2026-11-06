@@ -37,6 +37,8 @@ vox-controller/
 │   ├── core/         # the listen → transcribe loop
 │   ├── audio.py      # microphone capture
 │   └── config.py     # settings (name, models, thresholds)
+├── app/              # Vox.app: the native SwiftUI shell (menu bar, window, setup)
+├── mcp/              # MCP servers: give coding agents Vox's voice and hands
 ├── docs/plan/        # planning docs (overview, roadmap)
 ├── pyproject.toml
 ├── .env.example      # env var template (copy to .env)
@@ -44,6 +46,24 @@ vox-controller/
 ```
 
 ## Getting started
+
+### The app (recommended)
+
+Vox ships as a native macOS app, **Vox.app**. It lives in the menu bar, runs the speech engine for
+you, and walks you through setup on first launch: permissions, choosing a brain, a test phrase. No
+terminal needed after the build.
+
+```bash
+app/build.sh                   # → app/build/Vox.app, runs the engine from this checkout
+app/build.sh --bundle-engine   # self-contained app to give to someone else: first launch
+                               #   installs a private Python + the libraries (~0.8 GB)
+```
+
+Open `app/build/Vox.app` from Finder (not from a terminal, or the terminal gets the microphone and
+Accessibility permissions instead of Vox). Requires macOS 14+ and the Xcode Command Line Tools
+(`xcode-select --install`) to build. Hold **Right ⌥** to talk without a wake word.
+
+### From a terminal (development)
 
 **Requirements:** macOS (Apple Silicon) and [uv](https://docs.astral.sh/uv/). The project pins **Python 3.12** (uv fetches it for you).
 

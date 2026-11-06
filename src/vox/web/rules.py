@@ -21,14 +21,14 @@ today's behaviour (no extra rules layered on).
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import json
 import threading
 import uuid
-from pathlib import Path
 
-# Runtime store lives under data/ (gitignored). This file is
-# src/vox/web/rules.py → parents[3] is the repo root.
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+# Runtime store lives under data/ (gitignored) — see vox/paths.py.
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "rules.json"
 
 _LOCK = threading.RLock()

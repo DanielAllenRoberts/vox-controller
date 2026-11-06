@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from vox.paths import LOG_FILE
+
 
 @dataclass(frozen=True)
 class Config:
@@ -67,6 +69,10 @@ class Config:
     # is counted in frames, so a mic backlog from a slow Whisper pass could satisfy it instantly
     # from stale audio. 45s is a thinking pause; 6s was a breath. (issues.md O15)
     dictation_idle_exit_seconds: float = 45.0
+    # AUTO DICTATION (Dragon's "dictation & commands"): in CONTROL mode, when a text field has focus,
+    # anything that isn't EXACTLY a command is typed — no "start typing". Destructive commands need
+    # "Vox, …" or a yes. Off by default while it's tried out. docs/plan/research/command-vs-dictation.md
+    auto_dictation: bool = False
 
     # --- Dashboard (Vox Control Center) --- a local web UI served by an embedded FastAPI
     # bridge (vox.web.server), opened hands-free by an "open dashboard" wake phrase. Entirely
@@ -87,7 +93,7 @@ class Config:
     )
 
     # Tee all output to a log file so sessions are reviewable (gitignored *.log). "" = off.
-    log_file: str = "vox.log"
+    log_file: str = LOG_FILE  # ./vox.log from a checkout; beside the data when installed (paths.py)
 
     # Debug: log every transcription (what Vox hears) in EVERY mode, including idle (which is
     # otherwise silent). Verbose — set False once a hearing/matching issue is diagnosed.
@@ -121,6 +127,14 @@ class Config:
     # only burns CPU and spikes RAM for nothing. Capping idle capture bounds those spikes in a talky
     # room (the "doesn't idle well / freezes after a while" report) without affecting active modes.
     idle_max_utterance_seconds: float = 8.0
+    # Idle speech gate: skip the idle Whisper pass unless Silero (the VAD bundled with faster-whisper,
+    # ~14 ms CPU per 8 s capture vs ~1.4 CPU-s for Whisper) heard at least idle_speech_gate_ms of
+    # voice. Kills passes started by a clack, cough or lone "uh". On `say` test clips every wake phrase
+    # (hey vox / take control / quit vox / vox <cmd>, 9 voices x 3 rates, clean to very quiet + noise)
+    # had >=224 ms voiced as captured; about 1 in 5 "uh"/"hmm" had less. OFF by default until
+    # real-voice data backs it: the debug "idle heard" line logs voiced=…ms so a day of use shows the margin.
+    idle_speech_gate: bool = False
+    idle_speech_gate_ms: int = 150
     listen_timeout_seconds: float = 6.0  # wake/dictation re-arm interval (control mode keeps listening)
     assistant_idle_timeout_seconds: float = 4.0   # assistant chat: drop to control/idle after this silence
     # Patient wait while the model tagged its reply [OPEN] (it expects you to respond) — a safety
@@ -156,12 +170,12 @@ class Config:
     turn_detection: str = "vad"
     min_endpointing_delay: float = 0.6   # pause (s) before smart-turn is consulted
     max_endpointing_delay: float = 3.0   # hard cap (s): end the turn even if smart-turn keeps saying INCOMPLETE
-    # How confident smart-turn must be you're DONE before ending the turn (sigmoid prob in [0,1]).
-    # NOTE: the smart-turn model is poorly discriminative on some setups (scores ~0.73 even on a
-    # pause), so a HIGH threshold makes it never end early and wait out max_endpointing_delay every
-    # turn (slow), while a LOW threshold ends on any pause (cuts you off). If smart_turn is unreliable
-    # for you, prefer turn_detection="vad" (fixed silence) — predictable and fast. Default is a middle.
-    smart_turn_threshold: float = 0.7
+    # How confident smart-turn must be you're DONE before ending the turn (probability in [0,1]).
+    # 0.5 is pipecat's default. The old note here ("scores ~0.73 even on a pause") was a bug, not the
+    # model: Vox applied a second sigmoid to an output that's already a probability, squashing every
+    # score into 0.50–0.73. Fixed 2026-11-06 with v3.2. On synthetic test sentences it now separates
+    # finished (0.59–0.99) from cut-off (0.006–0.13, one outlier at 0.98). Worth re-testing as default.
+    smart_turn_threshold: float = 0.5
 
     # Acoustic echo cancellation (voice-upgrade loop 5 / R7): how the mic is captured.
     #   false = DEFAULT — capture via the sounddevice/PortAudio MicStream (today's behavior,
@@ -176,13 +190,22 @@ class Config:
     # be quality-validated with a live mic + speakers (see docs/plan/VOICE_UPGRADE.md, Loop 5).
     audio_aec: bool = False
 
-    # --- Speech-to-text (faster-whisper). int8 runs well on Apple-Silicon CPU. ---
+    # --- Speech-to-text (faster-whisper). ---
     whisper_model: str = "small.en"   # more accurate for accents than base.en (~250MB 1-time download, ~2-3x slower STT but still <1s). Revert to "base.en" for max speed.
-    whisper_compute_type: str = "int8"
+    # float32, not int8: on Apple Silicon CTranslate2's fp32 path runs on Accelerate (AMX units) while
+    # int8 uses generic ARM kernels. Measured on an M4 (small.en, 1.9 s command): int8 4.4 CPU-s /
+    # 1.06 s wall vs float32 1.4 CPU-s / 0.59 s wall, same text. Cost: ~0.55 GB more RAM. "int8" to undo.
+    whisper_compute_type: str = "float32"
+    # Greedy decoding. Beam 5 cost ~30% more CPU and wall time for the same transcripts on the test
+    # clips; app/command words are covered by hotwords (a prompt, so they work at beam 1 too), vocab
+    # and the Vosk lane. Raise to 5 if rare words start coming out wrong.
+    whisper_beam_size: int = 1
     # Cap how many CPU threads CTranslate2 uses per transcription. Left at 0 (its default), it grabs
     # ~all physical cores, so back-to-back idle transcriptions in a talky room can saturate the whole
     # machine and make it beachball ("freezes after a while"). A modest cap leaves cores free for the
     # rest of the system — STT stays well under a second — so the Mac stays responsive while Vox listens.
+    # With float32 (Accelerate does its own threading) it matters less: 4 threads 0.59 s wall / 1.4
+    # CPU-s on a 1.9 s clip, 2 threads 0.67 s / 1.15 CPU-s. 4 keeps the faster reply.
     whisper_cpu_threads: int = 4
     # Bias CONTROL-mode recognition toward command vocabulary + app names so
     # "Cursor"/"Arc" win over phonetic neighbours ("Casa"). Tune freely.
@@ -244,6 +267,9 @@ class Config:
     local_ai_base_url_env: str = "LOCAL_AI1_URL"   # .env var holding the base URL (…/v1)
     local_ai_key_env: str = "LOCAL_AI1"            # .env var holding the API key
     local_ai_model: str = "google/gemma-4-e4b"     # model id the local server exposes
+    agent_alerts: str = "bubble"        # Claude Code hook alerts ("David needs your OK"): off | bubble | speak
+    agent_done_alerts: bool = False     # also announce when an agent finishes a turn (Stop fires every turn)
+    small_brain_thinking: str = "off"  # "off" | "on": DeepSeek's hidden reasoning (see assistant._deepseek_thinking_off)
     llm_max_tokens: int = 800   # headroom for composing text ("write me…"); chat stays short via the prompt
 
     # LLM-as-executor (idea #12): on an uncertain command, the small brain runs Vox's own
@@ -325,6 +351,9 @@ class Config:
     tts_engine: str = "say"
     kokoro_voice: str = "af_heart"  # Kokoro voice id (e.g. af_heart, af_bella, am_michael, bf_emma). See voices list.
     kokoro_speed: float = 1.0       # 0.5–2.0; 1.0 = natural pace
+    # onnxruntime intra-op threads for Kokoro. 0 = onnxruntime's default (every core). 4 was both
+    # faster and cheaper than the default on an M4; 2 saved more CPU but added ~50% to synth time.
+    kokoro_threads: int = 4
 
     # Interruptible speaking (voice-upgrade loop 3): keep listening WHILE Vox speaks a reply, and
     # if a captured utterance passes the loop-1 interrupt gate, cut the voice (tts.stop_speaking())

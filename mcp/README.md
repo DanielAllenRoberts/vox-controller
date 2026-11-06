@@ -46,6 +46,8 @@ away.
 - `click(target)` / `right_click(target)` / `double_click(target)` — by **label** (exact, then
   substring) or by **badge number** from the last list/marked screenshot. The click is pinned to the
   app that was focused when called, and reports what it actually pressed.
+- `point(target)`: show the user where a control is without clicking it. A glowing ring flies from
+  the pointer to it and pulses for a few seconds. Label or badge number, like `click`.
 - `type_text(text)` — paste text at the cursor, verbatim (clipboard restored).
 - `press(keys)` — `"cmd+s"`, `"command shift 4"`, `"return"`, `"escape"`, `"page down"` …
 - `scroll(direction, amount)` — up/down/left/right by wheel ticks, or top/bottom/pageup/pagedown.
@@ -317,3 +319,26 @@ cat data/speaking.lock
 # or run the server and let your editor's MCP client call it.
 uv run python mcp/vox_speak_server.py   # stdio server; Ctrl-C to stop
 ```
+
+## "David needs you": alerts from Claude Code hooks
+
+Agents often stop and wait, on a permission prompt or for your next message, while you're looking
+elsewhere. Vox can tell you **which** agent is waiting, by the name it registered with
+`register_agent`, without relying on the model to announce itself. Add this to Claude Code's
+settings (`~/.claude/settings.json` for every project, or `.claude/settings.json` for one):
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      { "matcher": "", "hooks": [{ "type": "http", "url": "http://127.0.0.1:8765/api/agents/event", "timeout": 5 }] }
+    ]
+  }
+}
+```
+
+You'll get a bubble like **"David needs your OK to use Bash"** or **"David is waiting for you"**.
+*Settings → General → Agent alerts* switches between a bubble, speech, or off. To also hear when an
+agent finishes a turn, add the same hook under `"Stop"` and turn on *Also tell me when an agent
+finishes*. Names come from `register_agent`; an agent that hasn't registered shows as "An agent"
+plus its folder name. If you've set `allowedHttpHookUrls`, add the URL above to it.

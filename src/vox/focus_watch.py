@@ -1,6 +1,7 @@
 """Focus watcher — logs the frontmost app whenever it changes (observability).
 
-A tiny background thread that polls ``actions.frontmost_app()`` and emits a
+A tiny background thread that polls the frontmost app (AX in-process, checked against
+``actions.frontmost_app_pid()``) and emits a
 ``window in view: <App>`` line to the daemon log (``vox.log``) on every change. It's the
 focus-change DETECTION primitive the app-scoped command DB (idea #36, phase 2) will build
 on — for now it just makes the switch visible so you can confirm Vox notices when you move
@@ -19,10 +20,18 @@ from vox.config import CONFIG
 # Singleton background thread (started once from the daemon).
 _THREAD: "_FocusThread | None" = None
 
-# The last (pid, name) the watcher saw in front. It already pays an authoritative System Events call
-# every poll, so this is the cheapest trustworthy answer to "which app is the user on?" anywhere in
-# Vox — and the accessibility engine needs the PID, not just the name, to aim a click at the right
-# app (issue O18). At most one poll old; anything that presses re-checks before it acts.
+# Each poll reads focus in-process through AX (``ax.focused_app``, sub-millisecond) instead of
+# spawning osascript + System Events every 1.5 s (~40-60 ms CPU, a process spawn and a System Events
+# wakeup each time). System Events stays the authority: every app CHANGE is confirmed with it before
+# it is logged or loads commands, and every Nth unchanged poll is re-checked so an AX reading that
+# lagged (the O18 failure mode NSWorkspace has here) is caught within N polls and AX is dropped.
+_VERIFY_EVERY = 10
+
+# The last (pid, name) the watcher saw in front. It is confirmed against System Events on every
+# change and every few polls (see _VERIFY_EVERY), so this is the cheapest trustworthy answer to
+# "which app is the user on?" anywhere in Vox — and the accessibility engine needs the PID, not just
+# the name, to aim a click at the right app (issue O18). At most one poll old; anything that presses
+# re-checks before it acts.
 _LAST: tuple[int, str] | None = None
 
 
@@ -43,6 +52,8 @@ class _FocusThread(threading.Thread):
         self._stop = threading.Event()
         self._last = ""
         self._on_change = on_change  # called with the new app name on each switch (e.g. command_cache.on_focus)
+        self._use_ax = True  # cleared for the session if AX ever disagrees with System Events
+        self._polls = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -53,10 +64,27 @@ class _FocusThread(threading.Thread):
         while not self._stop.wait(self._poll):
             self._poll_once(actions)
 
+    def _read(self, actions):
+        """(pid, name) in front: AX when it agrees with what we last confirmed, else System Events."""
+        if not self._use_ax:
+            return actions.frontmost_app_pid()
+        from vox import ax
+        self._polls += 1
+        fast = ax.focused_app()
+        if fast is not None and fast[1] == self._last and self._polls % _VERIFY_EVERY:
+            return fast  # unchanged since System Events last confirmed it
+        slow = actions.frontmost_app_pid()
+        if (fast is not None and slow is not None and fast != slow and fast[1] == self._last
+                and ax.focused_app() != slow):  # re-read once: a switch between the two calls isn't a lag
+            self._use_ax = False
+            self._out.emit(f"  [focus] AX said {fast[1]}, System Events said {slow[1]}; "
+                           f"using System Events for the rest of this session")
+        return slow
+
     def _poll_once(self, actions) -> None:
         global _LAST
         try:
-            hit = actions.frontmost_app_pid()
+            hit = self._read(actions)
             app = hit[1] if hit else ""
             if hit:
                 _LAST = hit  # refreshed every poll, not just on a change — the pid is what AX needs

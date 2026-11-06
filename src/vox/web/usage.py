@@ -19,6 +19,8 @@ recording fails, so ``record_usage`` never raises out to its caller.
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import asyncio
 import json
 import os
@@ -27,11 +29,9 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 # Runtime store lives under data/ (gitignored). This file is src/vox/web/usage.py
-# → parents[3] is the repo root.
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "usage.jsonl"
 
 # One process-wide lock so the voice daemon thread and the API thread never

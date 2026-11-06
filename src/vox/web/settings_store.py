@@ -16,15 +16,15 @@ Public API (CONTRACT): ``SCHEMA`` ; ``get(key)`` ; ``set(key, value)`` ;
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import json
 import threading
-from pathlib import Path
 
 from ..config import CONFIG
 
-# Runtime store lives under data/ (gitignored). This file is
-# src/vox/web/settings_store.py → parents[3] is the repo root.
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+# Runtime store lives under data/ (gitignored) — see vox/paths.py.
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "settings.json"
 
 _LOCK = threading.RLock()
@@ -107,6 +107,19 @@ _SCHEMA_META: list[dict] = [
         "options": _MODEL_OPTIONS,
         "help": "Model for the big brain — pick one that matches the provider above. Applies on the "
                 "next reply. (Need a model not listed? Set big_brain_model in config.py.)",
+    },
+    {
+        "key": "small_brain_thinking",
+        "label": "Small brain thinking",
+        "group": "Brains",
+        "type": "select",
+        "options": [
+            {"value": "off", "label": "Off: fastest (about 1s)"},
+            {"value": "on", "label": "On: more careful with vague requests (2-5s)"},
+        ],
+        "help": "DeepSeek and Claude can think silently before answering. Off answers plain commands "
+                "just as well in about half the time; on asks more often when it isn't sure. Applies "
+                "on the next reply.",
     },
     {
         "key": "escalate_to_big_brain",
@@ -221,6 +234,17 @@ _SCHEMA_META: list[dict] = [
         "help": "A long pause auto-exits dictation so it can't get stuck.",
     },
     {
+        "key": "auto_dictation",
+        "label": "Type automatically in text fields",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "In control mode, when you're in a text box, Vox types what you say unless the "
+                "whole thing is a command (like \"next tab\"), so you don't need \"start typing\". "
+                "Commands that could lose your text (close tab, reload) need \"Vox, …\" first or "
+                "a yes. Say \"scratch that\" to remove the last bit typed, or \"that was a "
+                "command\" to run it instead. Never types into password fields. Applies live.",
+    },
+    {
         "key": "memory_autocapture",
         "label": "Auto-capture memories",
         "group": "Behavior",
@@ -312,6 +336,23 @@ _SCHEMA_META: list[dict] = [
         "type": "text",
         "help": "Decimal seconds: captured audio must be at least this long to count as a barge-in. Applies live.",
     },
+    {
+        "key": "idle_speech_gate",
+        "label": "Idle speech gate",
+        "group": "Voice",
+        "type": "toggle",
+        "help": "While idle, only transcribe a sound if it contains real speech, so a door, a cough or a "
+                "lone 'uh' doesn't cost a full Whisper pass. Saves CPU; if Vox starts missing 'Hey Vox', "
+                "turn it off or lower the minimum below. Applies live.",
+    },
+    {
+        "key": "idle_speech_gate_ms",
+        "label": "Idle speech gate minimum (ms)",
+        "group": "Voice",
+        "type": "number",
+        "help": "How many milliseconds of speech an idle sound needs before Vox transcribes it. Wake "
+                "phrases measured 220 ms or more in testing; 150 is the default. Applies live.",
+    },
     # --- MCP voice --- the vox-speak MCP heads-up voice, kept separate from the system voice
     # above so the IDE assistant sounds different from Vox. Reload the MCP server in your editor
     # to pick up changes (it reads these at speak-time).
@@ -392,6 +433,26 @@ _SCHEMA_META: list[dict] = [
         "group": "Notifications",
         "type": "number",
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
+    },
+    {
+        "key": "agent_alerts",
+        "label": "Agent alerts",
+        "group": "Notifications",
+        "type": "select",
+        "options": [
+            {"value": "bubble", "label": "Show a bubble"},
+            {"value": "speak", "label": "Say it out loud"},
+            {"value": "off", "label": "Off"},
+        ],
+        "help": "When a Claude Code agent is waiting for you (a permission prompt, or idle), say which "
+                "one. Needs the Vox hook in Claude Code's settings; see mcp/README.md.",
+    },
+    {
+        "key": "agent_done_alerts",
+        "label": "Also tell me when an agent finishes",
+        "group": "Notifications",
+        "type": "toggle",
+        "help": "Announce every time an agent finishes a turn. Chatty with several agents running.",
     },
     {
         "key": "speech_queue_enabled",

@@ -9,7 +9,8 @@ Pick via `config.wake_backend`. See docs/plan/modes.md.
 
 import re
 
-from vox.audio import capture_utterance
+from vox import runtime
+from vox.audio import _setting, capture_utterance, voiced_ms
 from vox.wakeword.openwakeword_detector import OpenWakeWordDetector
 
 
@@ -50,6 +51,19 @@ class WhisperWakeBackend:
                 max_seconds=getattr(self._cfg, "idle_max_utterance_seconds", self._cfg.max_utterance_seconds))
             if audio is None:
                 continue
+            voiced = None
+            gate = _setting("idle_speech_gate", self._cfg.idle_speech_gate)
+            if not runtime.is_typed(audio) and (gate or self._cfg.debug):
+                voiced = voiced_ms(audio)
+                try:  # a stray dashboard value must not take down the idle loop
+                    min_ms = int(float(_setting("idle_speech_gate_ms", self._cfg.idle_speech_gate_ms)))
+                except (TypeError, ValueError):
+                    min_ms = self._cfg.idle_speech_gate_ms
+                if gate and voiced < min_ms:
+                    # Too little voice to hold a wake phrase: skip the ~1.4 CPU-s Whisper pass.
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit(f"  [debug] idle gate: skipped (voiced {voiced}ms < {min_ms}ms)")
+                    continue
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
             # Passing/ambient audio that piled up in the mic buffer WHILE we were transcribing is
             # stale — drop it so idle stays synced to LIVE audio instead of working through a growing
@@ -59,11 +73,14 @@ class WhisperWakeBackend:
                 mic.flush()
             label = self.match(text)
             cmd = None if label is not None else self._oneshot(text)
+            if label is None and cmd is None and (runtime.is_typed(audio) or runtime.last_capture_ptt):
+                cmd = text.strip()  # typed or hold-to-talk from idle: no need to say "vox" first
             if self._cfg.debug and self._out is not None and text.strip():
                 # Skip silence captures (empty transcription) — they're pure noise. Real
                 # transcriptions (incl. no-match mishears) still log.
                 tag = label or (f"do:{cmd}" if cmd else "(no match — stayed idle)")
-                self._out.emit(f"  [debug] idle heard: {text!r} → {tag}")
+                vtag = f" · voiced={voiced}ms" if voiced is not None else ""
+                self._out.emit(f"  [debug] idle heard: {text!r} → {tag}{vtag}")
             if label is not None:
                 return label
             if cmd:
@@ -95,6 +112,11 @@ class OpenWakeWordBackend:
         # mic accepted for interface parity with WhisperWakeBackend; openWakeWord drains frames
         # continuously and per-frame, so there's no transcription backlog to flush.
         for frame in frames:
+            typed = runtime.take()
+            if typed is not None:
+                return "do:" + typed.text
+            if runtime.paused:
+                continue
             fired = self._detector.fired(frame)
             if fired is not None:
                 self._detector.reset()

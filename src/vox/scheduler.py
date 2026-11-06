@@ -35,17 +35,17 @@ human result string for the voice layer to speak, or None when nothing matched.
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import re
 import threading
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from vox.config import CONFIG
 
-# Runtime store lives under data/ (gitignored). This file is
-# src/vox/scheduler.py → parents[2] is the repo root.
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+# Runtime store lives under data/ (gitignored) — see vox/paths.py.
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "reminders.json"
 
 _LOCK = threading.RLock()

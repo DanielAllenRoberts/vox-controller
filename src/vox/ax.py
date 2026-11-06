@@ -77,6 +77,8 @@ def _load():
                 # AXValueType=I(uint32), out=pointer to a 2-double struct. CGPoint and CGSize share
                 # that {dd} layout, so one binding extracts both (fields read as .x/.y either way).
                 ("AXValueGetValue", b"C@Io^{CGPoint=dd}"),
+                ("AXUIElementCreateSystemWide", b"@"),
+                ("AXUIElementGetPid", b"i@o^i"),
             ])
         except Exception:
             _FNS = {}
@@ -102,6 +104,31 @@ def frontmost():
         from AppKit import NSWorkspace
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
         return (app.processIdentifier(), app.localizedName() or "") if app else None
+    except Exception:
+        return None
+
+
+def focused_app():
+    """(pid, name) of the focused app via the AX system-wide element, in-process. None on failure.
+
+    Unlike ``frontmost()`` this is a live query to the accessibility server, not a KVO property
+    waiting on a run loop, so it should not go stale in the daemon (issue O18). ``focus_watch``
+    still cross-checks it against System Events and drops it if it ever lags. The name is the
+    executable's, which is what System Events reports (``zen``, not ``Zen``; no hidden U+200E as
+    in ``localizedName`` for WhatsApp): it matched for all 130 processes checked, so command-DB
+    per-app keys stay the same."""
+    fns = _load()
+    if not fns or "AXUIElementCreateSystemWide" not in fns:
+        return None
+    try:
+        from AppKit import NSRunningApplication
+        app = _attr(fns, fns["AXUIElementCreateSystemWide"](), "AXFocusedApplication")
+        if app is None:
+            return None
+        err, pid = fns["AXUIElementGetPid"](app, None)
+        ra = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid) if err == 0 else None
+        exe = ra.executableURL() if ra is not None else None
+        return (int(pid), str(exe.lastPathComponent())) if exe is not None else None
     except Exception:
         return None
 
@@ -751,3 +778,175 @@ def frame_index(i: int):
         return None
     _press_el, label, frame = _LAST_TARGETS[i]
     return (label, frame) if frame is not None else None
+
+
+# --- focused text field probe (auto dictation, research/command-vs-dictation.md L2) --------------
+# Auto dictation types whatever isn't a command — but only where typing can land. Dragon opens its
+# Dictation Box and Wispr sends to a notification when no editable box has focus; Vox falls back to
+# plain control mode. So the one question asked per utterance is "is the focused element a text
+# field, and is it NOT a password field?". It must be cheap (it runs before every utterance is
+# routed) and it must fail SAFE: any doubt → not editable → control mode exactly as today.
+
+_FOCUS_FNS = None            # extra bindings the probe needs, loaded once ({} if unavailable)
+_FOCUS_CACHE = (0.0, None)   # (monotonic time, last result) — one read serves one utterance
+_FOCUS_TTL = 0.25            # seconds; long enough to share a read within an utterance, no longer
+_focus_enabled_pids = set()  # pids we've asked to expose their Electron web tree (see below)
+_PEEK_CHARS = 200            # how much text before the cursor to hand back
+_PEEK_MAX_DOC = 50_000       # don't copy AXValue out of a huge document just to peek at it
+_AXVALUE_CFRANGE = 4         # kAXValueCFRangeType
+
+
+def _focus_fns():
+    """Bindings only the probe needs, kept out of ``_load`` so a failure here can't take clicking
+    down with it. AXValueGetValue is bound AGAIN with a CFRange signature in its own dict: the main
+    binding is typed for the 2-double CGPoint/CGSize struct and would misread a 2-long CFRange."""
+    global _FOCUS_FNS
+    if _FOCUS_FNS is None:
+        _FOCUS_FNS = {}
+        try:
+            import objc
+            from Foundation import NSBundle
+            bundle = NSBundle.bundleWithPath_(
+                "/System/Library/Frameworks/ApplicationServices.framework")
+            objc.loadBundleFunctions(bundle, _FOCUS_FNS, [
+                ("AXUIElementIsAttributeSettable", b"i@@o^C"),
+                ("AXValueGetValue", b"C@Io^{CFRange=qq}"),
+            ])
+        except Exception:
+            _FOCUS_FNS = {}
+    return _FOCUS_FNS
+
+
+def _expose_web_tree(fns, pid) -> None:
+    """Electron hides its web-content tree (Slack's composer included) until an assistive client
+    asks, and until then the focused element reads as the bare window or web area. Ask once per pid;
+    no settle wait — the first probe in a fresh app may miss (→ control mode, the safe side) and
+    every probe after it sees the real field."""
+    if not pid or pid in _focus_enabled_pids:
+        return
+    _focus_enabled_pids.add(pid)
+    try:
+        fns["AXUIElementSetAttributeValue"](fns["AXUIElementCreateApplication"](pid),
+                                            "AXManualAccessibility", True)
+    except Exception:
+        pass
+
+
+def _focused_element(fns):
+    """(element, pid) of the focused UI element, or (None, None).
+
+    The system-wide element is the direct question, but it answers kAXErrorCannotComplete (-25204)
+    often enough to need a fallback (measured: every time while the login window was frontmost).
+    The fallback asks the focused APP for its focused element; the app comes from the focus watcher
+    (System-Events-verified, at most one poll old) rather than NSWorkspace, which goes stale in this
+    run-loop-less daemon (issue O18)."""
+    try:
+        el = _attr(fns, fns["AXUIElementCreateSystemWide"](), "AXFocusedUIElement")
+    except Exception:
+        el = None
+    if el is not None:
+        try:
+            err, p = fns["AXUIElementGetPid"](el, None)
+            pid = int(p) if err == 0 else None
+        except Exception:
+            pid = None
+        _expose_web_tree(fns, pid)
+        return el, pid
+    try:
+        from vox import focus_watch
+        last = focus_watch.last()
+    except Exception:
+        last = None
+    p = last or focused_app() or frontmost()
+    if not p:
+        return None, None
+    pid = int(p[0])
+    _expose_web_tree(fns, pid)
+    try:
+        app = fns["AXUIElementCreateApplication"](pid)
+    except Exception:
+        return None, None
+    return _attr(fns, app, "AXFocusedUIElement"), pid
+
+
+def _text_before_cursor(fns, extra, el):
+    """Up to _PEEK_CHARS of the field's text before the insertion point, or None when it can't be
+    read (no AXValue, no selection range, a huge document). Used to pick the leading space and the
+    capital letter from what's ACTUALLY in the field — better than remembering what we typed, which
+    is blind to clicks, keyboard typing and commands in between (Talon peeks with keystrokes; AX
+    lets us just read it)."""
+    if "AXValueGetValue" not in extra:
+        return None
+    try:
+        n = _attr(fns, el, "AXNumberOfCharacters")
+        if isinstance(n, int) and n > _PEEK_MAX_DOC:
+            return None
+        rng = _attr(fns, el, "AXSelectedTextRange")
+        val = _attr(fns, el, "AXValue")
+        if rng is None or not isinstance(val, str):
+            return None
+        ok, r = extra["AXValueGetValue"](rng, _AXVALUE_CFRANGE, None)
+        if not ok:
+            return None
+        loc = int(r.location if hasattr(r, "location") else r[0])
+        loc = max(0, min(loc, len(val)))
+        return str(val[max(0, loc - _PEEK_CHARS):loc])
+    except Exception:
+        return None
+
+
+def focused_text_target(max_age: float = _FOCUS_TTL):
+    """What has keyboard focus, as far as typing is concerned. Returns a dict, or None when native AX
+    is unavailable (callers must then behave exactly as plain control mode)::
+
+        {"editable": bool, "secure": bool, "role": str, "subrole": str, "pid": int | None,
+         "element": <AXUIElement>, "before": str | None, "ms": float}
+
+    editable — role is a text-input role (``_TEXT_INPUT_ROLES``) whose AXValue isn't reported
+      read-only, OR any element with a settable AXValue AND a text selection range. The second arm is
+      for web ``contenteditable`` / Electron editors (Slack, Google Docs), which don't always wear a
+      text role.
+    secure — a password field. NEVER editable here: auto dictation must not type into one, and the
+      caller must not log what was said.
+    before — text just before the cursor (see ``_text_before_cursor``); only read for editable,
+      non-secure fields.
+
+    Cached for ``max_age`` seconds so routing and typing within one utterance share a single read;
+    pass 0 to force a fresh one (e.g. right before deleting text)."""
+    global _FOCUS_CACHE
+    now = time.monotonic()
+    if max_age > 0 and _FOCUS_CACHE[1] is not None and now - _FOCUS_CACHE[0] <= max_age:
+        return _FOCUS_CACHE[1]
+    fns = _load()
+    if not fns or "AXUIElementCreateSystemWide" not in fns:
+        return None
+    extra = _focus_fns()
+    t0 = time.perf_counter()
+    el, pid = _focused_element(fns)
+    out = {"editable": False, "secure": False, "role": "", "subrole": "", "pid": pid,
+           "element": el, "before": None, "ms": 0.0}
+    if el is not None:
+        role = _attr(fns, el, "AXRole") or ""
+        subrole = _attr(fns, el, "AXSubrole") or ""
+        out["role"], out["subrole"] = str(role), str(subrole)
+        secure = "AXSecureTextField" in (role, subrole)
+        settable = None
+        if "AXUIElementIsAttributeSettable" in extra:
+            try:
+                err, s = extra["AXUIElementIsAttributeSettable"](el, "AXValue", None)
+                settable = bool(s) if err == 0 else None
+            except Exception:
+                settable = None
+        if role in _TEXT_INPUT_ROLES:
+            # A text role with an AXValue explicitly reported NOT settable is a read-only view
+            # (a log pane, a terminal scrollback) — typing there is at best a no-op.
+            editable = settable is not False
+        else:
+            editable = bool(settable) and _attr(fns, el, "AXSelectedTextRange") is not None
+        out["secure"] = secure
+        out["editable"] = bool(editable) and not secure
+        if out["editable"]:
+            out["before"] = _text_before_cursor(fns, extra, el)
+    out["ms"] = (time.perf_counter() - t0) * 1000.0
+    _FOCUS_CACHE = (now, out)
+    return out

@@ -35,6 +35,8 @@ Research and rationale: ``docs/dashboard/research/memory-tiered.md`` and
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import hashlib
 import json
 import re
@@ -44,9 +46,8 @@ from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Runtime store lives under data/ (gitignored). Resolved relative to repo root
-# (this file is src/vox/memory.py → parents[2] is the repo root).
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+# Runtime store lives under data/ (gitignored) — see vox/paths.py.
+_DATA_DIR = DATA_DIR
 _MEM_DIR = _DATA_DIR / "memory"
 _CORE_FILE = _MEM_DIR / "core.md"
 _DAILY_DIR = _MEM_DIR / "daily"

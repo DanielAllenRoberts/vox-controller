@@ -79,6 +79,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "scroll": _scroll, "press": _press,
         "right_click": _right_click, "double_click": _double_click,
         "drag": _drag, "set_value": _set_value,
+        "point": point_at,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -91,13 +92,51 @@ def _run(text: str) -> str:
     return run_intent(name, arg, _text=text)
 
 
+# Commands that take no argument match on a phrase CONTAINED in the utterance, so on their own they
+# fire on sentences that merely mention them: "the next tab in the spreadsheet is broken" switched
+# tabs, "I think we should go back to the old design" pressed Back (todo.md, "parser greediness").
+# Commands with an argument validate it; these can't, so they get a length check instead: once polite
+# wrappers are stripped, a real command is short. Anything longer goes to the brain, which reads the
+# whole sentence. Six words keeps "switch to the next window" and "go to the next tab".
+_NO_ARG_INTENTS = {"tab_arrow", "close_tab", "back", "reload", "sidebar", "window_move", "desktop_move"}
+_POLITE_HEAD = re.compile(r"^(?:(?:please|can you|could you|would you|will you|hey vox|vox|okay|ok|now|"
+                          r"and|then|just|um|uh)\s+)+")
+_POLITE_TAIL = re.compile(r"(?:\s+(?:please|for me|now|thanks|thank you))+$")
+_NO_ARG_MAX_WORDS = 6
+
+
 def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None."""
+    hit = _parse(text)
+    if hit and hit[0] in _NO_ARG_INTENTS:
+        core = _POLITE_TAIL.sub("", _POLITE_HEAD.sub("", text.lower().strip().rstrip(".!?")))
+        if len(core.split()) > _NO_ARG_MAX_WORDS:
+            return None
+    return hit
+
+
+def _parse(text: str) -> tuple[str, str] | None:
+    """The phrase matcher behind ``parse`` (which adds the no-argument length guard)."""
     t = text.lower().strip().rstrip(".!?")
 
     # --- desktop primitives (idea #61) ---------------------------------------------------------
     # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
     # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
+
+    # Point at something without clicking it (ideas #69.2): "point at export", "circle the save
+    # button", "where's the settings icon". "where is" only counts with a UI noun at the end, so
+    # "where is the nearest pharmacy" still reaches the brain as a question.
+    # Anchored at the START (after politeness): "search for how to highlight text" and "open circle
+    # ci" contain the words but are searches/opens, not requests to point.
+    m = (re.match(r"(?:(?:please|can you|could you|vox|hey vox|now)\s+)*(?:point\s+(?:at|to)|circle|highlight|outline)"
+                  r"\s+(?:the\s+)?(.+)", t)
+         or re.match(r"(?:(?:so|and|ok|okay|hey vox|vox)\s+)*where(?:'s|\s+is)\s+(?:the\s+)?(.+?\s+(?:button|link|icon|"
+                     r"tab|menu|field|setting|option|toggle|checkbox|switch))$", t))
+    if m:
+        tgt = re.sub(r"\s+(?:button|link|icon|tab|menu|field|setting|option|toggle|checkbox|switch)$", "",
+                     m.group(1).strip())
+        if tgt and tgt not in {"it", "that", "this"}:
+            return ("point", tgt)
 
     # Right / double click, by control label or by a badge number from the overlay.
     m = re.search(r"\b(right|double)[\s-]?click\s+(?:on\s+)?(?:the\s+)?(.+)", t)
@@ -927,6 +966,11 @@ def close_dashboard() -> str:
     main window is always closed as a tab and we never AXPress (and thus close) the main window —
     the standalone path only fires for a genuine 'Little Arc', which Arc's AppleScript can't see.
     Never raises."""
+    if os.environ.get("VOX_APP") == "1":  # Vox.app replaces the browser dashboard: hide it
+        subprocess.run(["osascript", "-e", 'tell application "System Events" to set visible of '
+                        '(first process whose bundle identifier is "app.vox.mac") to false'],
+                       capture_output=True, text=True)
+        return "Hid Vox."
     url = f"http://{CONFIG.dashboard_host}:{CONFIG.dashboard_port}"
     host = urllib.parse.urlparse(url).netloc.replace('"', "")
     if not host:
@@ -1328,10 +1372,26 @@ def reset_dictation() -> None:
     _dictation_new_sentence = True
 
 
-def dictate(text: str) -> None:
+def prime_dictation(before: str) -> None:
+    """Set the spacing/capitalization state from the text actually sitting before the cursor (read
+    via AX by auto dictation). The session state above is a guess built from what Vox itself typed;
+    in auto mode the cursor moves between chunks — commands, clicks, your own keyboard — so reading
+    the field is the only way to get "no space at the start of a line" and "capital after a full
+    stop" right. Talon peeks the same way (dictation_peek), with keystrokes instead of AX."""
+    global _dictation_active, _dictation_new_sentence
+    _dictation_active = bool(before) and not before[-1:].isspace()
+    tail = before.rstrip(" \t")
+    _dictation_new_sentence = not tail or tail[-1] in ".!?\n"
+
+
+def dictate(text: str) -> str | None:
     """Insert spoken text at the cursor (frontmost app). A few spoken words act as edit keys;
     everything else is pasted. Chunks are separated with a LEADING space (survives editors that
-    trim trailing spaces) and the first word of each sentence is capitalized."""
+    trim trailing spaces) and the first word of each sentence is capitalized.
+
+    Returns exactly the string that was pasted (leading space included), or None when the utterance
+    was an edit key / nothing was typed — auto dictation's chunk history needs the precise length to
+    take a chunk back out again ("scratch that")."""
     global _dictation_active, _dictation_new_sentence
     raw = text.strip()
     low = raw.lower().rstrip(".!?")
@@ -1343,10 +1403,11 @@ def dictate(text: str) -> None:
         lit = m.group(1).strip()
         if _dictation_new_sentence and lit[:1].islower():
             lit = lit[0].upper() + lit[1:]
-        _paste((" " if _dictation_active else "") + lit)
+        pasted = (" " if _dictation_active else "") + lit
+        _paste(pasted)
         _dictation_active = True
         _dictation_new_sentence = lit.rstrip()[-1:] in ".!?"
-        return
+        return pasted
 
     # Bigger deletions + undo. These match the WHOLE utterance only (like the edit keys below), so
     # they never fire mid-sentence — say them on their own to use them, dictate them in a sentence
@@ -1410,9 +1471,11 @@ def dictate(text: str) -> None:
     if _dictation_new_sentence and raw[:1].islower():
         raw = raw[0].upper() + raw[1:]
     # Leading space separates this chunk from the previous one across the pause.
-    _paste((" " if _dictation_active else "") + raw)
+    pasted = (" " if _dictation_active else "") + raw
+    _paste(pasted)
     _dictation_active = True
     _dictation_new_sentence = raw.rstrip()[-1:] in ".!?"
+    return pasted
 
 
 def type_text(text: str) -> str:
@@ -1543,6 +1606,41 @@ def _click_variant(target: str, button: str, clicks: int, verb: str) -> str:
     except Exception as exc:
         return f"failed: couldn't {verb} {label!r} ({exc})."
     return f"{verb}ed {label}"
+
+
+def point_at(target: str) -> str:
+    """Show where something is: ring it on screen without clicking (ideas #69.2). Accepts a control
+    label ("Export") or a badge number from "show clickable" ("14"). On a web page whose AX tree is
+    down, falls back to the page's own elements, like click-by-label does."""
+    from vox import overlay
+    t = (target or "").strip()
+    if not t:
+        return "Point at what? Try 'point at Export'."
+    from vox import ax
+    n = int(t) if t.isdigit() else _to_index(t.lower())
+    hit = ax.frame_index(n - 1) if n is not None else None
+    if hit is None and not t.isdigit():
+        hit = ax.frame_of(t)
+    if hit is None and not t.isdigit():
+        try:
+            from vox import targets
+            items = targets.visible_targets(400) or []
+            low = t.lower()
+            exact = [it for it in items if it["label"].strip().lower() == low]
+            loose = sorted((it for it in items if low in it["label"].strip().lower()), key=lambda it: len(it["label"]))
+            it = (exact or loose or [None])[0]
+            if it:
+                hit = (it["label"], (it["x"], it["y"], it["w"], it["h"]))
+        except Exception:
+            hit = None
+    if hit is None:
+        return f"I couldn't find {target!r} on screen."
+    label, (x, y, w, h) = hit
+    try:
+        overlay.point([{"x": x, "y": y, "w": w, "h": h, "label": label or target}])
+    except overlay.OverlayUnavailable as exc:
+        return f"failed: couldn't point ({exc})."
+    return f"There's {label or target}."
 
 
 def _right_click(target: str) -> str:

@@ -21,10 +21,12 @@ Design notes:
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import sqlite3
 from pathlib import Path
 
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+_DATA_DIR = DATA_DIR
 DEFAULT_DB = _DATA_DIR / "board.db"
 
 DEFAULT_BOARD = "Workspace"
