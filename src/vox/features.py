@@ -85,6 +85,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Say 'log an issue, <what went wrong>'. Vox says 'Logged it' and it appears under Testing → Logged issues with what was on screen.", "code"),
     ("point-vision", "Control", "Pointing looks at the screen",
      "'point at <something only visible, not a button>': if it's not found by name, Vox looks at the screen and rings it.", "code"),
+    ("media-background", "Control", "Music control in the background",
+     "With Spotify playing behind another app: 'pause the music', 'play music', 'next song', 'previous track'. Spotify must NOT come to the front.", "code"),
     ("voice-settings", "Control", "Change settings by voice",
      "'reply silently from now on' → no spoken replies; 'speak replies again' → back. Also 'use a deeper voice', 'stop learning commands'. Asking to change the brain is refused.", "claude"),
     ("time-answer", "Voice & speed", "Knows the time",

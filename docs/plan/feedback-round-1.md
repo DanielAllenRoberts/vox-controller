@@ -79,13 +79,18 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   the installed apps' names via the small brain, answers saved as long-term memories).
 
 ## Round 1d
-- ☐ **Media in the background:** "pause Spotify", "next song", "pause the music" control Spotify / Music
+- ☑ **Media in the background:** "pause Spotify", "next song", "pause the music" control Spotify / Music
   without bringing them forward (AppleScript), with the system media key for anything else. Direct
   command, no brain.
 - ☐ **App-scoped notes (the user's idea):** rules/preferences tied to an app, added to the prompt only when
   that app is in front ("in Zen, 'refresh' means press ⌘R"), the same way the command DB loads
   per-app commands. Keeps the main prompt lean. Saved by voice ("from now on in Zen, when I say
   refresh press command R") or on the Rules page.
+
+- ☐ **A proper Trello-style board:** add/remove/move several cards in one go (add already works),
+  tags/labels, deadlines (due dates) that Vox can check ("what's due this week?") and that create linked
+  reminders automatically, plus the usual Trello features (checklists, archive, search, card
+  descriptions, colour labels). Exposed by voice, in the app, and to agents over MCP.
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.

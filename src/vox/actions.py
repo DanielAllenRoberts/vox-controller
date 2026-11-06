@@ -130,6 +130,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "point": point_at,
         "log_issue": _log_issue,
         "set_setting": set_setting,
+        "media": media,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -172,6 +173,27 @@ def _parse(text: str) -> tuple[str, str] | None:
     # --- desktop primitives (idea #61) ---------------------------------------------------------
     # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
     # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
+
+    # Media: "pause spotify", "next song", "pause the music": straight to the player, in the
+    # background, no brain (it used to go to the LLM, which opened Spotify and clicked Pause).
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*"
+                     r"(pause|stop|play|resume|unpause|continue|skip|next|previous|last|toggle)\s+"
+                     r"(?:the\s+|this\s+|my\s+)?(music|song|track|spotify|apple music|playback|audio|podcast)"
+                     r"(?:\s+on\s+(spotify|apple music|music))?(?:\s+please)?", t)
+    if m:
+        verb, noun, on = m.group(1), m.group(2), m.group(3)
+        action = ({"pause": "pause", "stop": "pause", "play": "play", "resume": "play", "unpause": "play",
+                   "continue": "play", "skip": "next", "next": "next", "previous": "previous",
+                   "last": "previous", "toggle": "playpause"}[verb])
+        if verb in ("play", "resume") and noun in ("song", "track"):
+            action = "play"
+        app = on or (noun if noun in ("spotify", "apple music") else "")
+        return ("media", f"{action}:{app}")
+    if re.fullmatch(r"(?:skip|next)(?:\s+(?:this|the))?\s*(?:song|track)?|go to the next (?:song|track)", t) and \
+            re.search(r"song|track|skip", t):
+        return ("media", "next:")
+    if re.fullmatch(r"(?:previous|last|go back a|go back one)\s+(?:song|track)", t):
+        return ("media", "previous:")
 
     # Vox's own everyday settings by voice ("reply silently from now on"). Allow-listed in
     # VOICE_SETTINGS; anything else stays in the app.
@@ -1733,6 +1755,49 @@ _VOICE_SETTING_PHRASES = [
     (r"(?:stop|don'?t)\s+learning(?:\s+(?:new\s+)?commands)?", "learning_mode", "off"),
     (r"(?:start|resume)\s+learning(?:\s+(?:new\s+)?commands)?", "learning_mode", "auto"),
 ]
+
+
+_PLAYERS = {"spotify": "Spotify", "apple music": "Music", "music": "Music"}
+
+
+def media(arg: str) -> str:
+    """Play / pause / next / previous on the music player, WITHOUT bringing it forward. Spotify and
+    Music take AppleScript in the background; anything else (YouTube, podcasts in a browser) gets the
+    system media key, the same as the keyboard's ⏯ ⏭ ⏮ keys."""
+    action, _, app = (arg or "playpause:").partition(":")
+    player = _PLAYERS.get(app.strip())
+    if player is None:  # not named: whichever of Spotify / Music is running
+        for name in ("Spotify", "Music"):
+            ok, out = _osa(f'tell application "System Events" to return (exists process "{name}")')
+            if ok and out.strip() == "true":
+                player = name
+                break
+    verbs = {"pause": "pause", "play": "play", "playpause": "playpause",
+             "next": "next track", "previous": "previous track"}
+    if player is not None:
+        ok, out = _osa(f'tell application "{player}" to {verbs.get(action, "playpause")}')
+        if ok:
+            return {"pause": f"Paused {player}.", "play": f"Playing {player}.",
+                    "next": "Next track.", "previous": "Previous track."}.get(action, f"{player}: play/pause.")
+    if _media_key(action):
+        return {"next": "Next track.", "previous": "Previous track."}.get(action, "Play/pause.")
+    return "Couldn't control the music." if player else "Nothing's playing that I can control."
+
+
+def _media_key(action: str) -> bool:
+    """Press the system media key (NX_KEYTYPE_PLAY 16 / NEXT 17 / PREVIOUS 18)."""
+    code = {"next": 17, "previous": 18}.get(action, 16)
+    try:
+        import Quartz
+        from AppKit import NSEvent
+        for down in (True, False):
+            flags = 0xA00 if down else 0xB00
+            ev = NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                14, (0, 0), flags, 0, 0, None, 8, (code << 16) | flags, -1)
+            Quartz.CGEventPost(0, ev.CGEvent())
+        return True
+    except Exception:
+        return False
 
 
 def set_setting(arg: str) -> str:
