@@ -122,7 +122,9 @@ _SYSTEM = (
     "  BOARD: add_card | <list> | <title>        ·  BOARD: move_card | <card> | <list>\n"
     "  BOARD: update_card | <card> | <new title> ·  BOARD: note | <card> | <text to append>\n"
     "  BOARD: delete_card | <card>               ·  BOARD: add_list | <name>\n"
-    "  BOARD: add_board | <name>\n"
+    "  BOARD: add_board | <name>                 ·  BOARD: due | <card> | <date: friday, tomorrow, 2026-11-20 15:00, or none>\n"
+    "  BOARD: tag | <card> | <tag, tag>          ·  BOARD: archive | <card>\n"
+    "  BOARD: checklist | <card> | <item to add>\n"
     "Refer to a card by its TITLE as the user said it (close is fine, it's matched fuzzily), or by "
     "the #id shown. Examples: 'add a card to doing called fix the scraper' → "
     "BOARD: add_card | Doing | fix the scraper  ·  'move the AC direct card to done' → "
@@ -455,7 +457,17 @@ def _click_by_vision(target: str, items) -> str | None:
         return None
 
 
-_BOARD_OK = ("Added", "Moved", "Renamed", "Deleted", "Created")
+_BOARD_OK = ("Added", "Moved", "Renamed", "Deleted", "Created", "Set", "Cleared", "Archived")
+
+
+def _spoken_due(due: str) -> str:
+    """"2026-11-13" → "Friday the 13th"-ish: "Friday 13 November", plus the time when there is one."""
+    from vox import board_store
+    when = board_store.due_datetime(due)
+    if when is None:
+        return due
+    day = when.strftime("%A %-d %B")
+    return f"{day} at {when.strftime('%-I:%M %p').lower()}" if "T" in due else day
 
 
 def _board_summary(msgs: list[str]) -> str:
@@ -525,6 +537,34 @@ def _board(body: str) -> str:
                 return f"Did you mean {card['title']!r}? Say its name to delete it."
             board_store.delete_card(conn, card["id"])
             return f"Deleted {card['title']!r}."
+        if verb in ("due", "deadline", "set_due"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            updated = board_store.update_card(conn, card["id"], due=a2 or "")
+            if not updated["due"]:
+                return f"Cleared the deadline on {card['title']!r}."
+            return f"Set {card['title']!r} due {_spoken_due(updated['due'])}, with a reminder."
+        if verb in ("tag", "label", "tags"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            tags = card["tags"] + [t.strip() for t in a2.split(",") if t.strip() and t.strip() not in card["tags"]]
+            board_store.update_card(conn, card["id"], tags=tags)
+            return f"Added {a2!r} to {card['title']!r}."
+        if verb in ("archive", "archive_card"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            board_store.update_card(conn, card["id"], archived=True)
+            return f"Archived {card['title']!r}."
+        if verb in ("checklist", "check_item", "add_item"):
+            card = board_store.find_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a card called {a1!r}."
+            items = card["checklist"] + [{"text": a2, "done": False}]
+            board_store.update_card(conn, card["id"], checklist=items)
+            return f"Added {a2!r} to the checklist on {card['title']!r}."
         if verb in ("add_list", "new_list"):
             return f"Added a {board_store.add_list(conn, a1)['name']!r} list."
         if verb in ("add_board", "new_board", "create_board"):

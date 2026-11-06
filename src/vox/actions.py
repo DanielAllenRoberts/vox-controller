@@ -528,12 +528,21 @@ def board_block(max_cards: int = 40) -> str:
             if shown >= max_cards:
                 lines.append("    …more not shown")
                 break
-            lines.append(f"    #{c['id']} {c['title']}")
+            extra = ""
+            if c.get("due"):
+                extra += f" (due {c['due'].replace('T', ' ')})"
+            if c.get("tags"):
+                extra += f" [{', '.join(c['tags'])}]"
+            if c.get("checklist"):
+                done = sum(1 for i in c["checklist"] if i.get("done"))
+                extra += f" checklist {done}/{len(c['checklist'])}"
+            lines.append(f"    #{c['id']} {c['title']}{extra}")
             shown += 1
     other = [n for n in names if n != (snap or {}).get("name")]
     extra = f" Other boards: {', '.join(other)}." if other else ""
-    return (f"[Workspace board \"{(snap or {}).get('name', 'Workspace')}\" — the user's task board."
-            f"{extra} Use BOARD: to change it]\n" + "\n".join(lines))
+    import datetime as _dt
+    return (f"[Workspace board \"{(snap or {}).get('name', 'Workspace')}\" — the user's task board. "
+            f"Today is {_dt.date.today():%A %Y-%m-%d}.{extra} Use BOARD: to change it]\n" + "\n".join(lines))
 
 
 def recent_actions_block(limit: int = 6) -> str:

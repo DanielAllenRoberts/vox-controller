@@ -89,10 +89,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   per-app commands. Keeps the main prompt lean. Saved by voice ("from now on in Zen, when I say
   refresh press command R") or on the Rules page.
 
-- ☐ **A proper Trello-style board:** add/remove/move several cards in one go (add already works),
-  tags/labels, deadlines (due dates) that Vox can check ("what's due this week?") and that create linked
-  reminders automatically, plus the usual Trello features (checklists, archive, search, card
-  descriptions, colour labels). Exposed by voice, in the app, and to agents over MCP.
+- ☑ **A proper Trello-style board** (2026-11-06): ⌘-click multi-select with a Move/Archive/Delete bar
+  and `POST /api/board/bulk`; paste a list to add one card per line; coloured tags; due dates that set a
+  linked reminder (moved/cleared with the card) and show overdue/soon; checklists; archive + restore;
+  search; "1 overdue · 3 due this week". Voice and MCP verbs: due, tag, archive, checklist; Vox sees
+  deadlines/tags in its board view and today's date, so "what's due this week?" works. Not yet: card
+  colours/covers, comments, drag-select.
 
 ## Round 1e
 - ☑ **Hold-to-talk cut off after ~15 s** (with a click), splitting the sentence. The key now decides; 5-min safety net only.

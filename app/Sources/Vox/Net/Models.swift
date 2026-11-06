@@ -199,7 +199,16 @@ struct BoardCard: Codable, Identifiable, Hashable {
     var body: String
     var tags: [String]
     var position: Int
+    /// "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM", local time.
+    var due: String? = nil
+    var checklist: [ChecklistItem]? = nil
+    var archived: Bool? = nil
+
+    var items: [ChecklistItem] { checklist ?? [] }
+    var isArchived: Bool { archived ?? false }
 }
+
+struct ChecklistItem: Codable, Hashable { var text: String; var done: Bool }
 
 struct BoardList: Codable, Identifiable, Hashable { var id: Int; var name: String; var position: Int; var cards: [BoardCard] }
 
@@ -239,6 +248,21 @@ enum ISO8601 {
 struct BudgetStatus: Codable { var budgetUsd: Double; var spentUsd: Double; var remainingUsd: Double; var percent: Double; var state: String }
 
 struct BoardMoveBody: Encodable { var toList: Int; var position: Int }
+/// `due` is "" to clear the deadline.
+struct CardPatchBody: Encodable { var title: String; var body: String; var tags: String; var due: String; var checklist: [ChecklistItem] }
+struct BoardOp: Encodable {
+    var op: String
+    var card: Int? = nil
+    var toList: Int? = nil
+    var list: String? = nil
+    var title: String? = nil
+    var archived: Bool? = nil
+}
+struct BoardBulkBody: Encodable { var ops: [BoardOp] }
+struct BoardBulkResult: Decodable {
+    struct Result: Decodable { var ok: Bool; var error: String? }
+    var results: [Result]
+}
 struct MemoryAddBody: Encodable { var text: String; var tier: String }
 struct ReminderAddBody: Encodable { var kind: String; var text: String; var fireAt: String; var recurrence: String? }
 

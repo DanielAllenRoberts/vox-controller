@@ -971,12 +971,12 @@ def create_app() -> FastAPI:
 
     # --- Workspace board (Trello-like kanban + agent knowledge base; guarded; board_store, idea #51) ---
     @app.get("/api/board")
-    def get_board() -> dict:
+    def get_board(archived: bool = False) -> dict:
         mod = _try_import("board")
         if mod is None:
             return {"id": None, "name": None, "lists": []}
         try:
-            return mod.snapshot()
+            return mod.snapshot(archived=archived)
         except Exception:  # never 500 a read — degrade to an empty board
             return {"id": None, "name": None, "lists": []}
 
@@ -1005,7 +1005,10 @@ def create_app() -> FastAPI:
         if not isinstance(list_name, str) or not list_name.strip():
             return _bad_request("'list' (column name) is required")
         try:
-            return mod.create_card(list_name, title, body.get("body") or "", body.get("tags") or "")
+            card = mod.create_card(list_name, title, body.get("body") or "", body.get("tags") or "")
+            if body.get("due"):
+                card = mod.update_card(card["id"], due=body["due"])
+            return card
         except ValueError as exc:
             return _bad_request(str(exc))
         except Exception as exc:
@@ -1021,11 +1024,15 @@ def create_app() -> FastAPI:
             return err
         # Only forward provided fields; at least one must be present.
         patch: dict = {}
-        for key in ("title", "body", "tags"):
+        for key in ("title", "body", "tags", "due", "checklist", "archived"):
             if key in body:
                 patch[key] = body.get(key)
+        if "due" in patch and patch["due"] is None:
+            patch["due"] = ""  # null clears the deadline
         if not patch:
-            return _bad_request("provide at least one of 'title', 'body', or 'tags'")
+            return _bad_request("provide at least one of 'title', 'body', 'tags', 'due', 'checklist' or 'archived'")
+        if "checklist" in patch and not isinstance(patch["checklist"], list):
+            return _bad_request("'checklist' must be a list")
         if "title" in patch and (not isinstance(patch["title"], str) or not patch["title"].strip()):
             return _bad_request("'title' must be a non-empty string")
         try:
@@ -1072,6 +1079,30 @@ def create_app() -> FastAPI:
         if not removed:
             return _not_found("card")
         return {"ok": True}
+
+    @app.post("/api/board/bulk")
+    async def bulk_board(request: Request):
+        """{"ops": [{"op": "add"|"move"|"delete"|"archive"|"update", …}]} → per-op results."""
+        mod = _try_import("board")
+        if mod is None:
+            return _service_unavailable("board")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        ops = body.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return _bad_request("'ops' must be a non-empty list")
+        return {"results": mod.bulk(ops[:200])}
+
+    @app.get("/api/board/due")
+    def board_due(days: int = 7) -> list:
+        mod = _try_import("board")
+        if mod is None:
+            return []
+        try:
+            return mod.due(max(0, min(days, 366)))
+        except Exception:
+            return []
 
     @app.post("/api/board/lists")
     async def create_board_list(request: Request):

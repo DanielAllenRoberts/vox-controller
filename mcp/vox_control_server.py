@@ -482,7 +482,9 @@ def board() -> str:
 def board_change(verb: str, arg1: str = "", arg2: str = "") -> str:
     """Change the workspace board. ``verb`` and its arguments:
     add_card <list> <title> · move_card <card> <list> · update_card <card> <new title> ·
-    note <card> <text to append> · delete_card <card> · add_list <name> · add_board <name>.
+    note <card> <text to append> · delete_card <card> · add_list <name> · add_board <name> ·
+    due <card> <date: "friday", "tomorrow", "2026-11-20 15:00", or "none"> (also sets a reminder) ·
+    tag <card> <tag, tag> · archive <card> · checklist <card> <item to add>.
     Refer to a card by its title (matched fuzzily) or by its #id from board()."""
     if not (verb or "").strip():
         return "(board_change needs a verb)"

@@ -125,6 +125,12 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Every switch (Commands, Rules, Vocabulary, Settings, menu bar) is green when on, even while another app is in front.", "code"),
     ("personality-steady", "Vox.app", "Personality page doesn't jump",
      "Click through several characters: the card at the top stays the same size and the grid doesn't move. 'Show More' opens the full description in a popover.", "code"),
+    ("board-deadlines", "Organise", "Card deadlines with reminders",
+     "Open a card → Due date → pick a day (and a time). The card shows it (orange when close, red when late) and Vox reminds you at 9:00 that day, or at the time. Clearing the date or archiving removes the reminder. By voice: 'the invoice card is due friday'.", "code"),
+    ("board-multi", "Organise", "Select several cards",
+     "⌘-click cards on the Board, then Move To / Archive / Delete from the bar at the bottom. Esc or Done clears it. Paste several lines into Add Card to add one card per line.", "code"),
+    ("board-extras", "Organise", "Tags, checklists, archive, search",
+     "Tags get colours; a checklist shows 2/3 on the card; Archive hides a card (toolbar archive button shows them, Restore brings one back); search filters every list. By voice: 'tag the invoice card work', 'add draft it to the invoice checklist', 'archive the invoice card', 'what's due this week?'.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),

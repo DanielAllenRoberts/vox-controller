@@ -20,11 +20,11 @@ def _conn():
 
 # --- read ----------------------------------------------------------------------------------------
 
-def snapshot(board=None) -> dict:
+def snapshot(board=None, archived: bool = False) -> dict:
     """The whole board as nested lists→cards (camelCase) for the dashboard + agent read."""
     conn = _conn()
     try:
-        return board_store.board_snapshot(conn, board)
+        return board_store.board_snapshot(conn, board, archived)
     finally:
         conn.close()
 
@@ -49,10 +49,12 @@ def create_card(list_name: str, title: str, body: str = "", tags="", board=None)
         conn.close()
 
 
-def update_card(card_id, *, title=None, body=None, tags=None) -> dict | None:
+def update_card(card_id, *, title=None, body=None, tags=None, due=None, checklist=None,
+                archived=None) -> dict | None:
     conn = _conn()
     try:
-        return board_store.update_card(conn, int(card_id), title=title, body=body, tags=tags)
+        return board_store.update_card(conn, int(card_id), title=title, body=body, tags=tags, due=due,
+                                       checklist=checklist, archived=archived)
     finally:
         conn.close()
 
@@ -78,5 +80,21 @@ def create_list(name: str, board=None) -> dict:
     conn = _conn()
     try:
         return board_store.add_list(conn, name, board)
+    finally:
+        conn.close()
+
+
+def bulk(ops: list) -> list:
+    conn = _conn()
+    try:
+        return board_store.bulk(conn, ops)
+    finally:
+        conn.close()
+
+
+def due(days: int = 7) -> list:
+    conn = _conn()
+    try:
+        return board_store.due_cards(conn, days)
     finally:
         conn.close()

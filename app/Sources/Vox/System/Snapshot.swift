@@ -49,6 +49,12 @@ enum Snapshotter {
             for step in OnboardingView.Step.allCases {
                 shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step, aboutYou: .sample).environment(model)) }, CGSize(width: 640, height: 620)))
             }
+            shots.append(("board-card-editor", {
+                AnyView(CardEditor(card: BoardCard(id: 1, listId: 1, title: "Send the Acme invoice", body: "Net 30, attach the timesheet.",
+                                                   tags: ["work", "money"], position: 0, due: "2026-11-13",
+                                                   checklist: [ChecklistItem(text: "Draft it", done: true), ChecklistItem(text: "Send it", done: false)]),
+                                   onSave: { _ in }, onArchive: {}, onDelete: {}).environment(model))
+            }, CGSize(width: 480, height: 640)))
             shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 330)))
 
             for (name, view, size) in shots where only.map({ name.contains($0) }) ?? true {
