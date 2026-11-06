@@ -55,6 +55,13 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   or others. Open an agent's chat from the app. Its own section in Settings. Reuse what exists
   (Claude Agent SDK, Hermes/OpenClaw patterns, Paperclip's delegation) rather than reinvent.
   Research Paperclip first (the user has it starred).
+- ◐ **"show clickable" in the Claude app on an artifact table:** many badges read the same number
+  (23), and "click 23" hit New chat instead. Hypothesis: elements inside the artifact's embedded web
+  frame report coordinates relative to that frame, not the screen, so badges pile up near the
+  window's top-left and clicks land there. Waiting for the user to say "ready" with the artifact
+  open, then inspect the Claude app's AX frames read-only (pinned pid, no focus change).
+- ☐ **Composio** isn't integrated in Vox yet (only planned in ideas #70 step 3: Vox's own Composio
+  account as the agent's app layer). Belongs to the agent-system work; add to the test list once built.
 - ☐ **ChatGPT / OpenAI as a brain option** alongside Claude and DeepSeek.
 - ☐ **Expand the task board** (more than lists + cards; scope to discuss).
 
