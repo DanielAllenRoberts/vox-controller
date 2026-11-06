@@ -147,6 +147,22 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ⏳ **Vox lowers the volume when it talks** (620b806d): not Vox (no software volume on that output); likely
   AirPods' Conversation Awareness. Waiting to hear which headphones.
 
+## Round 1g (Testing-page verdicts, 2026-11-06)
+- ☑ **Menu bar panel glitched and kept moving.** Its height changed with every reply and the menu bar
+  icon swapped symbols (different widths) whenever Vox talked or typed, re-anchoring the panel. Fixed size
+  (reserved lines) and a steady icon (only paused/off/problem change it).
+- ☑ **"Pause" by voice did nothing with YouTube playing.** Bare "pause"/"play"/"press pause"/"pause the
+  video" weren't parsed (went to the LLM, which said it can't), and an unnamed pause went to Spotify if it
+  was merely open. Now parsed, and routed to Spotify/Music only when they're actually playing, else the
+  system media key (which reaches YouTube).
+- ☑ **"Open Slack and send a message to Byron saying Testing" → "Did you mean Speak replies?"** The router
+  made it a single CLICK in the app in front (Vox); vision found nothing and offered an unrelated label.
+  Chained cross-app requests now go to AGENT; a vision miss says "I couldn't find X. Did you mean Y?"
+  (a "yes" still clicks Y).
+- 💬 **Setup's "about you" could do more** (user note): use the answers to set Vox up, not only to store
+  memories. Proposal for the user: suggest app-scoped notes/commands for the apps they named, pick the
+  brain/voice style from how they work, and greet by name.
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).

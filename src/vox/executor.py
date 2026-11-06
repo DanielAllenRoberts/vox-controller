@@ -95,7 +95,9 @@ _SYSTEM = (
     "drawing, a map, an unlabelled icon): output  AGENT: <the task in one sentence>. This hands over "
     "to a slower tier that can see the screen, act, look again, and repeat. Use it ONLY when one "
     "command genuinely can't do the job — e.g. 'find the total on this invoice and put it in the "
-    "spreadsheet', 'scrub the video to the halfway point', 'fill in this form'. A single click, a "
+    "spreadsheet', 'scrub the video to the halfway point', 'fill in this form', and requests that chain "
+    "steps across apps like 'open Slack and send Sam a message saying testing' (open, find the person, "
+    "type, send: never just CLICK the person's name in whatever app is in front). A single click, a "
     "single app switch, or anything with a visible label is NOT this — use CLICK: or a command, which "
     "are far faster.\n"
     "To set a TIMER, ALARM, or REMINDER: output  SCHEDULE: <kind> | <when> | <text> | <repeat>\n"
@@ -248,7 +250,7 @@ def _confirmed_click_target(text: str, history) -> str | None:
         return None
     for role, content in reversed(history):
         if role == "assistant":
-            m = _DID_YOU_MEAN.match((content or "").strip())
+            m = _DID_YOU_MEAN.search((content or "").strip())  # may follow "I couldn't find X."
             return m.group(1).strip() if m else None
     return None
 
@@ -454,7 +456,9 @@ def _click_by_vision(target: str, items) -> str | None:
             # When the request was a plain label, a pick whose label plainly isn't it is a misread,
             # so ask instead. A 'yes' next turn clicks it via _confirmed_click_target.
             assistant._dbg("[executor]", f"click-by-vision: picked {picked!r} for {target!r}, labels disagree → confirm")
-            return f"Did you mean {picked}?"
+            # Say it wasn't found first: "Did you mean Speak replies?" alone, for "Bryon", sounded like
+            # nonsense (seen live). The question stays last so a 'yes' still clicks it.
+            return f"I couldn't find {target}. Did you mean {picked}?"
         from vox import targets
         res = targets.click_index(n - 1)  # badge N ↔ items[N-1], same as the overlay
         if res and res[0] == "clicked":

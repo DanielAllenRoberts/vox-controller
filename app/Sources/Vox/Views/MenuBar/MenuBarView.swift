@@ -8,22 +8,27 @@ struct MenuBarView: View {
 
     var body: some View {
         let p = VoxPresence.from(engine: model.engine.state, status: model.engine.status)
+        let last = model.turns.last(where: { !$0.isUser })
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 StatusOrb(presence: p, size: 10)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.title).font(.headline)
-                    Text(p.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Text(p.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2, reservesSpace: true)
                 }
                 Spacer(minLength: 0)
             }
 
             if model.engine.isRunning {
                 AskField(compact: true)
-                if let last = model.turns.last(where: { !$0.isUser }) {
+                // Always the same size (4 lines reserved): a panel that grows and shrinks with each reply
+                // re-anchors under the menu bar and jumps about while you're looking at it.
+                Group {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Vox said").font(.caption).foregroundStyle(.secondary)
-                        Text(last.text).font(.callout).lineLimit(4).textSelection(.enabled)
+                        Text(last?.text ?? "Nothing yet.").font(.callout)
+                            .foregroundStyle(last == nil ? .secondary : .primary)
+                            .lineLimit(4, reservesSpace: true).textSelection(.enabled)
                     }
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -62,6 +67,8 @@ struct MenuBarView: View {
 }
 
 /// The menu bar icon follows Vox's state: a waveform while it's listening, slashed when paused.
+/// It deliberately does NOT change while Vox talks or types: those happen many times a minute, each
+/// symbol has its own width, and every change moved the icon and the open panel anchored to it.
 struct MenuBarIcon: View {
     @Environment(AppModel.self) private var model
 
@@ -71,8 +78,6 @@ struct MenuBarIcon: View {
         case .paused: "mic.slash"
         case .off: "waveform.slash"
         case .problem: "exclamationmark.triangle"
-        case .typing: "keyboard"
-        case .talking: "waveform.badge.mic"
         default: "waveform"
         }
         Image(systemName: name)

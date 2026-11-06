@@ -198,6 +198,14 @@ def _parse(text: str) -> tuple[str, str] | None:
             action = "play"
         app = on or (noun if noun in ("spotify", "apple music") else "")
         return ("media", f"{action}:{app}")
+    # Bare "pause" / "play" / "press pause" / "pause the video": whatever is playing, YouTube included
+    # (seen live: "pause" with YouTube playing got "I can't pause"). Not "stop": that one means abort.
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*(?:press\s+|hit\s+)?"
+                     r"(pause|play|resume|unpause|play pause)"
+                     r"(?:\s+(?:it|that|this|the video|video|youtube|the youtube video|playback|media))?(?:\s+please)?", t)
+    if m:
+        verb = m.group(1)
+        return ("media", f"{'pause' if verb == 'pause' else 'playpause' if verb == 'play pause' else 'play'}:")
     if re.fullmatch(r"(?:skip|next)(?:\s+(?:this|the))?\s*(?:song|track)?|go to the next (?:song|track)", t) and \
             re.search(r"song|track|skip", t):
         return ("media", "next:")
@@ -1817,12 +1825,17 @@ def media(arg: str) -> str:
     system media key, the same as the keyboard's ⏯ ⏭ ⏮ keys."""
     action, _, app = (arg or "playpause:").partition(":")
     player = _PLAYERS.get(app.strip())
-    if player is None:  # not named: whichever of Spotify / Music is running
+    if player is None and action in ("pause", "next", "previous"):
+        # Not named: Spotify / Music only if it's actually PLAYING. Otherwise the system media key,
+        # which macOS sends to whatever is playing (a YouTube tab included). Before, an idle Spotify
+        # that was merely open got the "pause" while YouTube kept playing.
         for name in ("Spotify", "Music"):
-            ok, out = _osa(f'tell application "System Events" to return (exists process "{name}")')
+            ok, out = _osa(f'tell application "System Events" to (exists process "{name}")')
             if ok and out.strip() == "true":
-                player = name
-                break
+                ok, state = _osa(f'tell application "{name}" to player state as string')
+                if ok and state.strip() == "playing":
+                    player = name
+                    break
     verbs = {"pause": "pause", "play": "play", "playpause": "playpause",
              "next": "next track", "previous": "previous track"}
     if player is not None:
