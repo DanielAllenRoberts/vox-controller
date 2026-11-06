@@ -376,6 +376,29 @@ def create_app() -> FastAPI:
         print(f"🔔 agent alert: {text}")
         return Response(status_code=204)
 
+    # --- Onboarding: voice previews + get to know you (vox/onboarding.py) ---
+    @app.post("/api/voices/preview")
+    async def post_voice_preview(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import onboarding
+        onboarding.preview(str(body.get("engine", "kokoro")), str(body.get("voice", "")))
+        return {"ok": True}
+
+    @app.get("/api/onboarding/questions")
+    async def get_onboarding_questions() -> dict:
+        from .. import onboarding
+        return await asyncio.to_thread(onboarding.questions)
+
+    @app.post("/api/onboarding/answers")
+    async def post_onboarding_answers(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import onboarding
+        return {"ok": True, "saved": onboarding.save_answers(body.get("answers") or [])}
+
     # --- Issues logged by voice (vox/issues.py) ---
     @app.get("/api/issues")
     def get_issues() -> list:

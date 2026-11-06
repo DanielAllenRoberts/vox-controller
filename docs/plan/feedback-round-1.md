@@ -35,8 +35,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☐ **Prompts in the database + a Prompts editor:** every prompt Vox sends, viewable and editable by
   the user (and by me on request), never by Vox itself. Show what was actually sent per prompt type.
 - ☐ **Web search for the brain:** answer questions and find app tutorials from the web (Clicky's power).
-- ☐ **Onboarding: choose a voice** (list, preview button speaking preset text, no AI call).
-- ☐ **Onboarding: get to know you:** look at installed apps, infer interests, ask a few personalised
+- ☑ **Onboarding: choose a voice** (list, preview button speaking preset text, no AI call).
+- ☑ **Onboarding: get to know you:** look at installed apps, infer interests, ask a few personalised
   questions, save the answers to memory.
 
 ## Round 1b (later notes, same session)
@@ -75,8 +75,17 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   brain did). Fixed and verified with a real call.
 - ☑ **"Hey vox what time is it" lost the question.** Words after the wake phrase now become the first
   thing assistant mode answers.
-- ◐ **Setup didn't show the new steps after a reset**: the voice picker and get-to-know-you steps hadn't
-  been built yet. Building next.
+- ☑ **Setup: voice picker + get to know you** built (voice previews speak a preset line; questions come from
+  the installed apps' names via the small brain, answers saved as long-term memories).
+
+## Round 1d
+- ☐ **Media in the background:** "pause Spotify", "next song", "pause the music" control Spotify / Music
+  without bringing them forward (AppleScript), with the system media key for anything else. Direct
+  command, no brain.
+- ☐ **App-scoped notes (the user's idea):** rules/preferences tied to an app, added to the prompt only when
+  that app is in front ("in Zen, 'refresh' means press ⌘R"), the same way the command DB loads
+  per-app commands. Keeps the main prompt lean. Saved by voice ("from now on in Zen, when I say
+  refresh press command R") or on the Rules page.
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.

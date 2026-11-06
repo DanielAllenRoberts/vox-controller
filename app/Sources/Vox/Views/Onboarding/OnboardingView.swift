@@ -6,7 +6,7 @@ import SwiftUI
 /// permissions, so by the time they reach the Engine step it's usually done. Screen Recording isn't
 /// asked for here; it's optional and Settings → Permissions offers it when wanted.
 struct OnboardingView: View {
-    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, brain, tryIt, done }
+    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, brain, voice, aboutYou, tryIt, done }
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismissWindow) private var dismissWindow
@@ -15,6 +15,7 @@ struct OnboardingView: View {
     @State private var perms = Permissions()
     @State private var installer = Installer()
     @State private var brain = BrainSetup()
+    @State private var aboutYou = AboutYouSetup()
     @State private var tryItSince = Date()
 
     var body: some View {
@@ -28,6 +29,8 @@ struct OnboardingView: View {
                 case .accessibility: PermissionStep(kind: .accessibility, perms: perms)
                 case .engine: EngineStep(installer: installer)
                 case .brain: BrainStep(setup: brain)
+                case .voice: VoiceStep()
+                case .aboutYou: AboutYouStep(setup: aboutYou)
                 case .tryIt: TryItStep(perms: perms)
                 case .done: DoneStep(perms: perms)
                 }
@@ -94,6 +97,7 @@ struct OnboardingView: View {
         case .accessibility where perms.status(.accessibility) != .granted: "Skip for Now"
         case .engine where !model.engine.isRunning: "Skip for Now"
         case .brain where !brain.passed: "Set Up Later"
+        case .aboutYou: "Skip"
         default: nil
         }
     }
@@ -115,6 +119,8 @@ struct OnboardingView: View {
             go(1)   // the brain step waits for the engine itself
         case .brain:
             Task { if await brain.run(model) { go(1) } }
+        case .aboutYou:
+            Task { await aboutYou.save(model); go(1) }
         case .done:
             model.onboardingDone = true
             openWindow(id: "main")
@@ -560,6 +566,150 @@ enum ClaudeCLI {
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             return json?["loggedIn"] as? Bool
         }.value
+    }
+}
+
+// MARK: Voice
+
+private struct VoiceStep: View {
+    @Environment(AppModel.self) private var model
+    @State private var previewing: String?
+
+    private var voices: [SettingOption] { model.setting("kokoro_voice")?.options ?? [] }
+    private var current: String { model.value("kokoro_voice").string }
+
+    var body: some View {
+        StepLayout(symbol: "speaker.wave.2.fill", title: "Pick a voice",
+                   message: "This is how Vox answers you. Press play to hear each one.", compact: true) {
+            if voices.isEmpty {
+                Text("Voices appear once the engine is running.").foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(voices, id: \.value) { v in row(v) }
+                    }
+                    .padding(2)
+                }
+                .frame(maxHeight: 280)
+            }
+        }
+    }
+
+    private func row(_ v: SettingOption) -> some View {
+        let selected = v.value == current
+        return HStack(spacing: 12) {
+            Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Self.name(v)).font(.body.weight(selected ? .semibold : .regular))
+                Text(Self.detail(v)).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                previewing = v.value
+                Task {
+                    try? await model.api.post("voices/preview", ["engine": .string("kokoro"), "voice": .string(v.value)])
+                    try? await Task.sleep(for: .seconds(4))
+                    if previewing == v.value { previewing = nil }
+                }
+            } label: {
+                Image(systemName: previewing == v.value ? "speaker.wave.2.fill" : "play.circle")
+                    .font(.title3)
+            }
+            .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+            .accessibilityLabel("Play \(Self.name(v))")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .background(selected ? Color.accentColor.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(selected ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.15)))
+        .onTapGesture {
+            model.set("kokoro_voice", .string(v.value))
+            model.set("tts_engine", .string("kokoro"))
+        }
+    }
+
+    /// "af_bella — US ♀" → "Bella"
+    static func name(_ v: SettingOption) -> String {
+        let raw = v.value.split(separator: "_").last.map(String.init) ?? v.value
+        return raw.prefix(1).uppercased() + raw.dropFirst()
+    }
+
+    static func detail(_ v: SettingOption) -> String {
+        let accent = v.value.hasPrefix("b") ? "British" : "American"
+        let who = v.value.dropFirst().hasPrefix("f") ? "female" : "male"
+        var flavour = ""
+        if let open = v.label.range(of: "(") {
+            flavour = String(v.label[open.lowerBound...]).trimmingCharacters(in: CharacterSet(charactersIn: "()"))
+            if flavour == "default" || flavour.hasPrefix("warm, default") { flavour = "warm" }
+        }
+        return [accent + " " + who, flavour].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+// MARK: About you
+
+@MainActor
+@Observable
+final class AboutYouSetup {
+    var observation = ""
+    var questions: [String] = []
+    var answers: [String: String] = [:]
+    var loading = false
+    var loaded = false
+
+    func load(_ model: AppModel) async {
+        guard !loaded, !loading else { return }
+        loading = true
+        struct R: Decodable { var observation: String; var questions: [String] }
+        if let r: R = try? await model.api.get("onboarding/questions") {
+            observation = r.observation
+            questions = r.questions
+        } else {
+            questions = ["What should I call you?", "What do you mostly use your Mac for?"]
+        }
+        loading = false
+        loaded = true
+    }
+
+    func save(_ model: AppModel) async {
+        struct Body: Encodable { var answers: [[String: String]] }
+        let body = Body(answers: questions.compactMap { q in
+            let a = (answers[q] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return a.isEmpty ? nil : ["question": q, "answer": a]
+        })
+        guard !body.answers.isEmpty else { return }
+        let _: Empty? = try? await model.api.send("onboarding/answers", method: "POST", body: body)
+    }
+}
+
+private struct AboutYouStep: View {
+    @Environment(AppModel.self) private var model
+    var setup: AboutYouSetup
+
+    var body: some View {
+        StepLayout(symbol: "person.text.rectangle", title: "A little about you",
+                   message: setup.observation.isEmpty ? "So Vox can be more helpful from day one. All optional." : setup.observation,
+                   compact: true) {
+            VStack(alignment: .leading, spacing: 10) {
+                if setup.loading {
+                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Looking at your apps…").foregroundStyle(.secondary) }
+                        .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(setup.questions, id: \.self) { q in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(q).font(.callout.weight(.medium))
+                            TextField("", text: Binding(get: { setup.answers[q] ?? "" }, set: { setup.answers[q] = $0 }))
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    Text("Vox looked only at the names of your apps. Answers are saved to Memory, where you can see and edit them.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+                }
+            }
+        }
+        .task { await setup.load(model) }
     }
 }
 

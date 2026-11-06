@@ -27,6 +27,10 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
     # --- Vox.app -------------------------------------------------------------------------------
     ("app-setup", "Vox.app", "First-run setup",
      "Run Setup Again (Settings → Advanced). Every step's blue button should do the next thing and never be greyed out with no explanation.", "code"),
+    ("setup-voice", "Vox.app", "Setup: pick a voice",
+     "Run Setup Again → the 'Pick a voice' step. Press play on a few: each speaks a short line in that voice. Tapping one makes it Vox's voice.", "code"),
+    ("setup-about-you", "Vox.app", "Setup: a little about you",
+     "Run Setup Again → 'A little about you' asks 3 questions based on your installed apps. Answer one, Continue, then check Memory → Long-term: it's saved.", "code"),
     ("app-menubar", "Vox.app", "Menu bar icon and panel",
      "Click the waveform in the menu bar: state, type box, last reply, Listening / Speak replies switches, Open Vox, Settings, Quit.", "code"),
     ("app-type", "Vox.app", "Type to Vox",
