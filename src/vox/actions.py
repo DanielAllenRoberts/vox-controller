@@ -37,6 +37,54 @@ _SITE_ALIASES = {
 
 # Chromium-family browsers share an AppleScript dictionary for tab creation/indexing.
 _CHROMIUM = {"Arc", "Google Chrome", "Brave Browser", "Microsoft Edge", "Chromium"}
+# Firefox-based browsers have no AppleScript tab dictionary, so tabs are driven by keyboard there.
+_FIREFOX_FAMILY = {"Firefox", "Zen", "Floorp", "LibreWolf", "Waterfox"}
+KNOWN_BROWSERS = _CHROMIUM | _FIREFOX_FAMILY | {"Safari", "Vivaldi", "Opera", "Orion", "Dia"}
+
+_browser_cache: tuple[float, str] | None = None
+
+
+def browser() -> str:
+    """The browser browser commands should act on. Used to be hardcoded to Arc, so after switching
+    to Zen, "show tabs" launched Arc. Now: the browser in front if one is; else the `browser`
+    setting; else ("auto", the default) the Mac's default browser. Cached ~2 s because reading the
+    frontmost app costs ~150 ms and one command can ask several times."""
+    global _browser_cache
+    import time as _t
+    now = _t.monotonic()
+    if _browser_cache and now - _browser_cache[0] < 2.0:
+        return _browser_cache[1]
+    front = frontmost_app()
+    if front in KNOWN_BROWSERS:
+        b = front
+    else:
+        pref = str(_setting_value("browser", CONFIG.browser) or "auto")
+        b = pref if pref and pref != "auto" else (_default_browser() or "Safari")
+    _browser_cache = (now, b)
+    return b
+
+
+def _setting_value(key: str, fallback):
+    try:
+        from vox.web import settings_store
+        v = settings_store.get(key)
+        return fallback if v is None else v
+    except Exception:
+        return fallback
+
+
+def _default_browser() -> str | None:
+    """The app macOS opens web links with (System Settings → Desktop & Dock → Default web browser)."""
+    try:
+        from AppKit import NSWorkspace
+        from Foundation import NSBundle, NSURL
+        url = NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(NSURL.URLWithString_("https://example.com"))
+        if url is None:
+            return None
+        info = NSBundle.bundleWithURL_(url).infoDictionary() or {}
+        return str(info.get("CFBundleName") or url.lastPathComponent().replace(".app", ""))
+    except Exception:
+        return None
 
 # Spoken numbers/ordinals -> index.
 _NUMBERS = {
@@ -481,23 +529,23 @@ def environment_context() -> str:
     # Browser tab detail (active tab + the open-tabs list) is only included when the browser is the
     # FOCUSED app — otherwise we were dumping every Arc tab on every turn, off-browser, wasting the
     # brain's context/tokens. When you're actually on the browser it's exactly what helps tab nav.
-    on_browser = bool(app) and app.lower() == CONFIG.browser.lower()
+    on_browser = bool(app) and app.lower() == browser().lower()
     if on_browser:
-        title, url = _active_tab(CONFIG.browser)
+        title, url = _active_tab(browser())
         if title or url:
             parts.append(f"Active tab: {title} — {url}".rstrip(" —"))
     apps = running_apps()
     if apps:
         parts.append("Running apps: " + ", ".join(apps[:40]))
     if on_browser:
-        ok, titles = _tab_titles(CONFIG.browser)
+        ok, titles = _tab_titles(browser())
         if ok and titles:
-            _, urls = _tab_urls(CONFIG.browser)  # parallel to titles; surface the domain for matching
+            _, urls = _tab_urls(browser())  # parallel to titles; surface the domain for matching
             entries = []
             for i, t in enumerate(titles[:25]):
                 dom = _domain(urls[i]) if i < len(urls) else ""
                 entries.append(f"{t[:60]} ({dom})" if dom else t[:60])
-            parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(entries))
+            parts.append(f"Open {browser()} tabs: " + " | ".join(entries))
     parts.append(_now_line())
     return "\n".join(parts)
 
@@ -860,7 +908,7 @@ def _browser_tab_script(browser: str, url: str) -> str | None:
 
 
 def _open_url(url: str) -> None:
-    script = _browser_tab_script(CONFIG.browser, url)
+    script = _browser_tab_script(browser(), url)
     if script and _osa(script)[0]:
         return
     subprocess.run(["open", url], capture_output=True, text=True)
@@ -895,7 +943,7 @@ def _reuse_tab(url: str) -> bool:
     host = urllib.parse.urlparse(url).netloc.replace('"', "")
     if not host:
         return False
-    if CONFIG.browser == "Arc":
+    if browser() == "Arc":
         # Reuse only tabs in the CURRENT space (reliable, never jumps profiles). Arc's
         # `tabs of front window` span ALL profiles, so matching there jumps you to another
         # profile — don't. Favorites/pinned outside the current space won't be reused.
@@ -906,11 +954,11 @@ def _reuse_tab(url: str) -> bool:
             '    end repeat\n    return "none"\nend tell')
         return _osa(script) == (True, "ok")
     # Chrome family: no spaces — reuse any matching tab.
-    ok, urls = _tab_urls(CONFIG.browser)
+    ok, urls = _tab_urls(browser())
     if ok:
         i = next((j for j, u in enumerate(urls) if host in u), None)
         if i is not None:
-            _select_tab(CONFIG.browser, i + 1)
+            _select_tab(browser(), i + 1)
             return True
     return False
 
@@ -928,7 +976,7 @@ def _focus_dashboard(url: str) -> bool:
         return False
     # (1) An existing standalone Little Arc window — raise it in place (no Arc activate → no Space jump).
     se = (
-        f'tell application "System Events" to tell process "{CONFIG.browser}"\n'
+        f'tell application "System Events" to tell process "{browser()}"\n'
         f'    repeat with w in windows\n'
         f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
         '            perform action "AXRaise" of w\n'
@@ -941,7 +989,7 @@ def _focus_dashboard(url: str) -> bool:
         return True
     # (2) A matching tab in the current Space — activate Arc only INSIDE the match (not before it),
     #     so checking-and-finding-nothing doesn't pull focus to Arc.
-    if CONFIG.browser != "Arc":
+    if browser() != "Arc":
         return _reuse_tab(url)
     tab = (
         'tell application "Arc"\n'
@@ -977,7 +1025,7 @@ def close_dashboard() -> str:
         return "No dashboard URL configured."
     # (1) Close a matching TAB (incl. the active tab of the main window) — closes only the tab.
     tab = (
-        f'tell application "{CONFIG.browser}"\n'
+        f'tell application "{browser()}"\n'
         '    repeat with w in windows\n'
         '        repeat with t in tabs of w\n'
         f'            if URL of t contains "{host}" then\n'
@@ -993,7 +1041,7 @@ def close_dashboard() -> str:
     # (2) Standalone Little Arc window: press its close button (shallow chrome search, not the heavy
     #     web AX tree). AXPress needs no focus → non-disruptive.
     se = (
-        f'tell application "System Events" to tell process "{CONFIG.browser}"\n'
+        f'tell application "System Events" to tell process "{browser()}"\n'
         f'    repeat with w in windows\n'
         f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
         '            repeat with g in (UI elements of w)\n'
@@ -1129,11 +1177,20 @@ def _arc_tab(query: str) -> str | None:
 
 
 def _tab(query: str) -> str:
-    b = CONFIG.browser
+    b = browser()
     if b == "Arc":
         msg = _arc_tab(query)
         if msg is not None:
             return msg
+    if b in _FIREFOX_FAMILY:
+        # No AppleScript tab list in Firefox/Zen. Their address bar searches open tabs when the text
+        # starts with "% ": type it and take the first match.
+        q = query.replace("\\", " ").replace('"', " ")
+        ok, out = _osa(f'tell application "{b}" to activate\n'
+                       'tell application "System Events"\n'
+                       '    keystroke "l" using command down\n    delay 0.15\n'
+                       f'    keystroke "% {q}"\n    delay 0.6\n    key code 36\nend tell')
+        return f"Looked for a {query!r} tab." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't switch tab ({out}).")
     ok, titles = _tab_titles(b)
     if not ok:
         return f"Couldn't read tabs (tab switching may not support {b})."
@@ -1148,12 +1205,22 @@ def _tab_arrow(arg: str) -> str:
     # Move between tabs with ⌘⌥up/down — stays within the current profile (unlike the
     # full tab list, which spans all spaces). Arc's sidebar is vertical, hence up/down.
     direction, n = arg.split(":")
-    code = 125 if direction == "down" else 126  # down / up arrow key code
     n = max(1, min(int(n), 30))
-    script = (f'tell application "{CONFIG.browser}" to activate\n'
+    b = browser()
+    if b != "Arc" and n >= 30:
+        # "first/last tab" is encoded as 30 steps for Arc's vertical list; elsewhere ⌃Tab wraps
+        # around, so 30 steps lands anywhere. Jump straight there instead.
+        return _tab_index("first" if direction == "up" else "last")
+    if b == "Arc":
+        code = 125 if direction == "down" else 126  # down / up arrow key code
+        press = f'key code {code} using {{command down, option down}}'
+    else:  # ⌃Tab / ⌃⇧Tab: next / previous tab in Safari, Chrome-family and Firefox-family
+        press = ('key code 48 using {control down}' if direction == "down"
+                 else 'key code 48 using {control down, shift down}')
+    script = (f'tell application "{b}" to activate\n'
               'tell application "System Events"\n'
               f'    repeat {n} times\n'
-              f'        key code {code} using {{command down, option down}}\n'
+              f'        {press}\n'
               '    end repeat\nend tell')
     ok, out = _osa(script)
     if ok:
@@ -1163,7 +1230,7 @@ def _tab_arrow(arg: str) -> str:
 
 def _tab_index(arg: str) -> str:
     expr = {"first": "1", "last": "n"}.get(arg, arg)
-    b = CONFIG.browser
+    b = browser()
     if b == "Arc":
         script = (f'tell application "Arc"\n    activate\n    set n to count of tabs of front window\n'
                   f'    set j to {expr}\n    if j < 1 then set j to 1\n    if j > n then set j to n\n'
@@ -1173,7 +1240,12 @@ def _tab_index(arg: str) -> str:
                   f'    set j to {expr}\n    if j < 1 then set j to 1\n    if j > n then set j to n\n'
                   f'    set active tab index of front window to j\nend tell')
     else:
-        return f"Tab switching isn't wired up for {b} yet."
+        # Safari / Firefox / Zen: ⌘1–⌘8 pick a tab, ⌘9 is always the last one.
+        key = "1" if arg == "first" else "9" if arg == "last" else (arg if arg.isdigit() and 1 <= int(arg) <= 8 else None)
+        if key is None:
+            return f"In {b} I can jump to tabs 1 to 8, or the first or last."
+        script = (f'tell application "{b}" to activate\n'
+                  f'tell application "System Events" to keystroke "{key}" using command down')
     ok, out = _osa(script)
     return f"Tab {arg}." if ok else f"Couldn't switch tab ({out})."
 
@@ -1213,6 +1285,8 @@ def _desktop_move(direction: str) -> str:
 
 def _profile(arg: str) -> str:
     # Arc switches profiles/spaces with Ctrl+<n> when it's focused.
+    if browser() != "Arc":
+        return f"Spaces are an Arc feature; you're using {browser()}."
     ok, out = _osa('tell application "Arc" to activate\n'
                    f'tell application "System Events" to keystroke "{arg}" using control down')
     if ok:
@@ -1223,6 +1297,8 @@ def _profile(arg: str) -> str:
 def _profile_move(direction: str) -> str:
     # Arc switches profiles/spaces with ⌘⌥←/→ when focused.
     code = 124 if direction == "next" else 123  # right / left arrow
+    if browser() != "Arc":
+        return f"Spaces are an Arc feature; you're using {browser()}."
     ok, out = _osa('tell application "Arc" to activate\n'
                    f'tell application "System Events" to key code {code} using {{command down, option down}}')
     if ok:
@@ -1232,7 +1308,7 @@ def _profile_move(direction: str) -> str:
 
 def _back(_: str) -> str:
     # Browser back — ⌘[ . Activate the browser first so the keystroke lands there.
-    ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
+    ok, out = _osa(f'tell application "{browser()}" to activate\n'
                    'tell application "System Events" to keystroke "[" using command down')
     return "Back." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't go back ({out})")
 
@@ -1245,8 +1321,7 @@ def _reload(_: str) -> str:
     Unlike ``_back``/``close_tab`` this does NOT activate the browser first — reload is the one the
     user is most likely to say while the browser is already in front, and stealing focus to the
     browser when it isn't would reload a page they weren't looking at."""
-    front = frontmost_app()
-    target = front if front in _CHROMIUM or front == "Safari" else CONFIG.browser
+    target = browser()
     ok, out = _osa(f'tell application "{target}" to activate\n'
                    'tell application "System Events" to keystroke "r" using command down')
     return "Reloaded." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't reload ({out}).")
@@ -1254,7 +1329,7 @@ def _reload(_: str) -> str:
 
 def close_tab() -> str:
     # Close the current browser tab (⌘W). Activate the browser first so the keystroke lands there.
-    ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
+    ok, out = _osa(f'tell application "{browser()}" to activate\n'
                    'tell application "System Events" to keystroke "w" using command down')
     return "Closed the tab." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't close the tab ({out}).")
 
@@ -1313,11 +1388,18 @@ def _sidebar(direction: str) -> str:
     # by a focused web app (Docs/Notion grab ⌘S as "Save"), and the item name reveals the current
     # state so show/hide are honoured exactly. direction is "show" | "hide" | "toggle". Needs
     # Accessibility permission.
-    if CONFIG.browser != "Arc":
-        return f"Sidebar control is Arc-specific (browser is {CONFIG.browser})."
+    b = browser()
+    if b in _FIREFOX_FAMILY:
+        # Zen: ⌥⌘S shows/hides the tab sidebar (docs.zen-browser.app/user-manual/shortcuts). It's a
+        # toggle; there's no menu item to read the current state from.
+        ok, out = _osa(f'tell application "{b}" to activate\n'
+                       'tell application "System Events" to keystroke "s" using {command down, option down}')
+        return "Toggled the tab sidebar." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't toggle the sidebar ({out}).")
+    if b not in ("Arc", "Safari"):
+        return f"Showing tabs isn't supported in {b} yet."
     script = (
-        'tell application "Arc" to activate\n'
-        'tell application "System Events" to tell process "Arc"\n'
+        f'tell application "{b}" to activate\n'
+        f'tell application "System Events" to tell process "{b}"\n'
         '    set m to menu "View" of menu bar 1\n'
         '    set isHidden to (exists menu item "Show Sidebar" of m)\n'
         f'    if "{direction}" is "show" then\n'

@@ -12,7 +12,7 @@ class Config:
 
     # Preferred browser for opening URLs as a new tab in the existing window
     # (Arc / Google Chrome / Safari / Brave Browser / Microsoft Edge).
-    browser: str = "Arc"
+    browser: str = "auto"  # "auto" = the browser in front, else the Mac's default browser (actions.browser())
 
     # --- Activation phrases ---
     # Placeholder built-in openWakeWord models until custom "Vox" phrases are

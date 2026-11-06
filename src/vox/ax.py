@@ -224,12 +224,23 @@ def _has_press(fns, el):
 
 def _label_of(fns, el, role):
     """A display label for a listable element: title → description → placeholder, else "text box" for
-    an unlabelled input (so an empty Slack/YouTube box still gets a badge). None if nothing usable."""
+    an unlabelled input (so an empty Slack/YouTube box still gets a badge). None if nothing usable.
+    Static text keeps its words in AXValue, not AXTitle: without reading it, a sidebar row whose
+    only label is its text ("Memory" in Vox.app, folders in Finder/Mail/Notes) had no name at all."""
     for attr in ("AXTitle", "AXDescription", "AXPlaceholderValue"):
         nm = _attr(fns, el, attr)
         if isinstance(nm, str) and nm.strip():
             return nm.strip()
+    if role == "AXStaticText":
+        v = _attr(fns, el, "AXValue")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return "text box" if role in _TEXT_INPUT_ROLES else None
+
+
+def _name_of(fns, el):
+    """The name to match a spoken target against (same rule as ``_label_of``, any role)."""
+    return _label_of(fns, el, _attr(fns, el, "AXRole") or "")
 
 
 def _app_root(fns, settle: float | None = None):
@@ -284,15 +295,39 @@ def _has_windows(fns, app) -> bool:
         return True  # unknown → don't trigger a retry on a guess
 
 
+_ROW_ROLES = {"AXRow", "AXCell"}
+
+
 def _pressable(fns, el, chain):
-    """`el` if it supports AXPress, else the nearest ancestor (deepest first) that does, else None.
-    The matching label is often an AXStaticText with no AXPress — the row/group around it has it."""
+    """`el` if it supports AXPress, else the nearest ancestor (deepest first) that does, else the
+    nearest list row, else None. The matching label is often an AXStaticText with no AXPress; the
+    row/group around it has it. Sidebar and list rows (SwiftUI/AppKit outlines: Vox.app's own
+    sidebar, Finder, Mail, Notes, System Settings) have no AXPress at all; they're selected by a
+    click, which the callers perform at the element's frame, with AXSelected as the fallback."""
     if _has_press(fns, el):
         return el
     for anc in reversed(chain):
         if _has_press(fns, anc):
             return anc
+    for anc in reversed(chain):
+        if _attr(fns, anc, "AXRole") in _ROW_ROLES:
+            return anc
     return None
+
+
+def _press(fns, el) -> bool:
+    """AXPress, or select it if it's a list row (rows don't support AXPress)."""
+    try:
+        if fns["AXUIElementPerformAction"](el, "AXPress") == 0:
+            return True
+    except Exception:
+        pass
+    if _attr(fns, el, "AXRole") in _ROW_ROLES:
+        try:
+            return fns["AXUIElementSetAttributeValue"](el, "AXSelected", True) == 0
+        except Exception:
+            return False
+    return False
 
 
 def click(target: str):
@@ -319,9 +354,7 @@ def click(target: str):
         if found["exact"] or depth > _MAX_DEPTH or found["n"] > _BUDGET:
             return
         found["n"] += 1
-        nm = _attr(fns, el, "AXTitle")
-        if not (isinstance(nm, str) and nm.strip()):
-            nm = _attr(fns, el, "AXDescription")
+        nm = _name_of(fns, el)
         if isinstance(nm, str) and nm.strip():
             low = nm.strip().lower()
             if low == tl:
@@ -366,11 +399,7 @@ def click(target: str):
             return ("clicked", label)
         except Exception:
             pass
-    try:
-        err = fns["AXUIElementPerformAction"](press_el, "AXPress")
-    except Exception:
-        return ("press_failed", label)
-    return ("clicked", label) if err == 0 else ("press_failed", label)
+    return ("clicked", label) if _press(fns, press_el) else ("press_failed", label)
 
 
 def targets(limit: int = 60):
@@ -384,12 +413,12 @@ def targets(limit: int = 60):
         return None
     out, seen, n = [], set(), [0]
 
-    def walk(el, depth):
+    def walk(el, depth, in_row=False):
         if len(out) >= limit or depth > _MAX_DEPTH or n[0] > _BUDGET:
             return
         n[0] += 1
         role = _attr(fns, el, "AXRole")
-        if role in _CLICKABLE_ROLES:
+        if role in _CLICKABLE_ROLES and (role != "AXStaticText" or in_row or _has_press(fns, el)):
             nm = _label_of(fns, el, role)
             if nm and len(nm) < 60 and nm not in seen:
                 seen.add(nm)
@@ -397,7 +426,7 @@ def targets(limit: int = 60):
         for k in (_attr(fns, el, "AXChildren") or []):
             if len(out) >= limit:
                 break
-            walk(k, depth + 1)
+            walk(k, depth + 1, in_row or role in _ROW_ROLES)
 
     try:
         walk(root, 0)
@@ -581,11 +610,7 @@ def click_index(i: int):
             pass  # coordinate click failed → fall back to AXPress
     if fns is None:
         return None
-    try:
-        err = fns["AXUIElementPerformAction"](press_el, "AXPress")
-    except Exception:
-        return ("press_failed", label)
-    return ("clicked", label) if err == 0 else ("press_failed", label)
+    return ("clicked", label) if _press(fns, press_el) else ("press_failed", label)
 
 
 # --- CLI: try the numbered-click engine before it's wired to voice/overlay (idea #52) ------------
@@ -655,9 +680,7 @@ def _find_labelled(fns, root, target: str, roles=None):
         found["n"] += 1
         role = _attr(fns, el, "AXRole") or ""
         if roles is None or role in roles:
-            nm = _attr(fns, el, "AXTitle")
-            if not (isinstance(nm, str) and nm.strip()):
-                nm = _attr(fns, el, "AXDescription")
+            nm = _label_of(fns, el, role)
             if isinstance(nm, str) and nm.strip():
                 low = nm.strip().lower()
                 if low == tl:
