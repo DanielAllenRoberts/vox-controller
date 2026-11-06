@@ -223,8 +223,52 @@ struct SwitchRow: View {
         HStack {
             Text(title)
             Spacer(minLength: 12)
-            Toggle(title, isOn: $isOn).labelsHidden().toggleStyle(.switch).controlSize(.small)
+            Toggle(title, isOn: $isOn).labelsHidden().toggleStyle(.vox)
         }
+    }
+}
+
+/// Vox's switch: green when on, always. The system switch takes the accent colour and turns grey
+/// whenever its window isn't the active one, which read as "off" while talking to Vox from another
+/// app. Same size as the system's small switch; VoiceOver and Vox's own clicking still see a switch.
+struct VoxSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View { VoxSwitch(configuration: configuration) }
+}
+
+extension ToggleStyle where Self == VoxSwitchStyle {
+    static var vox: VoxSwitchStyle { VoxSwitchStyle() }
+}
+
+private struct VoxSwitch: View {
+    let configuration: ToggleStyleConfiguration
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        LabeledContent {
+            track
+        } label: {
+            configuration.label
+        }
+    }
+
+    private var track: some View {
+        let on = configuration.isOn
+        return Capsule()
+            .fill(on ? AnyShapeStyle(Color.green) : AnyShapeStyle(.quaternary))
+            .overlay(Capsule().strokeBorder(.black.opacity(on ? 0.06 : 0.1), lineWidth: 0.5))
+            .frame(width: 32, height: 18)
+            .overlay(alignment: on ? .trailing : .leading) {
+                Circle()
+                    .fill(.white)
+                    .shadow(color: .black.opacity(0.25), radius: 0.8, y: 0.5)
+                    .padding(1.5)
+            }
+            .opacity(isEnabled ? 1 : 0.45)
+            .contentShape(Capsule())
+            .onTapGesture { withAnimation(.snappy(duration: 0.18)) { configuration.isOn.toggle() } }
+            .accessibilityRepresentation {
+                Toggle(isOn: configuration.$isOn) { configuration.label }
+            }
     }
 }
 

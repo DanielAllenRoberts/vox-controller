@@ -268,6 +268,7 @@ class Config:
     local_ai_base_url_env: str = "LOCAL_AI1_URL"   # .env var holding the base URL (…/v1)
     local_ai_key_env: str = "LOCAL_AI1"            # .env var holding the API key
     local_ai_model: str = "google/gemma-4-e4b"     # model id the local server exposes
+    blocked_apps: str = ""  # comma-separated apps/sites Vox won't open or switch to
     home_location: str = ""  # for "what's the weather?" with no place; empty = the Mac's timezone city
     fast_wake: bool = True              # idle: whole-utterance Vosk check of the wake phrases before Whisper (~0.6 s faster wake)
     idle_wake_precheck: bool = False    # idle: Vosk keyword check before Whisper (saves CPU; see backends._WAKE_KEYWORDS)

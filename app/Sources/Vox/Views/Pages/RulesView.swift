@@ -171,7 +171,7 @@ private struct RuleRow: View {
             AppScopePicker(app: Binding(get: { rule.app }, set: onApp))
             HoverDeleteButton(visible: hovering, help: "Delete Rule", action: onDelete)
             Toggle("Follow this rule", isOn: Binding(get: { rule.enabled }, set: onToggle))
-                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                .labelsHidden().toggleStyle(.vox)
         }
         .onHover { hovering = $0 }
         .onAppear { text = rule.text }

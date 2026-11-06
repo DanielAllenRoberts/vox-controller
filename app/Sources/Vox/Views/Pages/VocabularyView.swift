@@ -180,7 +180,7 @@ private struct VocabRow: View {
                 .focused($focus, equals: .write)
             HoverDeleteButton(visible: hovering, help: "Delete Correction", action: onDelete)
             Toggle("Use this correction", isOn: Binding(get: { entry.enabled }, set: onToggle))
-                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                .labelsHidden().toggleStyle(.vox)
         }
         .foregroundStyle(entry.enabled ? .primary : .secondary)
         .onSubmit { commit() }

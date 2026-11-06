@@ -971,8 +971,32 @@ def _open_url(url: str) -> None:
     subprocess.run(["open", url], capture_output=True, text=True)
 
 
+def blocked_apps() -> list[str]:
+    try:
+        from vox.web import settings_store
+        raw = settings_store.get("blocked_apps") or ""
+    except Exception:
+        raw = ""
+    return [b.strip() for b in str(raw).split(",") if b.strip()]
+
+
+def _blocked(*names: str) -> str | None:
+    """The blocklist entry that covers any of these names (app or site), else None."""
+    block = {b.lower(): b for b in blocked_apps()}
+    for n in names:
+        n = (n or "").lower().strip()
+        host = urllib.parse.urlparse(n if "://" in n else f"https://{n}").netloc.removeprefix("www.")
+        for key in (n, host, host.split(".")[0] if host else ""):
+            if key and key in block:
+                return block[key]
+    return None
+
+
 def _navigate(target: str, force_new: bool = False) -> str:
     name = resolve_app_name(target)
+    hit = _blocked(target, name, known_url(target) or "")
+    if hit:
+        return f"{hit} is blocked, so I won't open it. You can unblock it on the Commands page."
     if _app_exists(name):
         subprocess.run(["open", "-a", name], capture_output=True, text=True)
         return f"Opening {name}."
@@ -1394,6 +1418,9 @@ def close_tab() -> str:
 def _app_cycle(app: str) -> str:
     # Click the app's Dock icon — cycles its windows even across Spaces (your manual trick).
     name = resolve_app_name(app)
+    hit = _blocked(app, name)
+    if hit:
+        return f"{hit} is blocked, so I won't switch to it."
     if not _app_exists(name):
         return f"No app called {name!r}."
     ok, out = _osa(f'tell application "System Events" to tell process "Dock" '

@@ -13,6 +13,7 @@ struct SettingsView: View {
                     .tag(t)
             }
         }
+        .toggleStyle(.vox)
         .frame(width: 620, height: 600)
         .task { await model.reloadSettings() }
     }

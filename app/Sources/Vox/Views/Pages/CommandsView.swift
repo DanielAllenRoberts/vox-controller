@@ -187,7 +187,10 @@ enum CommandWords {
 private struct CommandList: View {
     var store: CommandsStore
     var search: String
+    @Environment(AppModel.self) private var model
     @State private var editing: EditTarget?
+    /// The app (command group) opened from the grid. `VOX_SNAPSHOT_OPEN` lets `--snapshot` render one.
+    @State private var open: Int? = ProcessInfo.processInfo.environment["VOX_SNAPSHOT_OPEN"].flatMap(Int.init)
 
     private struct EditTarget: Identifiable { var id: Int }
 
@@ -201,37 +204,278 @@ private struct CommandList: View {
             || ctx.displayName.lowercased().contains(query)
     }
 
+    private var blocked: [String] {
+        model.value("blocked_apps").string.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
     var body: some View {
+        Group {
+            if !query.isEmpty {
+                results
+            } else if let id = open, let ctx = store.contexts.first(where: { $0.id == id }) {
+                detail(ctx)
+            } else {
+                AppGrid(contexts: store.contexts.filter { !$0.commands.isEmpty }, blocked: blocked,
+                        onOpen: { open = $0 }, onToggle: { store.setContextEnabled($0, $1) },
+                        onBlock: setBlocked)
+            }
+        }
+        .sheet(item: $editing) { target in PhraseEditor(store: store, commandId: target.id) }
+    }
+
+    /// Searching looks across every app at once.
+    private var results: some View {
         let groups = store.contexts.compactMap { ctx -> (CommandContext, [Command])? in
             let cmds = ctx.commands.filter { matches($0, in: ctx) }
             return cmds.isEmpty ? nil : (ctx, cmds)
         }
-        Group {
+        return Group {
             if groups.isEmpty {
-                if query.isEmpty {
-                    ContentUnavailableView("No commands", systemImage: "command",
-                                           description: Text("Vox's commands will appear here once its command list is set up."))
-                } else {
-                    ContentUnavailableView.search(text: search)
-                }
+                ContentUnavailableView.search(text: search)
             } else {
                 Form {
                     ForEach(groups, id: \.0.id) { ctx, cmds in
                         Section {
                             ContextRow(context: ctx, count: ctx.commands.count) { store.setContextEnabled(ctx.id, $0) }
-                            ForEach(cmds) { cmd in
-                                CommandRow(command: cmd, contextOn: ctx.enabled,
-                                           onToggle: { store.setCommandEnabled(cmd.id, $0) },
-                                           onEdit: { editing = EditTarget(id: cmd.id) },
-                                           onForget: { store.forget(cmd.id) })
-                            }
+                            rows(cmds, in: ctx)
                         }
                     }
                 }
                 .formStyle(.grouped)
             }
         }
-        .sheet(item: $editing) { target in PhraseEditor(store: store, commandId: target.id) }
+    }
+
+    private func detail(_ ctx: CommandContext) -> some View {
+        // "Open GitHub", "Open Gmail"…: one collapsed section instead of a screen of rows.
+        let opens = ctx.commands.filter { $0.intent == "navigate" || $0.intent == "navigate_new" }
+        let others = ctx.commands.filter { !opens.contains($0) }
+        return VStack(alignment: .leading, spacing: 0) {
+            Button { open = nil } label: { Label("All Apps", systemImage: "chevron.left") }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("[", modifiers: .command)
+                .padding(.horizontal, Metrics.page).padding(.top, Metrics.tight + 4)
+            Form {
+                Section {
+                    ContextRow(context: ctx, count: ctx.commands.count) { store.setContextEnabled(ctx.id, $0) }
+                    rows(others, in: ctx)
+                }
+                if !opens.isEmpty {
+                    Section {
+                        DisclosureGroup {
+                            rows(opens, in: ctx)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Open apps and sites")
+                                Text(opens.prefix(4).map { CommandWords.title(label: $0.label, intent: $0.intent, arg: $0.arg)
+                                    .replacingOccurrences(of: "Open ", with: "") }.joined(separator: ", ")
+                                     + (opens.count > 4 ? " and \(opens.count - 4) more" : ""))
+                                    .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                    } footer: {
+                        Text("To stop Vox opening something, block it on the All Apps page.").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+
+    @ViewBuilder
+    private func rows(_ cmds: [Command], in ctx: CommandContext) -> some View {
+        ForEach(cmds) { cmd in
+            CommandRow(command: cmd, contextOn: ctx.enabled,
+                       onToggle: { store.setCommandEnabled(cmd.id, $0) },
+                       onEdit: { editing = EditTarget(id: cmd.id) },
+                       onForget: { store.forget(cmd.id) })
+        }
+    }
+
+    private func setBlocked(_ names: [String]) {
+        Task {
+            do {
+                try await model.api.setSetting("blocked_apps", .string(names.joined(separator: ", ")))
+                await model.reloadSettings()
+            } catch { store.error = ErrorWords.message("Couldn't change the blocked apps.", error) }
+        }
+    }
+}
+
+/// The Commands landing page: one tile per app with commands, then the apps Vox won't open.
+private struct AppGrid: View {
+    var contexts: [CommandContext]
+    var blocked: [String]
+    var onOpen: (Int) -> Void
+    var onToggle: (Int, Bool) -> Void
+    var onBlock: ([String]) -> Void
+
+    @State private var choosingApp = false
+    @State private var typed = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Metrics.gap + 8) {
+                if contexts.isEmpty {
+                    ContentUnavailableView("No commands", systemImage: "command",
+                                           description: Text("Vox's commands will appear here once its command list is set up."))
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: Metrics.gap)], spacing: Metrics.gap) {
+                        ForEach(contexts) { ctx in
+                            AppTile(context: ctx) { onOpen(ctx.id) }
+                                .contextMenu {
+                                    Button("Show Commands") { onOpen(ctx.id) }
+                                    Button(ctx.enabled ? "Turn Off" : "Turn On") { onToggle(ctx.id, !ctx.enabled) }
+                                    if ctx.kind == "app", !blocked.contains(where: { $0.caseInsensitiveCompare(ctx.displayName) == .orderedSame }) {
+                                        Divider()
+                                        Button("Block \(ctx.displayName)") { onBlock(blocked + [ctx.displayName]) }
+                                    }
+                                }
+                        }
+                    }
+                }
+                blockedSection
+            }
+            .padding(Metrics.page)
+            .frame(maxWidth: 900, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .fileImporter(isPresented: $choosingApp, allowedContentTypes: [.application]) { result in
+            if case .success(let url) = result { add(url.deletingPathExtension().lastPathComponent) }
+        }
+    }
+
+    private var blockedSection: some View {
+        VStack(alignment: .leading, spacing: Metrics.tight) {
+            Text("Blocked").font(.title3.weight(.semibold))
+            Text("Vox won't open or switch to these, whether you ask, a saved command does, or the brain decides to.")
+                .font(.callout).foregroundStyle(.secondary)
+            Card {
+                VStack(alignment: .leading, spacing: Metrics.tight + 2) {
+                    if blocked.isEmpty {
+                        Text("Nothing blocked.").foregroundStyle(.secondary)
+                    } else {
+                        FlowRow(blocked) { name in
+                            HStack(spacing: 6) {
+                                if let icon = AppIcons.icon(for: name) {
+                                    Image(nsImage: icon).resizable().frame(width: 18, height: 18)
+                                } else {
+                                    Image(systemName: "nosign").foregroundStyle(.secondary)
+                                }
+                                Text(name)
+                                Button("Unblock \(name)", systemImage: "xmark.circle.fill") {
+                                    onBlock(blocked.filter { $0 != name })
+                                }
+                                .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(.secondary)
+                                .help("Unblock")
+                            }
+                            .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 4)
+                            .background(.quaternary.opacity(0.6), in: Capsule())
+                        }
+                    }
+                    Divider()
+                    HStack(spacing: Metrics.tight) {
+                        TextField("App or site name", text: $typed, prompt: Text("Block an app or site by name"))
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { add(typed) }
+                        Button("Block") { add(typed) }
+                            .disabled(typed.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Button("Choose App…") { choosingApp = true }
+                    }
+                }
+            }
+        }
+    }
+
+    private func add(_ raw: String) {
+        let name = raw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: " ")
+        typed = ""
+        guard !name.isEmpty, !blocked.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else { return }
+        onBlock(blocked + [name])
+    }
+}
+
+private struct AppTile: View {
+    var context: CommandContext
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                ContextIcon(context: context).scaleEffect(40 / ContextIcon.size).frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(context.displayName).font(.headline).lineLimit(1)
+                    Text(context.enabled ? count : "\(count) · off")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.callout.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovering ? AnyShapeStyle(.quaternary.opacity(0.7)) : AnyShapeStyle(.background.secondary),
+                        in: RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous).strokeBorder(.separator.opacity(0.5)))
+            .opacity(context.enabled ? 1 : 0.6)
+            .contentShape(RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel("\(context.displayName), \(count)")
+    }
+
+    private var count: String { context.commands.count == 1 ? "1 command" : "\(context.commands.count) commands" }
+}
+
+/// Wraps its items onto as many lines as they need.
+private struct FlowRow<Item: Hashable, Content: View>: View {
+    var items: [Item]
+    var content: (Item) -> Content
+    init(_ items: [Item], @ViewBuilder content: @escaping (Item) -> Content) { self.items = items; self.content = content }
+
+    var body: some View {
+        FlowLayout(spacing: 8) { ForEach(items, id: \.self) { content($0) } }
+    }
+}
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(subviews, width: proposal.width ?? .infinity)
+        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: rows.last.map { $0.y + $0.height } ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for row in arrange(subviews, width: bounds.width) {
+            var x = bounds.minX
+            for i in row.items {
+                let size = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: bounds.minY + row.y), proposal: .unspecified)
+                x += size.width + spacing
+            }
+        }
+    }
+
+    private struct Row { var items: [Int] = []; var y: CGFloat = 0; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(_ subviews: Subviews, width: CGFloat) -> [Row] {
+        var rows: [Row] = [Row()]
+        for (i, v) in subviews.enumerated() {
+            let size = v.sizeThatFits(.unspecified)
+            if !rows[rows.count - 1].items.isEmpty, rows[rows.count - 1].width + spacing + size.width > width {
+                let prev = rows[rows.count - 1]
+                rows.append(Row(y: prev.y + prev.height + spacing))
+            }
+            var r = rows[rows.count - 1]
+            r.width += (r.items.isEmpty ? 0 : spacing) + size.width
+            r.height = max(r.height, size.height)
+            r.items.append(i)
+            rows[rows.count - 1] = r
+        }
+        return rows
     }
 }
 
@@ -250,7 +494,7 @@ private struct ContextRow: View {
             }
             Spacer(minLength: 12)
             Toggle("Use commands in \(context.displayName)", isOn: Binding(get: { context.enabled }, set: onToggle))
-                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                .labelsHidden().toggleStyle(.vox)
                 .help(context.enabled ? "Turn off every command in this group" : "Turn this group back on")
         }
         .padding(.vertical, 2)
@@ -321,7 +565,7 @@ private struct CommandRow: View {
                 .opacity(hovering ? 1 : 0)
                 .help("See and change what you can say")
             Toggle("Use \(title)", isOn: Binding(get: { command.enabled }, set: onToggle))
-                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                .labelsHidden().toggleStyle(.vox)
                 .disabled(!contextOn)
         }
         .contentShape(Rectangle())

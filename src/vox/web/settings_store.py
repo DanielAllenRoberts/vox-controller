@@ -435,6 +435,14 @@ _SCHEMA_META: list[dict] = [
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
     },
     {
+        "key": "blocked_apps",
+        "label": "Apps Vox won't open",
+        "group": "Behavior",
+        "type": "text",
+        "help": "Comma-separated apps or sites Vox won't open or switch to, whoever asks (you, a saved "
+                "command or the brain). Managed on the Commands page.",
+    },
+    {
         "key": "home_location",
         "label": "Home location",
         "group": "Behavior",

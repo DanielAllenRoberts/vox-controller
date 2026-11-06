@@ -229,38 +229,43 @@ private struct ActivePersonaCard: View {
                         .background(Color.accentColor.opacity(0.12), in: Circle())
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Vox is speaking as").font(.caption).foregroundStyle(.secondary)
-                        Text(persona.name).font(.title2.weight(.semibold))
-                        if !persona.tagline.isEmpty {
-                            Text(persona.tagline).foregroundStyle(.secondary)
-                        }
+                        Text(persona.name).font(.title2.weight(.semibold)).lineLimit(1)
+                        // Always one line, even when empty, so switching characters never moves the page.
+                        Text(persona.tagline.isEmpty ? " " : persona.tagline)
+                            .foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 12)
                     if let onEdit { Button("Edit…", action: onEdit) }
                 }
 
-                if !isDefault {
-                    Divider()
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(persona.persona)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(expanded ? nil : 3)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background { truncationProbe }
-                        if truncated || expanded {
-                            Button(expanded ? "Show Less" : "Show More") { withAnimation(.smooth) { expanded.toggle() } }
-                                .buttonStyle(.link).font(.callout)
+                Divider()
+                // Fixed height: three lines, with the full text in a popover rather than growing the card.
+                HStack(alignment: .lastTextBaseline, spacing: 8) {
+                    Text(isDefault ? "No character: Vox speaks plainly, as itself." : persona.persona)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3, reservesSpace: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background { truncationProbe }
+                    Button("Show More") { expanded = true }
+                        .buttonStyle(.link).font(.callout)
+                        .opacity(truncated ? 1 : 0)
+                        .disabled(!truncated)
+                        .popover(isPresented: $expanded, arrowEdge: .bottom) {
+                            ScrollView {
+                                Text(persona.persona).textSelection(.enabled).padding(16)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(width: 420).frame(maxHeight: 360)
                         }
-                    }
-                    Divider()
-                    HStack {
-                        Label("Voice", systemImage: "waveform").foregroundStyle(.secondary)
-                        Spacer()
-                        VoicePicker(title: "Voice", choices: voices,
-                                    selection: Binding(get: { voices.current(persona) }, set: onVoice))
-                            .labelsHidden()
-                            .fixedSize()
-                    }
+                }
+                Divider()
+                HStack {
+                    Label("Voice", systemImage: "waveform").foregroundStyle(.secondary)
+                    Spacer()
+                    VoicePicker(title: "Voice", choices: voices,
+                                selection: Binding(get: { voices.current(persona) }, set: onVoice))
+                        .labelsHidden()
+                        .fixedSize()
                 }
             }
         }

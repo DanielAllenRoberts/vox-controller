@@ -33,7 +33,7 @@ struct MenuBarView: View {
                     SwitchRow("Listening", isOn: Binding(get: { !model.isPaused }, set: { _ in model.togglePaused() }))
                     SwitchRow("Speak replies", isOn: model.binding(bool: "tts_enabled"))
                 }
-                .toggleStyle(.switch).controlSize(.small)
+                .toggleStyle(.vox)
             } else {
                 switch model.engine.state {
                 case .stopped, .failed: Button("Start Vox") { model.boot() }.buttonStyle(.borderedProminent)

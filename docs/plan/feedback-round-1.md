@@ -12,9 +12,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☐ **~1.5 s between "hey vox" and the ready sound.** Measured: 0.5 s end-of-speech wait + ~0.6 s idle
   Whisper pass. Plan: a whole-utterance Vosk check of the wake phrases first (3 ms), so a confident
   match wakes instantly; Whisper stays the fallback. Measure on the Voice Lab recordings.
-- ☐ **Personality page: picking a character resizes the top card and shoves the grid down.** Needs
-  a layout that doesn't move (fixed-height detail, or side-by-side).
-- ☐ **Command switches show grey when ON.** They should be green.
+- ☑ **Personality page: picking a character resizes the top card and shoves the grid down.** The card
+  is now one fixed shape (one-line tagline, three-line description, voice row always there); "Show More"
+  opens a popover instead of growing it.
+- ☑ **Command switches show grey when ON.** The system switch goes grey whenever its window isn't in
+  front. Vox now draws its own switch, green when on, used everywhere (Settings and menu bar too).
 - ☐ **Memory saved odd long-term facts** (e.g. how to refresh a page). Research how good memory
   systems decide what's long-term vs daily (MemPalace, ideas #28/#55) and tighten what gets promoted.
 - ☐ **"Refresh the page" should be able to press ⌘R.** Vox has `press` (ideas #61); make sure the brain
@@ -29,9 +31,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 ## Features
 - ☐ **Testing tracker in Insights:** every feature with a status (untested / works / broken) and a
   comment box the user can fill in, replacing the to-test.md checklist.
-- ☐ **Commands page reorganised:** start with a grid of apps that have commands (with counts), click
-  in for details. Collapse the long "Open GitHub / Open Gmail…" list. Add **blocking an app** so Vox
-  can't open it, instead of listing every site it can open. Less scrolling.
+- ☑ **Commands page reorganised:** opens on a grid of apps with counts; click in for details; the
+  "Open GitHub / Open Gmail…" commands collapse into one row. **Blocked** list below the grid: Vox won't open
+  or switch to those apps/sites, whoever asks (setting `blocked_apps`, enforced in actions).
 - ☑ **Prompts in the database + a Prompts editor:** every prompt Vox sends, viewable and editable by
   the user (and by me on request), never by Vox itself. Show what was actually sent per prompt type.
 - ☑ **Web search for the brain:** answer questions and find app tutorials from the web (Clicky's power).
