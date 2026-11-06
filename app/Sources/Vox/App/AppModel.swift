@@ -160,6 +160,15 @@ final class AppModel {
         Binding(get: { self.value(key).string }, set: { self.set(key, .string($0)) })
     }
 
+    /// A restart-only setting changed this session (shows "Restart Now" in Settings).
+    private(set) var restartNeeded = false
+    func noteRestartNeeded() { restartNeeded = true }
+
+    func restartEngine() {
+        restartNeeded = false
+        engine.restart()
+    }
+
     // MARK: Listening
 
     /// Set the moment the user flips Listening, so the switch moves immediately instead of snapping

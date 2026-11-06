@@ -37,6 +37,15 @@ private struct CatalogPane<Header: View>: View {
 
     var body: some View {
         Form {
+            if model.restartNeeded {
+                Section {
+                    HStack {
+                        Label("Some changes take effect after Vox restarts.", systemImage: "arrow.clockwise.circle")
+                        Spacer()
+                        Button("Restart Now") { model.restartEngine() }
+                    }
+                }
+            }
             header
             if model.engine.isRunning {
                 ForEach(SettingsCatalog.tabs[tab] ?? [], id: \.title) { section in
@@ -64,6 +73,7 @@ private struct CatalogPane<Header: View>: View {
 
 private struct EngineNotice: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     var body: some View {
         HStack {
             if model.engine.isStarting {
@@ -73,7 +83,7 @@ private struct EngineNotice: View {
             } else if model.engine.state == .notInstalled {
                 Label("Vox isn't set up yet.", systemImage: "wrench.and.screwdriver").foregroundStyle(.secondary)
                 Spacer()
-                Button("Open Setup…") { NotificationCenter.default.post(name: .voxShowOnboarding, object: nil) }
+                Button("Open Setup…") { openWindow(id: "onboarding"); NSApp.activate() }
             } else {
                 Label("Start Vox to change these settings.", systemImage: "power").foregroundStyle(.secondary)
                 Spacer()
@@ -91,6 +101,9 @@ struct SettingRow: View {
     var body: some View {
         if let s = model.setting(spec.key) {
             control(s).help(s.help)
+                .onChange(of: model.value(spec.key)) { old, new in
+                    if old != .null && old != new && SettingsCatalog.needsRestart(s) { model.noteRestartNeeded() }
+                }
         }
     }
 
@@ -100,7 +113,7 @@ struct SettingRow: View {
         case "toggle":
             Toggle(isOn: model.binding(bool: s.key)) { label }
         case "select":
-            Picker(selection: model.binding(string: s.key)) {
+            Picker(selection: selectBinding(s)) {
                 ForEach(options(for: s), id: \.value) { o in Text(o.label).tag(o.value) }
             } label: { label }
         default:
@@ -118,6 +131,31 @@ struct SettingRow: View {
         }
     }
 
+    /// Choosing a provider also switches the model if the current one can't run there (Anthropic
+    /// can't run DeepSeek), instead of leaving a mismatched pair that only fails at the next reply.
+    private func selectBinding(_ s: Setting) -> Binding<String> {
+        guard s.key.hasSuffix("_brain_provider") else { return model.binding(string: s.key) }
+        let brain = String(s.key.dropLast("_provider".count))
+        return Binding(get: { model.value(s.key).string }, set: { provider in
+            model.set(s.key, .string(provider))
+            let modelKey = "\(brain)_model"
+            let current = model.value(modelKey).string
+            if !Self.runs(current, on: provider),
+               let pick = model.setting(modelKey)?.options?.first(where: { Self.runs($0.value, on: provider) }) {
+                model.set(modelKey, .string(pick.value))
+            }
+        })
+    }
+
+    static func runs(_ modelID: String, on provider: String) -> Bool {
+        switch provider {
+        case "claude_sdk", "anthropic", "claude_cli": modelID.hasPrefix("claude")
+        case "openai": !modelID.hasPrefix("claude") && !modelID.contains("/")
+        case "local_ai": modelID.contains("/")
+        default: true
+        }
+    }
+
     /// Model menus only offer models the chosen provider can run (plus the current value, so a
     /// custom model set in config still shows).
     private func options(for s: Setting) -> [SettingOption] {
@@ -125,14 +163,7 @@ struct SettingRow: View {
         let brain = s.key.hasPrefix("small_brain") ? "small_brain" : s.key.hasPrefix("big_brain") ? "big_brain" : nil
         if let brain, s.key.hasSuffix("_model") {
             let provider = model.value("\(brain)_provider").string
-            opts = opts.filter { o in
-                switch provider {
-                case "claude_sdk", "anthropic", "claude_cli": o.value.hasPrefix("claude")
-                case "openai": !o.value.hasPrefix("claude") && !o.value.contains("/")
-                case "local_ai": o.value.contains("/")
-                default: true
-                }
-            }
+            opts = opts.filter { Self.runs($0.value, on: provider) }
             opts = opts.map { SettingOption(value: $0.value, label: BrainNames.model($0.value)) }
         }
         if s.key.hasSuffix("_provider") {
@@ -161,6 +192,9 @@ private struct NumberOrTextField: View {
             .onSubmit(commit)
             .onChange(of: focused) { _, f in if !f { commit() } }
             .onAppear { draft = model.value(key).string }
+            // Follow the real value (changed by voice, or restored after a refused edit) unless the
+            // user is typing in this field. A field seeded once could later write a stale value back.
+            .onChange(of: model.value(key)) { _, v in if !focused { draft = v.string } }
     }
 
     private func commit() {
@@ -286,6 +320,7 @@ struct PermissionRow: View {
 
 private struct AdvancedPane: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Form {
@@ -299,7 +334,7 @@ private struct AdvancedPane: View {
                 }
                 if let v = model.engine.status?.version { LabeledContent("Version", value: v) }
                 HStack {
-                    Button("Restart Engine") { model.engine.restart() }
+                    Button("Restart Engine") { model.restartEngine() }
                     if model.engine.isRunning {
                         Button("Stop Engine") { Task { await model.engine.stop() } }
                     } else if model.engine.isStarting {
@@ -334,7 +369,7 @@ private struct AdvancedPane: View {
             }
             Section("Setup") {
                 HStack {
-                    Button("Run Setup Again…") { NotificationCenter.default.post(name: .voxShowOnboarding, object: nil) }
+                    Button("Run Setup Again…") { openWindow(id: "onboarding"); NSApp.activate() }
                     Spacer()
                 }
             }

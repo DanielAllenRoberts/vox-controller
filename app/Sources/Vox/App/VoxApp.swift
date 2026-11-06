@@ -32,7 +32,7 @@ struct VoxApp: App {
         MenuBarExtra {
             Roots.menuBar(delegate.model)
         } label: {
-            MenuBarIcon().environment(delegate.model)
+            MenuBarIcon().environment(delegate.model).accessibilityLabel("Vox")
         }
         .menuBarExtraStyle(.window)
     }

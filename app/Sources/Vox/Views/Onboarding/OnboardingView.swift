@@ -15,6 +15,7 @@ struct OnboardingView: View {
     @State private var perms = Permissions()
     @State private var installer = Installer()
     @State private var brain = BrainSetup()
+    @State private var tryItSince = Date()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,8 +28,8 @@ struct OnboardingView: View {
                 case .accessibility: PermissionStep(kind: .accessibility, perms: perms)
                 case .engine: EngineStep(installer: installer)
                 case .brain: BrainStep(setup: brain)
-                case .tryIt: TryItStep()
-                case .done: DoneStep()
+                case .tryIt: TryItStep(perms: perms)
+                case .done: DoneStep(perms: perms)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -41,7 +42,10 @@ struct OnboardingView: View {
         }
         .frame(width: 640, height: 620)
         .onAppear { perms.refresh() }
-        .onChange(of: step) { _, s in if s == .engine { startEngine() } }
+        .onChange(of: step) { _, s in
+            if s == .engine { startEngine() }
+            if s == .tryIt { tryItSince = Date() }
+        }
     }
 
     /// Fixed-width buttons, kept out of the step animation: when the label changed ("Get Started" →
@@ -78,6 +82,7 @@ struct OnboardingView: View {
         case .microphone where perms.status(.microphone) != .granted: "Allow Microphone"
         case .accessibility where perms.status(.accessibility) != .granted: "Allow Access…"
         case .brain where brain.isTesting: "Testing…"
+        case .tryIt where !model.turns.contains(where: { $0.isUser && ($0.date ?? .distantPast) > tryItSince }): "Skip"
         case .done: "Open Vox"
         default: "Continue"
         }
@@ -89,7 +94,6 @@ struct OnboardingView: View {
         case .accessibility where perms.status(.accessibility) != .granted: "Skip for Now"
         case .engine where !model.engine.isRunning: "Skip for Now"
         case .brain where !brain.passed: "Set Up Later"
-        case .tryIt: "Skip"
         default: nil
         }
     }
@@ -318,6 +322,12 @@ final class BrainSetup {
     var choice: BrainPreset = .current { didSet { if choice != oldValue { test = .idle } } }
     private(set) var test: TestState = .idle
     private(set) var keys: [String: Bool] = [:]
+    /// Keys typed but not yet saved. Continue (or Return) saves them, so "paste key, press Return"
+    /// just works instead of complaining the key is missing.
+    var drafts: [String: String] = [:]
+    private(set) var keyError: String?
+    /// The preset last written to the engine, so a retry doesn't rewrite settings and restart again.
+    private var applied: BrainPreset = .current
     var claudeLoggedIn: Bool?
 
     var isTesting: Bool { test == .testing }
@@ -330,6 +340,20 @@ final class BrainSetup {
     /// Apply the chosen preset (if any), then prove the brain answers. True when it's working.
     func run(_ model: AppModel) async -> Bool {
         if passed { return true }
+        keyError = nil
+        for name in choice.keysNeeded where !(keys[name] ?? false) {
+            let v = (drafts[name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard v.count >= 8 else { continue }
+            do {
+                try await model.api.post("secrets", ["name": .string(name), "value": .string(v)])
+                drafts[name] = nil
+            } catch {
+                keyError = "Couldn't save your \(KeyField.label(for: name)): \(error.localizedDescription)"
+                test = .failed(keyError!)
+                return false
+            }
+        }
+        await refreshKeys(model)
         if let missing = choice.keysNeeded.first(where: { !(keys[$0] ?? false) }) {
             test = .failed("Paste your \(KeyField.label(for: missing)) above first, or choose another option.")
             return false
@@ -340,9 +364,15 @@ final class BrainSetup {
             test = .failed("The speech engine isn't running yet. Go back a step to see why, or set this up later.")
             return false
         }
-        if let p = choice.settings {
-            for (k, v) in p { try? await model.api.setSetting(k, .string(v)) }
-            model.engine.restart()   // provider changes apply on restart
+        if let p = choice.settings, choice != applied {
+            do {
+                for (k, v) in p { try await model.api.setSetting(k, .string(v)) }
+            } catch {
+                test = .failed("Couldn't switch brains: \(error.localizedDescription)")
+                return false
+            }
+            applied = choice
+            model.restartEngine()   // provider changes apply on restart
             try? await Task.sleep(for: .seconds(1))
             for _ in 0..<120 where !model.engine.isRunning { try? await Task.sleep(for: .milliseconds(500)) }
             await model.reloadSettings()
@@ -373,7 +403,7 @@ private struct BrainStep: View {
                     }
                 }
                 ForEach(setup.choice.keysNeeded, id: \.self) { name in
-                    KeyField(name: name, isSet: setup.keys[name] ?? false) { await setup.refreshKeys(model) }
+                    KeyField(name: name, isSet: setup.keys[name] ?? false, setup: setup)
                 }
                 HStack { testStatus; Spacer() }
                     .frame(minHeight: 22)
@@ -480,12 +510,9 @@ private struct PresetRow: View {
 }
 
 private struct KeyField: View {
-    @Environment(AppModel.self) private var model
     var name: String
     var isSet: Bool
-    var saved: () async -> Void
-    @State private var value = ""
-    @State private var error: String?
+    var setup: BrainSetup
 
     private var label: String { Self.label(for: name) }
 
@@ -503,17 +530,13 @@ private struct KeyField: View {
                 Label("\(label) saved", systemImage: "key.fill").foregroundStyle(.green).font(.callout)
                 Spacer()
             } else {
-                SecureField(label, text: $value).textFieldStyle(.roundedBorder)
-                Button("Save") {
-                    Task {
-                        do { try await model.api.post("secrets", ["name": .string(name), "value": .string(value)]); value = ""; await saved() }
-                        catch { self.error = error.localizedDescription }
-                    }
-                }
-                .disabled(value.count < 8)
+                // Saved when you press Continue (or Return): one action, not two.
+                SecureField("Paste your \(label)", text: Binding(
+                    get: { setup.drafts[name] ?? "" }, set: { setup.drafts[name] = $0 }))
+                    .textFieldStyle(.roundedBorder)
+                    .help("Saved to Vox's private settings file on this Mac, readable only by you.")
             }
         }
-        .help(error ?? "Saved to Vox's private settings file on this Mac, readable only by you.")
     }
 }
 
@@ -544,38 +567,52 @@ enum ClaudeCLI {
 
 private struct TryItStep: View {
     @Environment(AppModel.self) private var model
-    @State private var startCount = 0
-    @State private var heard: String?
+    var perms: Permissions
+    @State private var since = Date()
+
+    /// The first thing said (or typed) since this step appeared, and Vox's answer to it.
+    private var heard: Turn? { model.turns.first { $0.isUser && ($0.date ?? .distantPast) > since } }
+    private var reply: Turn? {
+        guard let h = heard else { return nil }
+        return model.turns.first { !$0.isUser && ($0.date ?? .distantPast) >= (h.date ?? since) }
+    }
+    private var canHear: Bool { perms.status(.microphone) == .granted && model.engine.isRunning }
 
     var body: some View {
-        StepLayout(symbol: heard == nil ? "mic.and.signal.meter" : "checkmark.circle.fill",
+        StepLayout(symbol: heard == nil ? (canHear ? "mic.and.signal.meter" : "keyboard") : "checkmark.circle.fill",
                    tint: heard == nil ? .accentColor : .green,
                    title: heard == nil ? "Say hello" : "Vox heard you",
-                   message: heard == nil ? "Say \u{201C}Hey Vox, what time is it?\u{201D}" : "\u{201C}\(heard!)\u{201D}") {
+                   message: heard.map { "\u{201C}\($0.text)\u{201D}" }
+                       ?? (canHear ? "Say \u{201C}Hey Vox, what time is it?\u{201D}" : "Vox can't hear you yet, but you can type to it.")) {
             VStack(spacing: 10) {
                 if heard == nil {
-                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Listening…").foregroundStyle(.secondary) }
-                    Text("Can't talk right now? Type instead:").font(.callout).foregroundStyle(.secondary).padding(.top, 8)
-                    AskField(compact: true)
-                } else if let reply = model.turns.last(where: { !$0.isUser }), model.turns.count > startCount + 1 {
+                    if canHear {
+                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Listening…").foregroundStyle(.secondary) }
+                        Text("Can't talk right now? Type instead:").font(.callout).foregroundStyle(.secondary).padding(.top, 8)
+                    }
+                    if model.engine.isRunning { AskField(compact: true) }
+                } else if let reply {
                     Text(reply.text).font(.callout).padding(10).frame(maxWidth: .infinity)
                         .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
                 }
             }
         }
-        .onAppear { startCount = model.turns.count }
-        .onChange(of: model.turns.count) { _, _ in
-            if model.turns.count > startCount, let u = model.turns.suffix(from: startCount).first(where: \.isUser) {
-                withAnimation { heard = u.text }
-            }
-        }
+        .onAppear { since = Date() }
     }
 }
 
 private struct DoneStep: View {
+    @Environment(AppModel.self) private var model
+    var perms: Permissions
+
+    private var message: String {
+        if !model.engine.isRunning { return "Vox will start when you open it from the menu bar." }
+        if perms.status(.microphone) != .granted { return "Vox can't hear you until you allow the microphone in Settings → Permissions." }
+        return "Vox is listening. Find it in your menu bar any time."
+    }
+
     var body: some View {
-        StepLayout(symbol: "checkmark.seal.fill", tint: .green, title: "You're all set",
-                   message: "Vox is listening. Find it in your menu bar any time.") {
+        StepLayout(symbol: "checkmark.seal.fill", tint: .green, title: "You're all set", message: message) {
             VStack(alignment: .leading, spacing: 10) {
                 Bullet(symbol: "command", text: "\u{201C}Take control\u{201D} to give commands. \u{201C}Stand down\u{201D} to stop.")
                 Bullet(symbol: "bubble.left", text: "\u{201C}Hey Vox\u{201D} to ask a question or chat.")

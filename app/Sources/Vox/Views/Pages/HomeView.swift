@@ -103,8 +103,8 @@ struct AskField: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(text.isEmpty ? Color.secondary : Color.accentColor)
                 .disabled(text.isEmpty || !model.engine.isRunning)
-                .keyboardShortcut(.return, modifiers: [])
                 .help("Send (Return)")
+                .accessibilityLabel("Send to Vox")
             }
             .padding(.horizontal, 14).padding(.vertical, compact ? 8 : 12)
             .background(.background.secondary, in: Capsule())
@@ -115,11 +115,16 @@ struct AskField: View {
         }
     }
 
+    /// Return is handled by the field's onSubmit only; a second Return shortcut on the button fought
+    /// other default buttons (Setup's Continue). The text is cleared only once Vox has it, so a
+    /// failed send doesn't throw away what was typed.
     private func send() {
         let t = text
         guard !t.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        text = ""
-        Task { error = await model.say(t) }
+        Task {
+            error = await model.say(t)
+            if error == nil, text == t { text = "" }
+        }
     }
 }
 
@@ -167,7 +172,17 @@ private struct QuickSettingsCard: View {
                 SwitchRow("Speak replies", isOn: model.binding(bool: "tts_enabled"))
                 SwitchRow("Learn new commands", isOn: Binding(
                     get: { model.value("learning_mode").string != "off" },
-                    set: { model.set("learning_mode", .string($0 ? "auto" : "off")) }))
+                    set: { on in
+                        // Turning it back on restores whichever mode it was in (auto / suggest),
+                        // rather than silently promoting "suggest" to "auto".
+                        let current = model.value("learning_mode").string
+                        if on {
+                            model.set("learning_mode", .string(UserDefaults.standard.string(forKey: "lastLearningMode") ?? "auto"))
+                        } else {
+                            if current != "off" { UserDefaults.standard.set(current, forKey: "lastLearningMode") }
+                            model.set("learning_mode", .string("off"))
+                        }
+                    }))
                 SwitchRow("Look at the screen", isOn: model.binding(bool: "screen_vision_enabled"))
             }
         }
