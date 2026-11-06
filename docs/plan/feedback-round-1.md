@@ -101,6 +101,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☑ **Testing page notes need an obvious Save:** Save button + "Saved" confirmation.
 - 💬 **"Are you using the Apple UI skill?"** No such skill is available here; designing from Apple's HIG directly.
 
+- ☑ **Froze after "what's the weather in Cape Town"** (18:34). Native stack sample: the voice loop's main
+  thread parked in an unbounded `done.wait()` after an interrupted reply, while speech playback was wedged
+  (AirPods mic/output were stalling minutes earlier). Wait is now bounded; `kill -USR1 <pid>` dumps Python
+  stacks to the console log for any future hang. Restarted the engine to unfreeze.
+- ☐ **Web search** made urgent by the same request: Vox said it has no live weather access. (Already on the list.)
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).

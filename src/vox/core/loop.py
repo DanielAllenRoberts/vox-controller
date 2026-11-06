@@ -704,7 +704,14 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
             return "redirect", text  # anything else → handle it as the next turn
         return None, None
     finally:
-        done.wait()  # the speak thread BLOCKS to completion; if we cut it, stop_speaking already fired
+        # Bounded. This was a bare done.wait(): when playback wedged (AirPods switching Bluetooth
+        # modes mid-reply), the voice loop waited forever and Vox looked frozen until restarted
+        # (seen live 2026-11-06, main thread parked here for minutes). Give it the reply's length
+        # plus slack, then stop it and move on; the speaker thread is a daemon.
+        if not done.wait(timeout=10 + len(spoken) / 12):
+            tts.stop_speaking()
+            if not done.wait(timeout=2):
+                print("  ⚠️  speech didn't finish (audio output stuck?) — carrying on without it", flush=True)
 
 
 def _floor(text: str, cfg, check, phrases, in_field: bool) -> bool:
@@ -1287,6 +1294,12 @@ def main() -> None:
             return
 
     from vox import runtime
+    try:  # `kill -USR1 <pid>` prints every thread's Python stack to the console log: a wedged loop
+        import faulthandler  # can then be diagnosed instead of guessed at from native samples
+        import signal
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except Exception:
+        pass
     _write_pidfile()  # we're cleared to run — record our PID so `--stop`/`--replace` can find us
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
