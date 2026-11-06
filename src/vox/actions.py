@@ -1850,8 +1850,8 @@ def set_setting(arg: str) -> str:
 
 def _log_issue(text: str) -> str:
     text = (text or "").strip()
-    if not text:
-        return "Say 'log an issue' and then what went wrong, in one go."
+    if len(text.split()) < 3:  # "log issue I" — cut off mid-sentence (logged as 'i' once)
+        return "What went wrong? Say 'log an issue' and then describe it, in one go."
     from vox import issues
     issues.add(text)
     try:  # confirmed out loud by dispatch (_SPOKEN_INTENTS) and quietly on screen too

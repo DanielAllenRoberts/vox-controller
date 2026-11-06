@@ -47,7 +47,7 @@ enum Snapshotter {
                 shots.append(("settings-\(tab.rawValue)", { AnyView(SettingsTabHost(tab: tab).environment(model)) }, CGSize(width: 620, height: 600)))
             }
             for step in OnboardingView.Step.allCases {
-                shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step).environment(model)) }, CGSize(width: 640, height: 620)))
+                shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step, aboutYou: .sample).environment(model)) }, CGSize(width: 640, height: 620)))
             }
             shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 330)))
 

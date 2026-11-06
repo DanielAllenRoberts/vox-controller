@@ -321,6 +321,7 @@ struct PermissionRow: View {
 private struct AdvancedPane: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         Form {
@@ -369,7 +370,7 @@ private struct AdvancedPane: View {
             }
             Section("Setup") {
                 HStack {
-                    Button("Run Setup Again…") { openWindow(id: "onboarding"); NSApp.activate() }
+                    Button("Run Setup Again…") { openWindow(id: "onboarding"); dismissWindow(id: "main"); NSApp.activate() }
                     Spacer()
                 }
             }

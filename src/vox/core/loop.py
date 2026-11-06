@@ -372,6 +372,14 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     if runtime.is_typed(audio):
         out.emit(f"  ⌨  you (typed): {audio.text!r}")
         return audio.text
+    text = _transcribe_audio(transcriber, audio, cfg, out, hotwords)
+    if text and tts.is_echo(text):
+        out.emit(f"  🔁 ignored {text!r}: that's my own voice coming back through the speakers")
+        return ""
+    return text
+
+
+def _transcribe_audio(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
         text = transcriber.transcribe(audio, hotwords=hotwords)
@@ -599,6 +607,9 @@ def _passes_interrupt_gate(audio, text, cfg) -> bool:
     # needed 0.4 s of sound + one transcribed word, and Whisper "hears" words like "you" in clicks).
     # Measured: short spoken words carry >= 256 ms of Silero-voiced audio, typing carries 0 ms.
     norm = normalize(text)
+    if tts.is_echo(text):
+        print(f"  [barge-in] ignored {text!r}: my own voice coming back through the speakers", flush=True)
+        return False
     if norm in _NOISE_HALLUCINATIONS:
         print(f"  [barge-in] ignored {text!r}: a phrase Whisper invents from noise", flush=True)
         return False

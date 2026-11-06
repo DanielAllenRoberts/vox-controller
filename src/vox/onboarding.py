@@ -70,10 +70,12 @@ def questions() -> dict:
         "These are the apps installed on someone's Mac (Apple's built-in apps removed):\n"
         + ", ".join(apps)
         + "\n\nYou are Vox, their new voice assistant, meeting them for the first time. Write ONE short, "
-        "warm sentence noticing 2-3 apps that say something about them (interests, work, study, "
-        "hobbies), then exactly three short questions that would help you help them. The first "
-        "question asks what to call them. Make the other two specific to what the apps suggest. "
-        "Never guess personal details as facts; ask. Reply as JSON only: "
+        "warm sentence noticing 2-3 apps that say something about them, then exactly three short "
+        "questions. The first asks what to call them. Each of the other two must NAME the app that "
+        "prompted it and ask plainly about it, in the form \"I saw you have <App>: <question>?\" "
+        "(for example \"I saw you have <App>: do you use it for work or for fun?\"). Pick the apps that "
+        "say the most about the person, whatever field they're in. Never state guesses about them as "
+        "facts; ask. Reply as JSON only: "
         '{"observation": "...", "questions": ["...", "...", "..."]}'
     )
     try:

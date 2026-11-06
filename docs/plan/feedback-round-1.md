@@ -111,6 +111,22 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   trigger for the freeze. Coerced. Stop words ("stop", "wait") bypass the word minimum.
 - ☑ **Web search** made urgent by the same request: Vox said it has no live weather access. (Already on the list.)
 
+## Round 1f (issues logged by voice)
+- ☑ **Vox heard its own reply as the user** (on speakers): it remembers what it just said and drops a
+  transcript that is mostly its own words (4+ words, 80% overlap, while speaking or up to 4 s after). Applies to
+  replies, barge-in and the idle wake listener.
+- ☑ **Switching to headphones didn't move Vox's voice:** replies now play one sentence at a time through
+  `afplay`, which uses whatever output is current. Also removes the PortAudio stream that could wedge.
+- ☑ **"Log an issue" with nothing useful** (a lone "i") was saved: issues now need 3+ words.
+- ☑ **Setup's questions were music-heavy and didn't say why** they asked: each now names the app ("I saw you
+  have Figma: …"), any field.
+- ☑ **Setup should be the only window:** the main window hides while Setup runs (first launch and Run Setup
+  Again) and comes back at the end. From the menu bar, Open Vox still works if Setup is closed early.
+- ☑ **Answer Setup's questions by voice:** a mic button per question records the answer (Vox stops listening
+  meanwhile) and transcribes it into the field.
+- ⏳ **Vox lowers the volume when it talks** (620b806d): not Vox (no software volume on that output); likely
+  AirPods' Conversation Awareness. Waiting to hear which headphones.
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).

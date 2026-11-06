@@ -15,7 +15,7 @@ struct OnboardingView: View {
     @State private var perms = Permissions()
     @State private var installer = Installer()
     @State private var brain = BrainSetup()
-    @State private var aboutYou = AboutYouSetup()
+    @State var aboutYou = AboutYouSetup()
     @State private var tryItSince = Date()
 
     var body: some View {
@@ -687,6 +687,9 @@ final class AboutYouSetup {
 private struct AboutYouStep: View {
     @Environment(AppModel.self) private var model
     var setup: AboutYouSetup
+    @State private var recorder = SampleRecorder()
+    @State private var recordingFor: String?
+    @State private var transcribing: String?
 
     var body: some View {
         StepLayout(symbol: "person.text.rectangle", title: "A little about you",
@@ -700,8 +703,20 @@ private struct AboutYouStep: View {
                     ForEach(setup.questions, id: \.self) { q in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(q).font(.callout.weight(.medium))
-                            TextField("", text: Binding(get: { setup.answers[q] ?? "" }, set: { setup.answers[q] = $0 }))
-                                .textFieldStyle(.roundedBorder)
+                            HStack(spacing: 8) {
+                                TextField(transcribing == q ? "Listening back…" : "Type, or press the mic and say it",
+                                          text: Binding(get: { setup.answers[q] ?? "" }, set: { setup.answers[q] = $0 }))
+                                    .textFieldStyle(.roundedBorder)
+                                Button { Task { await toggleMic(q) } } label: {
+                                    Image(systemName: recordingFor == q ? "stop.circle.fill" : "mic.circle")
+                                        .font(.title2)
+                                        .foregroundStyle(recordingFor == q ? Color.red : Color.accentColor)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(recordingFor != nil && recordingFor != q)
+                                .help(recordingFor == q ? "Stop and use what you said" : "Answer by voice")
+                                .accessibilityLabel(recordingFor == q ? "Stop recording" : "Answer by voice")
+                            }
                         }
                     }
                     Text("Vox looked only at the names of your apps. Answers are saved to Memory, where you can see and edit them.")
@@ -710,6 +725,30 @@ private struct AboutYouStep: View {
             }
         }
         .task { await setup.load(model) }
+        .onDisappear { if recorder.isRecording { _ = recorder.stop(); Task { try? await model.api.setPaused(false) } } }
+    }
+
+    /// Record an answer, then let the engine transcribe it. Vox ignores the mic meanwhile, so an
+    /// answer like "call me Sam" isn't also taken as a command.
+    private func toggleMic(_ q: String) async {
+        if recordingFor == q {
+            let wav = recorder.stop()
+            recordingFor = nil
+            try? await model.api.setPaused(false)
+            guard let wav else { return }
+            transcribing = q
+            defer { transcribing = nil }
+            struct R: Decodable { var text: String }
+            if let r: R = try? await model.api.send("transcribe", method: "POST", body: ["audio": wav.base64EncodedString()]),
+               !r.text.isEmpty {
+                let existing = (setup.answers[q] ?? "").trimmingCharacters(in: .whitespaces)
+                setup.answers[q] = existing.isEmpty ? r.text : existing + " " + r.text
+            }
+        } else {
+            try? await model.api.setPaused(true)
+            do { try recorder.start(); recordingFor = q }
+            catch { try? await model.api.setPaused(false) }
+        }
     }
 }
 
@@ -769,5 +808,19 @@ private struct DoneStep: View {
                 Bullet(symbol: "keyboard", text: "\u{201C}Start typing\u{201D} to dictate into any text field.")
             }
         }
+    }
+}
+
+extension AboutYouSetup {
+    /// Filled-in questions for `--snapshot`, so the step renders without a live engine.
+    static var sample: AboutYouSetup {
+        let s = AboutYouSetup()
+        s.observation = "You've got Logic Pro, Figma and Xcode: a maker, then."
+        s.questions = ["What should I call you?",
+                       "I saw you have Logic Pro: do you make music for work or for fun?",
+                       "I saw you have Figma: what kind of things do you design?"]
+        s.answers = [s.questions[0]: "Sam"]
+        s.loaded = true
+        return s
     }
 }

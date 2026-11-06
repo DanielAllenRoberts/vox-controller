@@ -423,6 +423,22 @@ def create_app() -> FastAPI:
         from .. import onboarding
         return await asyncio.to_thread(onboarding.questions)
 
+    @app.post("/api/transcribe")
+    async def post_transcribe(request: Request):
+        """{"audio": <base64 16-bit WAV>} → {"text": ...}. Used to answer setup questions by voice."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        import base64
+        from .. import voice_samples
+        try:
+            audio = voice_samples._decode_wav(base64.b64decode(str(body.get("audio", "")), validate=True))
+            text = await asyncio.to_thread(lambda: voice_samples._get_transcriber().transcribe(audio))
+            return {"text": (text or "").strip()}
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": f"couldn't read that audio ({type(exc).__name__}: {exc})"},
+                                status_code=400)
+
     @app.post("/api/onboarding/answers")
     async def post_onboarding_answers(request: Request):
         body, err = await _json_body(request)

@@ -102,6 +102,12 @@ class WhisperWakeBackend:
                         self._out.emit("  [debug] idle precheck: no wake word → skipped Whisper")
                     continue
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
+            if not runtime.is_typed(audio):
+                from vox import tts
+                if tts.is_echo(text):  # Vox's own reply heard back through the speakers
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit(f"  [debug] idle ignored own voice: {text!r}")
+                    continue
             # Passing/ambient audio that piled up in the mic buffer WHILE we were transcribing is
             # stale — drop it so idle stays synced to LIVE audio instead of working through a growing
             # backlog. In a talky room that backlog would otherwise lag, accumulate, and pile on

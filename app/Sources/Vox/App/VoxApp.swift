@@ -85,6 +85,7 @@ private struct OpensOnboarding: ViewModifier {
             }
             .onReceive(NotificationCenter.default.publisher(for: .voxShowOnboarding)) { _ in
                 openWindow(id: "onboarding")
+                dismissWindow(id: "main")   // Setup on its own; it reopens the main window at the end
                 NSApp.activate()
             }
     }

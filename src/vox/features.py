@@ -111,6 +111,12 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "'Hey Vox what's the weather like' in one go: it answers, instead of waking and waiting for you to ask again.", "code"),
     ("learning-quality", "Control", "Learned commands make sense",
      "Commands → Learning: no stutters ('open arc open arc'), rants, corrections or phrasings Vox already understood. Odd ones wait for a second sighting.", "code"),
+    ("echo-guard", "Voice & speed", "Vox ignores its own voice",
+     "Ask something with a long answer on speakers (no headphones): Vox doesn't hear its own reply as you talking, and doesn't cut itself off.", "code"),
+    ("output-follows-device", "Voice & speed", "Replies play on the current output",
+     "Switch from speakers to headphones (or back) while Vox is running: the next reply plays on the new device without a restart.", "code"),
+    ("setup-voice-answers", "Vox.app", "Answer setup questions by voice",
+     "Settings → Advanced → Run Setup Again: the main window hides while Setup is open. On 'About you', each question names the app it's about, and the mic button next to it records your answer and types it in.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),
