@@ -15,11 +15,7 @@ struct VoxApp: App {
 
     var body: some Scene {
         Window("Vox", id: "main") {
-            // The environment goes OUTERMOST: OpensOnboarding reads AppModel too, and a modifier
-            // applied outside `.environment` can't see it (SwiftUI traps at launch).
-            MainWindow()
-                .modifier(OpensOnboarding())
-                .environment(delegate.model)
+            Roots.main(delegate.model)
         }
         .defaultSize(width: 1000, height: 680)
 
@@ -34,9 +30,7 @@ struct VoxApp: App {
         }
 
         MenuBarExtra {
-            MenuBarView()
-                .modifier(OpensOnboarding())
-                .environment(delegate.model)
+            Roots.menuBar(delegate.model)
         } label: {
             MenuBarIcon().environment(delegate.model)
         }
@@ -59,6 +53,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HoldToTalk.shared.releaseForQuit()
         let quitEngine = UserDefaults.standard.object(forKey: "quitEngineWithApp") as? Bool ?? true
         if quitEngine { model.engine.stopForQuit() }
+    }
+}
+
+/// The exact view trees the scenes show, shared with the snapshotter so its renders exercise the
+/// real wiring. The environment goes OUTERMOST: OpensOnboarding reads AppModel too, and a modifier
+/// applied outside `.environment` can't see it (that crashed Vox at launch once).
+enum Roots {
+    @MainActor static func main(_ model: AppModel) -> some View {
+        MainWindow().modifier(OpensOnboarding()).environment(model)
+    }
+
+    @MainActor static func menuBar(_ model: AppModel) -> some View {
+        MenuBarView().modifier(OpensOnboarding()).environment(model)
     }
 }
 

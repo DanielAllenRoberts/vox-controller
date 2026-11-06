@@ -49,7 +49,7 @@ enum Snapshotter {
             for step in OnboardingView.Step.allCases {
                 shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step).environment(model)) }, CGSize(width: 640, height: 620)))
             }
-            shots.append(("menubar", { AnyView(MenuBarView().environment(model).background(.regularMaterial)) }, CGSize(width: 320, height: 330)))
+            shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 330)))
 
             for (name, view, size) in shots where only.map({ name.contains($0) }) ?? true {
                 if let png = render(view(), size: size) {
@@ -98,7 +98,7 @@ private struct PageHost: View {
     @Environment(AppModel.self) private var model
     var page: Page
     var body: some View {
-        MainWindow().onAppear { model.page = page }
+        Roots.main(model).onAppear { model.page = page }
     }
 }
 

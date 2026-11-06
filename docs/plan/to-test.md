@@ -62,6 +62,12 @@ Turn on "Type automatically in text fields", restart Vox, and watch `grep "\[aut
 ### Vision clicks double-check the label
 - [ ] When "click Later" (or any plain label) has to fall back to looking at the screen and vision picks a differently-labelled button, Vox asks "Did you mean Got it?" instead of clicking. "yes" clicks it. `grep "labels disagree" vox.log`.
 
+### Voice Lab (your idea): record test phrases in your own voice
+- [ ] Vox.app → **Voice Lab** (sidebar, under Insights). Click a phrase's record button, say it, click stop. It appears under "Your recordings", named after what Vox heard, with a ✓ count on the phrase.
+- [ ] Vox ignores you while recording (record "Hey Vox": it shouldn't wake). Listening resumes after.
+- [ ] Play and delete a recording. Files live in `data/voice-samples/` (never committed).
+- [ ] **Please record the "Waking Vox" and "Talking to someone else" sets, a few times each.** That's what I need to decide whether the idle CPU pre-check can be switched on by default.
+
 ### Hold to talk (needs Vox.app)
 - [ ] Hold **Right ⌥**: a soft *tink* after about 0.2 s. Say "open Safari", let go: a *pop*, and it runs immediately (no silence wait). Works from idle without saying "Vox" first.
 - [ ] Pause mid-sentence while holding: you're NOT cut off.
