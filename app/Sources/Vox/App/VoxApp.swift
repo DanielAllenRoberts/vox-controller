@@ -15,9 +15,11 @@ struct VoxApp: App {
 
     var body: some Scene {
         Window("Vox", id: "main") {
+            // The environment goes OUTERMOST: OpensOnboarding reads AppModel too, and a modifier
+            // applied outside `.environment` can't see it (SwiftUI traps at launch).
             MainWindow()
-                .environment(delegate.model)
                 .modifier(OpensOnboarding())
+                .environment(delegate.model)
         }
         .defaultSize(width: 1000, height: 680)
 
@@ -33,8 +35,8 @@ struct VoxApp: App {
 
         MenuBarExtra {
             MenuBarView()
-                .environment(delegate.model)
                 .modifier(OpensOnboarding())
+                .environment(delegate.model)
         } label: {
             MenuBarIcon().environment(delegate.model)
         }

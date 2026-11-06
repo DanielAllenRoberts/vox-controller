@@ -376,6 +376,43 @@ def create_app() -> FastAPI:
         print(f"🔔 agent alert: {text}")
         return Response(status_code=204)
 
+    # --- Voice Lab: the user's own recordings for testing (vox/voice_samples.py) ---
+    @app.get("/api/samples")
+    def get_samples() -> dict:
+        from .. import voice_samples
+        return {"samples": voice_samples.all_samples(), "prompts": voice_samples.PROMPTS}
+
+    @app.post("/api/samples")
+    async def post_sample(request: Request):
+        """{"audio": <base64 16-bit PCM WAV>, "prompt": str, "category": str}. Transcribes it,
+        names it after what was heard, saves it. Returns the stored entry."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        import base64
+        from .. import voice_samples
+        try:
+            wav = base64.b64decode(str(body.get("audio", "")), validate=True)
+            return await asyncio.to_thread(voice_samples.add, wav, str(body.get("prompt", "")),
+                                           str(body.get("category", "")))
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    @app.get("/api/samples/{sid}/audio")
+    def get_sample_audio(sid: str):
+        from .. import voice_samples
+        path = voice_samples.path_of(sid)
+        if path is None or not path.exists():
+            raise HTTPException(status_code=404, detail="no such recording")
+        return FileResponse(path, media_type="audio/wav")
+
+    @app.delete("/api/samples/{sid}")
+    def delete_sample(sid: str) -> dict:
+        from .. import voice_samples
+        if not voice_samples.remove(sid):
+            raise HTTPException(status_code=404, detail="no such recording")
+        return {"ok": True}
+
     # --- Settings ---
     @app.get("/api/settings")
     def get_settings() -> list:

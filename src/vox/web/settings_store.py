@@ -435,6 +435,15 @@ _SCHEMA_META: list[dict] = [
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
     },
     {
+        "key": "idle_wake_precheck",
+        "label": "Quick wake-word check while idle",
+        "group": "Voice",
+        "type": "toggle",
+        "help": "While idle, listen for the wake word with a tiny recogniser before running full "
+                "transcription. Saves most idle CPU in a talkative room, but may miss a fast "
+                "'Vox, open …'. Applies live.",
+    },
+    {
         "key": "agent_alerts",
         "label": "Agent alerts",
         "group": "Notifications",

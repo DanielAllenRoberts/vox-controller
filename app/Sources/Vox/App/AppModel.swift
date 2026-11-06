@@ -149,7 +149,7 @@ final class AppModel {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case home, conversation, personality, commands, vocabulary, rules, board, reminders, memory, activity
+    case home, conversation, personality, commands, vocabulary, rules, board, reminders, memory, activity, voiceLab
     var id: String { rawValue }
 
     var title: String {
@@ -164,6 +164,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .reminders: "Reminders"
         case .memory: "Memory"
         case .activity: "Activity"
+        case .voiceLab: "Voice Lab"
         }
     }
 
@@ -179,6 +180,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .reminders: "alarm"
         case .memory: "brain"
         case .activity: "chart.bar.xaxis"
+        case .voiceLab: "waveform.badge.mic"
         }
     }
 
@@ -186,6 +188,6 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         (nil, [.home, .conversation]),
         ("Teach Vox", [.personality, .commands, .vocabulary, .rules]),
         ("Organise", [.board, .reminders, .memory]),
-        ("Insights", [.activity]),
+        ("Insights", [.activity, .voiceLab]),
     ]
 }

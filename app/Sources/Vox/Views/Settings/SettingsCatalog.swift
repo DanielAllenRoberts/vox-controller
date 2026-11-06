@@ -89,6 +89,7 @@ enum SettingsCatalog {
                 s("vosk_commands_enabled", "Instant commands", "Recognises known commands in milliseconds, before full transcription."),
                 s("idle_speech_gate", "Ignore non-speech sounds while idle", "Saves CPU: coughs, clicks and doors aren't transcribed."),
                 s("idle_speech_gate_ms", "Speech needed to listen (ms)"),
+                s("idle_wake_precheck", "Quick wake-word check while idle", "Saves most idle CPU in a chatty room. May miss a fast \u{201C}Vox, open…\u{201D}."),
             ]),
         ],
         .voice: [

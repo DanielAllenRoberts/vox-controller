@@ -39,6 +39,7 @@ struct MainWindow: View {
         case .reminders: RemindersView()
         case .memory: MemoryView()
         case .activity: ActivityView()
+        case .voiceLab: VoiceLabView()
         }
     }
 }

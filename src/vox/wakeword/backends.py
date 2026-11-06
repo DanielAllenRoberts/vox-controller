@@ -26,6 +26,13 @@ def phrase_match(t: str, phrases) -> bool:
     return any(p in t or p.replace(" ", "") in t2 for p in phrases)
 
 
+# Words at least one of which appears in every idle wake phrase and "vox, …" one-shot. "vox" is
+# kept with the spellings Vosk actually produces for it; the measured best set (see
+# research/listening-and-stt-2026.md R2).
+_WAKE_KEYWORDS = ("vox", "vaux", "vocks", "fox", "box", "control", "dashboard", "restart", "reboot",
+                  "hey", "quit", "take", "exit")
+
+
 class WhisperWakeBackend:
     def __init__(self, label_phrases, transcriber, cfg, prompt, out=None):
         self._label_phrases = label_phrases  # list of (label, (phrase, ...))
@@ -63,6 +70,22 @@ class WhisperWakeBackend:
                     # Too little voice to hold a wake phrase: skip the ~1.4 CPU-s Whisper pass.
                     if self._cfg.debug and self._out is not None:
                         self._out.emit(f"  [debug] idle gate: skipped (voiced {voiced}ms < {min_ms}ms)")
+                    continue
+            if (not runtime.is_typed(audio) and not runtime.last_capture_ptt
+                    and _setting("idle_wake_precheck", getattr(self._cfg, "idle_wake_precheck", False))):
+                # A ~3 ms Vosk keyword check before the ~1.4 CPU-s Whisper pass: idle Whisper ran on
+                # every sound and threw 99% of it away. Measured on synthetic voices: skips 58/60 of
+                # the user's real ambient sentences and all filler, but drops 7/75 wakes Whisper
+                # would have caught (all fast "vox open …" one-shots). Hence off by default until
+                # it's measured on the user's own recordings (Voice Lab).
+                try:
+                    from vox.stt import vosk_recognizer
+                    heard = vosk_recognizer.spot_keywords(audio, _WAKE_KEYWORDS, self._cfg.sample_rate)
+                except Exception:
+                    heard = None  # Vosk unavailable → behave exactly as before
+                if heard is not None and not heard:
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit("  [debug] idle precheck: no wake word → skipped Whisper")
                     continue
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
             # Passing/ambient audio that piled up in the mic buffer WHILE we were transcribing is

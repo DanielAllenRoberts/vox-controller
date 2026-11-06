@@ -154,3 +154,41 @@ def recognize(audio, phrases, sample_rate: int = 16000, model_path: str = "", lo
     confs = [float(w.get("conf", 1.0)) for w in words]
     conf = round(sum(confs) / len(confs), 3) if confs else 1.0
     return {"text": by_lower[cleaned], "raw": raw, "conf": conf}
+
+
+_KW_REC = None   # separate cached recognizer for wake-word spotting, so it never evicts the
+_KW_KEY = None   # command fast lane's grammar (each rebuild costs a grammar compile)
+
+
+def spot_keywords(audio, keywords, sample_rate: int = 16000, seconds: float = 3.0,
+                  model_path: str = "") -> set[str]:
+    """Which of ``keywords`` Vosk hears in the first ``seconds`` of ``audio``: an idle pre-check.
+
+    A free word grammar of just the keywords plus ``[unk]``, so everything else collapses to
+    ``[unk]``. That makes it cheap and makes it lean towards *finding* a keyword (a near-miss gets
+    pulled onto one), which is the safe direction for a gate in front of Whisper: a false hit only
+    costs the Whisper pass we'd have run anyway. Out-of-vocabulary keywords are dropped silently,
+    which is why the caller includes mis-hear spellings ("fox", "box"). Raises VoskUnavailable."""
+    global _KW_REC, _KW_KEY
+    words = sorted({k.strip().lower() for k in keywords if k and k.strip()})
+    if not words:
+        return set()
+    model = _get_model(model_path)
+    try:
+        from vosk import KaldiRecognizer
+        grammar = json.dumps(words + ["[unk]"])
+        key = (grammar, float(sample_rate))
+        if _KW_REC is not None and _KW_KEY == key:
+            rec = _KW_REC
+            rec.Reset()
+        else:
+            with _silence_c_stderr():
+                rec = KaldiRecognizer(model, float(sample_rate), grammar)
+            _KW_REC, _KW_KEY = rec, key
+        import numpy as np
+        a = np.asarray(audio).reshape(-1)[: int(seconds * sample_rate)]
+        rec.AcceptWaveform(_pcm_bytes(a))
+        heard = (json.loads(rec.FinalResult()).get("text") or "").split()
+    except Exception as exc:
+        raise VoskUnavailable(f"vosk keyword spotting failed: {exc}") from exc
+    return {w for w in heard if w in words}

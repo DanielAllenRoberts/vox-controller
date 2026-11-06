@@ -1292,6 +1292,11 @@ def main() -> None:
                                          beam_size=cfg.whisper_beam_size)
         wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
+    try:  # the Voice Lab transcribes recordings with this same model instead of loading a second copy
+        from vox import voice_samples
+        voice_samples.use_transcriber(transcriber)
+    except Exception:
+        pass
 
     try:  # Claude-subscription brain: connect a client now so the first command skips the cold start
         assistant.prewarm_sdk(executor._SYSTEM, "small")
