@@ -67,6 +67,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   or others. Open an agent's chat from the app. Its own section in Settings. Reuse what exists
   (Claude Agent SDK, Hermes/OpenClaw patterns, Paperclip's delegation) rather than reinvent.
   Research Paperclip first (the user has it starred).
+  ◐ Research done 2026-11-06: `docs/plan/research/agent-orchestrators.md` (Paperclip, Hermes Agent,
+  OpenClaw, Agent SDK sessions) with a v1 design on the existing board + scheduler. 💬 Waiting on the
+  user's answers to its "Open questions" (auth, board shape, repo access, screen control, budgets).
 - ◐ **"show clickable" in the Claude app on an artifact table:** many badges read the same number
   (23), and "click 23" hit New chat instead. Hypothesis: elements inside the artifact's embedded web
   frame report coordinates relative to that frame, not the screen, so badges pile up near the
