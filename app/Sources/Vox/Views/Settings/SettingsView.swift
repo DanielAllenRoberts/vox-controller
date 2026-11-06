@@ -232,7 +232,12 @@ private struct PermissionsPane: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { perms.refresh() }
+        .task {   // System Settings sends no change notification; re-check while this tab is open
+            while !Task.isCancelled {
+                perms.refresh()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
         .onChange(of: phase) { _, _ in perms.refresh() }
     }
 }

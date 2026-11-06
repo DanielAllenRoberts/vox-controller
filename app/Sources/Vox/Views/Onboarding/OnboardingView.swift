@@ -70,6 +70,7 @@ struct OnboardingView: View {
     private var skipLabel: String? {
         switch step {
         case .brain where !brainReady: "Set Up Later"
+        case .accessibility where perms.status(.accessibility) != .granted: "Skip for Now"
         case .tryIt: "Skip"
         default: nil
         }
@@ -195,7 +196,7 @@ private struct Bullet: View {
 private struct PermissionStep: View {
     var kind: Permissions.Kind
     var perms: Permissions
-    @Environment(\.scenePhase) private var phase
+    @State private var askedAt: Date?
 
     var body: some View {
         let granted = perms.status(kind) == .granted
@@ -206,6 +207,7 @@ private struct PermissionStep: View {
                 VStack(spacing: 10) {
                     Button(perms.status(kind) == .denied ? "Open System Settings" : "Allow \(kind.title)…") {
                         perms.request(kind)
+                        askedAt = Date()
                     }
                     .controlSize(.large)
                     if kind == .accessibility {
@@ -215,10 +217,28 @@ private struct PermissionStep: View {
                         Text("Microphone access was turned off earlier. Turn on **Vox** in System Settings → Privacy & Security → Microphone.")
                             .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
+                    if askedAt != nil && kind == .accessibility {
+                        // Seen in practice: Vox is switched on in System Settings but this process
+                        // still isn't trusted (an older build's entry, or a grant macOS only applies
+                        // on relaunch). Never leave the user stuck on this screen.
+                        Text("Already switched on and this still says no? Quit Vox and open it again. If that doesn't work, remove Vox from the list with \u{2212} and add it back.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            .padding(.top, 6)
+                    }
                 }
             }
         }
-        .onChange(of: phase) { _, _ in perms.refresh() }
+        // Check every second while this step is on screen. Permission changes in System Settings
+        // send no notification, and an earlier 60-second window left people stuck here.
+        .task {
+            while !Task.isCancelled {
+                perms.refresh()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            perms.refresh()
+        }
     }
 }
 
