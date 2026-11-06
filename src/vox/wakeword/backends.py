@@ -118,10 +118,25 @@ class WhisperWakeBackend:
                 tag = label or (f"do:{cmd}" if cmd else "(no match — stayed idle)")
                 vtag = f" · voiced={voiced}ms" if voiced is not None else ""
                 self._out.emit(f"  [debug] idle heard: {text!r} → {tag}{vtag}")
+            if label == "assistant":
+                runtime.wake_remainder = self._after_wake(text)
             if label is not None:
                 return label
             if cmd:
                 return "do:" + cmd
+
+    def _after_wake(self, text: str) -> str:
+        """What came after the wake phrase in the same breath: "hey vox what time is it" → "what
+        time is it". It used to be thrown away, so the question had to be asked twice."""
+        t = normalize(text)
+        for _label, phrases in self._label_phrases:
+            for p in phrases:
+                i = t.find(p)
+                if i >= 0:
+                    rest = t[i + len(p):].strip()
+                    rest = rest.split(p)[0].strip()   # "hey vox X hey vox X" → "X"
+                    return rest if len(rest.split()) >= 2 else ""
+        return ""
 
     def _fast_wake(self, audio) -> str | None:
         """The wake label if Vosk confidently hears exactly one wake phrase, else None."""

@@ -129,6 +129,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "drag": _drag, "set_value": _set_value,
         "point": point_at,
         "log_issue": _log_issue,
+        "set_setting": set_setting,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -171,6 +172,13 @@ def _parse(text: str) -> tuple[str, str] | None:
     # --- desktop primitives (idea #61) ---------------------------------------------------------
     # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
     # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
+
+    # Vox's own everyday settings by voice ("reply silently from now on"). Allow-listed in
+    # VOICE_SETTINGS; anything else stays in the app.
+    for pattern, key, value in _VOICE_SETTING_PHRASES:
+        if re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*" + pattern
+                        + r"(?:\s+(?:from now on|for now|please|again))*", t):
+            return ("set_setting", f"{key}={value}")
 
     # "log an issue: the circle thing didn't work" → saved with what was happening (vox/issues.py).
     m = re.match(r"(?:(?:please|vox|can you|could you)[,:]?\s+)*(?:log|report|note|file)\s+(?:this|an|a|the|that)?\s*"
@@ -1700,6 +1708,51 @@ def _click_variant(target: str, button: str, clicks: int, verb: str) -> str:
     except Exception as exc:
         return f"failed: couldn't {verb} {label!r} ({exc})."
     return f"{verb}ed {label}"
+
+
+# Settings Vox may change when asked out loud. Deliberately the harmless, everyday ones: never the
+# brains, keys, permissions, or anything about what Vox is allowed to do on its own.
+VOICE_SETTINGS = {
+    "tts_enabled": "speak replies out loud",
+    "kokoro_voice": "the voice it speaks with",
+    "learning_mode": "learning new commands (auto / suggest / off)",
+    "auto_dictation": "typing automatically into text fields",
+    "small_brain_thinking": "thinking before answering (on / off)",
+    "screen_vision_enabled": "answering questions about the screen",
+    "agent_alerts": "how coding agents get your attention (bubble / speak / off)",
+    "bubble_corner": "where notification bubbles appear",
+    "fast_wake": "fast wake",
+}
+
+_VOICE_SETTING_PHRASES = [
+    (r"(?:reply|answer|respond)\s+(?:silently|quietly|without (?:talking|speaking))", "tts_enabled", "false"),
+    (r"(?:stop|don'?t|do not)\s+(?:speaking|talking)\s+(?:replies|back|out loud)", "tts_enabled", "false"),
+    (r"(?:mute|silence)\s+(?:your\s+)?(?:replies|voice)", "tts_enabled", "false"),
+    (r"(?:speak|say|talk)\s+(?:replies|your replies)?\s*(?:out loud|aloud)", "tts_enabled", "true"),
+    (r"(?:speak|talk)\s+(?:to me\s+)?again|(?:unmute|turn on)\s+(?:your\s+)?(?:replies|voice)", "tts_enabled", "true"),
+    (r"(?:stop|don'?t)\s+learning(?:\s+(?:new\s+)?commands)?", "learning_mode", "off"),
+    (r"(?:start|resume)\s+learning(?:\s+(?:new\s+)?commands)?", "learning_mode", "auto"),
+]
+
+
+def set_setting(arg: str) -> str:
+    """Change one allow-listed setting ("key=value"). The settings store validates the value."""
+    key, _, value = (arg or "").partition("=")
+    key, value = key.strip(), value.strip()
+    if key not in VOICE_SETTINGS:
+        return "That one can only be changed in Vox's settings."
+    try:
+        from vox.web import settings_store
+        meta = next((s for s in settings_store.all() if s["key"] == key), None)
+        if meta is None:
+            return "That setting isn't available."
+        v = value.lower() in ("true", "on", "yes", "1") if meta["type"] == "toggle" else value
+        settings_store.set(key, v)
+    except Exception as exc:
+        return f"Couldn't change that ({exc})."
+    if key == "tts_enabled":
+        return "OK, I'll reply silently." if v is False else "OK, I'll speak my replies again."
+    return f"Done: {VOICE_SETTINGS[key]} is now {value}."
 
 
 def _log_issue(text: str) -> str:

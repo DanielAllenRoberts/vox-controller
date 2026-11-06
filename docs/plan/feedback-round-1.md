@@ -65,6 +65,19 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☐ **ChatGPT / OpenAI as a brain option** alongside Claude and DeepSeek.
 - ☐ **Expand the task board** (more than lists + cards; scope to discuss).
 
+## Round 1c
+- ☑ **Change settings by voice** (allow-listed: speak replies, voice, learning, auto-typing, thinking,
+  screen questions, agent alerts, bubble corner, fast wake). Brains/keys/permissions refused.
+- ☑ **Command learning saved nonsense.** New phrase-quality gate: stutters collapse; phrasings the
+  parser already understands, >6-word sentences and corrections are never learned; aliases and
+  odd leaps need a second sighting. Existing junk candidates: see below.
+- ☑ **"What time is it?" → "I don't have a live clock".** The chat brain had no clock (only the command
+  brain did). Fixed and verified with a real call.
+- ☑ **"Hey vox what time is it" lost the question.** Words after the wake phrase now become the first
+  thing assistant mode answers.
+- ◐ **Setup didn't show the new steps after a reset**: the voice picker and get-to-know-you steps hadn't
+  been built yet. Building next.
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).

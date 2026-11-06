@@ -82,6 +82,8 @@ def mode() -> tuple[str, float]:
 # idle it runs as a one-shot without the "vox" prefix.
 _ptt_held = False
 _ptt_since = 0.0
+# Words said straight after "hey vox" in the same breath; assistant mode answers them first.
+wake_remainder = ""
 last_capture_ptt = False
 # A press longer than this is a lost "release" (an app quit mid-hold, a dropped request), not a
 # person talking. Expire it, or every later capture would run in hold-to-talk mode forever.

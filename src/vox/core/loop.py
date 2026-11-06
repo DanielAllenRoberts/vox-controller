@@ -882,6 +882,10 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
     history = []
     expecting_answer = False  # set when the model tags its reply [OPEN] → wait patiently for you
     redirect = None  # an utterance captured mid-reply, to handle instead of the cancelled one
+    from vox import runtime
+    if runtime.wake_remainder:  # "hey vox what time is it": answer the question, don't ask for it again
+        redirect, runtime.wake_remainder = runtime.wake_remainder, ""
+        out.emit(f"  you: {redirect!r}")
     while True:
         if redirect is not None:
             text, redirect = redirect, None

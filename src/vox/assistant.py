@@ -346,6 +346,13 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     for block in (_rules_block(), _memory_block(text), _recent_actions_block()):
         if block:
             system = f"{system}\n\n{block}"
+    # The clock (ideas #47). The command brain had it; the chat brain didn't, so "hey vox, what time
+    # is it?" got "I don't have a live clock" (seen live 2026-11-06).
+    try:
+        from vox import actions
+        system = f"{system}\n\n{actions._now_line()}"
+    except Exception:
+        pass
     raw = complete(text, history, brain=brain, system=system)
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):

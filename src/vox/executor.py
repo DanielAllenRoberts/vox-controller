@@ -52,6 +52,14 @@ _SYSTEM = (
     "kind of text it is — the selection is fetched and rewritten automatically.\n"
     "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
     "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
+    "To CHANGE ONE OF VOX'S OWN SETTINGS when asked ('use a deeper voice', 'show bubbles at the "
+    "bottom left', 'think before answering'): output  SET: <key> | <value>  using ONLY these keys: "
+    "tts_enabled (true/false), kokoro_voice (am_onyx deep US male, am_michael US male, af_bella US "
+    "female, af_heart warm US female, bf_emma UK female, bm_george UK male), learning_mode "
+    "(auto/suggest/off), auto_dictation (true/false), small_brain_thinking (on/off), "
+    "screen_vision_enabled (true/false), agent_alerts (bubble/speak/off), bubble_corner "
+    "(top-right/top-left/bottom-right/bottom-left), fast_wake (true/false). Anything else: CHAT: "
+    "that it has to be changed in Vox's settings.\n"
     "To SHOW the user where something is WITHOUT clicking it ('where's the export button', 'show me "
     "where settings is', 'point at X', 'circle X'): output  POINT: <what to point at>. Vox rings it on "
     "screen. Use CLICK only when they want it pressed.\n"
@@ -622,6 +630,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
         return False, reply
+    if upper.startswith("SET:"):
+        key, _, value = raw.split(":", 1)[1].partition("|")
+        msg = actions.set_setting(f"{key.strip()}={value.strip()}")
+        assistant._dbg("[executor]", f"decision=SET {key.strip()!r} = {value.strip()!r} → {msg!r}")
+        return False, msg
     if upper.startswith("POINT:"):  # show where something is, without pressing it (ideas #69.2)
         target = raw.split(":", 1)[1].strip()
         from vox import ax
