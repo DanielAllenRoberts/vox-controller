@@ -66,9 +66,19 @@ private struct EngineNotice: View {
     @Environment(AppModel.self) private var model
     var body: some View {
         HStack {
-            Label("Start Vox to change these settings.", systemImage: "power").foregroundStyle(.secondary)
-            Spacer()
-            Button("Start Vox") { model.engine.start() }
+            if model.engine.isStarting {
+                Label("Vox is starting…", systemImage: "hourglass").foregroundStyle(.secondary)
+                Spacer()
+                ProgressView().controlSize(.small)
+            } else if model.engine.state == .notInstalled {
+                Label("Vox isn't set up yet.", systemImage: "wrench.and.screwdriver").foregroundStyle(.secondary)
+                Spacer()
+                Button("Open Setup…") { NotificationCenter.default.post(name: .voxShowOnboarding, object: nil) }
+            } else {
+                Label("Start Vox to change these settings.", systemImage: "power").foregroundStyle(.secondary)
+                Spacer()
+                Button("Start Vox") { model.boot() }
+            }
         }
     }
 }
@@ -292,8 +302,11 @@ private struct AdvancedPane: View {
                     Button("Restart Engine") { model.engine.restart() }
                     if model.engine.isRunning {
                         Button("Stop Engine") { Task { await model.engine.stop() } }
+                    } else if model.engine.isStarting {
+                        ProgressView().controlSize(.small)
+                        Text("Starting…").foregroundStyle(.secondary)
                     } else {
-                        Button("Start Engine") { model.engine.start() }
+                        Button("Start Engine") { model.boot() }
                     }
                     Spacer()
                 }

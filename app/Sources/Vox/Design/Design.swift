@@ -147,7 +147,7 @@ struct EngineOffView: View {
             Text(p.detail)
         } actions: {
             switch model.engine.state {
-            case .stopped, .failed: Button("Start Vox") { model.engine.start() }.buttonStyle(.borderedProminent)
+            case .stopped, .failed: Button("Start Vox") { model.boot() }.buttonStyle(.borderedProminent)
             case .notInstalled: Button("Open Setup…") { NotificationCenter.default.post(name: .voxShowOnboarding, object: nil) }
                 .buttonStyle(.borderedProminent)
             default: ProgressView().controlSize(.small)

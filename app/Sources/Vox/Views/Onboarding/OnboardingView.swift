@@ -273,12 +273,12 @@ private struct EngineStep: View {
                     Text(installer.step).font(.callout).foregroundStyle(.secondary)
                 case .failed(let why):
                     Label(why, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
-                    Button("Try Again") { Task { await installer.install(into: model.engine.location); model.engine.refreshLocation(); model.engine.start() } }
+                    Button("Try Again") { Task { await installer.install(into: model.engine.location); model.engine.refreshLocation(); model.boot() } }
                 default:
                     if !running {
                         if case .failed(let why) = model.engine.state {
                             Text(why).font(.callout).foregroundStyle(.red).multilineTextAlignment(.center)
-                            Button("Try Again") { model.engine.start() }
+                            Button("Try Again") { model.boot() }
                         } else {
                             ProgressView().controlSize(.small)
                             Text("Loading speech models. The first start can take a minute.").font(.callout).foregroundStyle(.secondary)

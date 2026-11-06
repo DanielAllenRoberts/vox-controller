@@ -36,7 +36,7 @@ struct MenuBarView: View {
                 .toggleStyle(.switch).controlSize(.small)
             } else {
                 switch model.engine.state {
-                case .stopped, .failed: Button("Start Vox") { model.engine.start() }.buttonStyle(.borderedProminent)
+                case .stopped, .failed: Button("Start Vox") { model.boot() }.buttonStyle(.borderedProminent)
                 case .notInstalled: Button("Set Up Vox…") { show("onboarding") }.buttonStyle(.borderedProminent)
                 default: ProgressView().controlSize(.small)
                 }

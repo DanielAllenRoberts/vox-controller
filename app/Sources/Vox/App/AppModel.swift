@@ -50,7 +50,9 @@ final class AppModel {
 
     /// Snapshot/preview only: fill the model with fixture data, no engine.
     func loadFixtures(turns: [Turn], settings: [Setting], status: EngineStatus) {
-        self.turns = turns
+        // Same ordering as live data (the API is newest-first; the screen is oldest-first), so a
+        // fixture can't hide an ordering bug the way an already-sorted one did.
+        self.turns = turns.sorted { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
         self.settings = settings
         engine.previewRunning(status)
     }
@@ -60,9 +62,9 @@ final class AppModel {
         while true {
             let running = engine.isRunning
             if running && !lastEngineRunning {
-                await reloadTurns()
+                connectStream()          // subscribe FIRST so nothing said meanwhile is missed…
+                await reloadTurns()      // …then merge history in (duplicates are dropped)
                 await reloadSettings()
-                connectStream()
             }
             lastEngineRunning = running
             try? await Task.sleep(for: .seconds(1))
@@ -71,28 +73,43 @@ final class AppModel {
 
     // MARK: Conversation
 
+    /// The API returns newest FIRST; `turns` is oldest first (chat order). Merged, not replaced, so
+    /// turns that arrived on the stream while this loaded aren't lost.
     func reloadTurns() async {
-        if let t = try? await api.recentTurns() { turns = t }
+        guard let fetched = try? await api.recentTurns() else { return }
+        var byID = Dictionary(turns.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        for t in fetched { byID[t.id] = t }
+        turns = byID.values.sorted { ($0.date ?? .distantPast, $0.id) < ($1.date ?? .distantPast, $1.id) }
+        if turns.count > 500 { turns.removeFirst(turns.count - 500) }
     }
 
+    /// The live conversation feed. Reconnects on its own if the socket drops while the engine stays
+    /// up; previously a dropped socket left Home, Conversation and the menu bar silently stale.
     private func connectStream() {
         stream?.cancel(with: .goingAway, reason: nil)
         streamTask?.cancel()
-        let task = URLSession.shared.webSocketTask(with: api.conversationStream)
-        stream = task
-        task.resume()
         streamTask = Task { [weak self] in
+            var resync = false
             while !Task.isCancelled {
-                guard let msg = try? await task.receive() else { break }
-                let data: Data?
-                switch msg {
-                case .string(let s): data = s.data(using: .utf8)
-                case .data(let d): data = d
-                @unknown default: data = nil
+                guard let self, self.engine.isRunning else { return }
+                let task = URLSession.shared.webSocketTask(with: self.api.conversationStream)
+                self.stream = task
+                task.resume()
+                if resync { await self.reloadTurns() }   // catch up on anything said while disconnected
+                while !Task.isCancelled {
+                    guard let msg = try? await task.receive() else { break }
+                    let data: Data?
+                    switch msg {
+                    case .string(let s): data = s.data(using: .utf8)
+                    case .data(let d): data = d
+                    @unknown default: data = nil
+                    }
+                    if let data, let turn = try? JSONDecoder().decode(Turn.self, from: data) {
+                        self.append(turn)
+                    }
                 }
-                if let data, let turn = try? JSONDecoder().decode(Turn.self, from: data) {
-                    self?.append(turn)
-                }
+                resync = true
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -121,12 +138,17 @@ final class AppModel {
 
     func value(_ key: String) -> JSONValue { setting(key)?.value ?? .null }
 
-    /// Optimistic: update locally, then persist. Re-reads on failure so the UI never lies.
+    /// Optimistic: update locally, then persist. On failure, re-read the true value and THEN show
+    /// why. (Setting the error before the reload let the reload's success wipe it instantly.)
     func set(_ key: String, _ value: JSONValue) {
         if let i = settings.firstIndex(where: { $0.key == key }) { settings[i].value = value }
         Task {
             do { try await api.setSetting(key, value) }
-            catch { settingsError = error.localizedDescription; await reloadSettings() }
+            catch {
+                let why = error.localizedDescription
+                await reloadSettings()
+                settingsError = "Couldn't change \u{201C}\(setting(key)?.label ?? key)\u{201D}: \(why)"
+            }
         }
     }
 
@@ -140,11 +162,19 @@ final class AppModel {
 
     // MARK: Listening
 
-    var isPaused: Bool { engine.status?.paused ?? false }
+    /// Set the moment the user flips Listening, so the switch moves immediately instead of snapping
+    /// back until the next status poll. Cleared once the engine confirms (or refuses).
+    private var pausedPending: Bool?
+    var isPaused: Bool { pausedPending ?? engine.status?.paused ?? false }
 
     func togglePaused() {
         let next = !isPaused
-        Task { try? await api.setPaused(next) }
+        pausedPending = next
+        Task {
+            try? await api.setPaused(next)
+            await engine.refreshStatus()
+            pausedPending = nil
+        }
     }
 }
 

@@ -67,7 +67,7 @@ private struct HeroActions: View {
             .controlSize(.large)
             .help(model.isPaused ? "Start listening again" : "Stop listening to the microphone. Typing still works.")
         case .stopped, .failed:
-            Button("Start Vox") { model.engine.start() }
+            Button("Start Vox") { model.boot() }
                 .buttonStyle(.borderedProminent).controlSize(.large)
         case .notInstalled:
             Button("Set Up Vox…") { NotificationCenter.default.post(name: .voxShowOnboarding, object: nil) }

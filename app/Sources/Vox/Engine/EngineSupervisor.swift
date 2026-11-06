@@ -35,8 +35,14 @@ final class EngineSupervisor {
     /// Set while engineExited is deciding what happened. The termination handler and the health
     /// poll can both notice the same exit, so without this one crash ran two recoveries.
     private var recovering = false
+    /// True between start() deciding to launch and the state settling, so a second Start press
+    /// (or onboarding re-entering the Engine step) can't spawn a second engine on the same mic.
+    private var starting = false
+    /// Consecutive failed health checks. One timeout isn't a dead engine.
+    private var failedPolls = 0
 
     var isRunning: Bool { if case .running = state { return true }; return false }
+    var isStarting: Bool { starting || state == .starting }
 
     init() {
         if !location.isReady { state = .notInstalled }
@@ -49,10 +55,18 @@ final class EngineSupervisor {
 
     // MARK: Lifecycle
 
-    /// Attach to a running engine if there is one, otherwise start ours.
+    /// Attach to a running engine if there is one, otherwise start ours. Idempotent: does nothing
+    /// while an engine is starting or running.
     func start() {
         startPolling()
+        switch state {
+        case .starting, .running: return
+        default: break
+        }
+        guard !starting else { return }
+        starting = true
         Task {
+            defer { starting = false }
             if (try? await api.status()) != nil { set(.running(owned: false)); return }
             launch()
         }
@@ -82,10 +96,16 @@ final class EngineSupervisor {
         }
     }
 
-    /// Synchronous best-effort stop for app termination.
+    /// Synchronous best-effort stop for app termination. Covers an engine Vox didn't spawn too
+    /// (after a voice "restart Vox" the engine is a new, detached process), or quitting Vox would
+    /// leave the microphone live.
     func stopForQuit() {
         stopping = true
-        if let p = process, p.isRunning { p.terminate() }
+        if let p = process, p.isRunning {
+            p.terminate()
+        } else if let pid = status?.pid, pid > 1 {
+            kill(pid_t(pid), SIGTERM)
+        }
     }
 
     private func launch() {
@@ -113,7 +133,7 @@ final class EngineSupervisor {
                 // Only the process we're tracking counts; an older one exiting late must not
                 // clear the live one.
                 guard let self, self.process === proc else { return }
-                self.engineExited(code: code)
+                self.engineExited(code: Int32?(code))
             }
         }
         do {
@@ -125,22 +145,27 @@ final class EngineSupervisor {
         }
     }
 
-    private func engineExited(code: Int32) {
+    /// `code` is the exit status of a process we spawned, or nil when the health check noticed an
+    /// engine we didn't spawn has gone.
+    private func engineExited(code: Int32?) {
         process = nil
         if stopping || recovering { return }
         recovering = true
         set(.starting)
         // The engine relaunches itself on "restart Vox" and on an unrecoverable mic error. Give the
-        // replacement a moment to come up before calling it a crash.
+        // replacement a moment to come up before deciding anything.
         Task {
             defer { recovering = false }
             for _ in 0..<40 {
                 if (try? await api.status()) != nil { set(.running(owned: false)); return }
                 try? await Task.sleep(for: .milliseconds(250))
             }
+            // A clean exit (saying "quit Vox" exits 0) or an engine we didn't start going away is the
+            // user's decision, not a crash: bringing it back would make "quit Vox" not stick.
+            guard let code, code != 0 else { set(.stopped); return }
             recentCrashes = recentCrashes.filter { $0.timeIntervalSinceNow > -120 } + [Date()]
             if recentCrashes.count >= 3 {
-                set(.failed("The engine keeps stopping (exit code \(code)). Check the log in Settings → Advanced."))
+                set(.failed("Vox's engine keeps stopping (exit code \(code)). Settings → Advanced → Open Console Output shows why."))
             } else {
                 launch()
             }
@@ -159,14 +184,23 @@ final class EngineSupervisor {
         }
     }
 
+    /// Re-read status now (after an action that changes it), instead of waiting for the next poll.
+    func refreshStatus() async {
+        if let s = try? await api.status() { status = s }
+    }
+
     private func poll() async {
         let s = try? await api.status()
-        if s != status { status = s }
+        failedPolls = s == nil ? failedPolls + 1 : 0
+        // Keep the last good status through a single slow or failed check: swapping every page for
+        // "Starting…" on one timeout closed open sheets and lost their drafts.
+        if let s, s != status { status = s }
+        if s == nil && failedPolls >= 2 { status = nil }
         switch state {
         case .starting where s != nil && !recovering:
             set(.running(owned: process != nil))
-        case .running where s == nil && process == nil && !stopping:
-            engineExited(code: -1)
+        case .running where s == nil && failedPolls >= 2 && process == nil && !stopping:
+            engineExited(code: nil)
         case .stopped where s != nil, .notInstalled where s != nil, .failed where s != nil:
             set(.running(owned: false))
         default:
