@@ -113,6 +113,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Commands → Learning: no stutters ('open arc open arc'), rants, corrections or phrasings Vox already understood. Odd ones wait for a second sighting.", "code"),
     ("echo-guard", "Voice & speed", "Vox ignores its own voice",
      "Ask something with a long answer on speakers (no headphones): Vox doesn't hear its own reply as you talking, and doesn't cut itself off.", "code"),
+    ("mic-after-reply", "Voice & speed", "Mic keeps working after Vox speaks",
+     "Have a few back-and-forths with Vox. The log used to show 'mic input stalled' about 3 s after every reply (and Vox missed what you said next); it shouldn't any more. Also watch whether your music volume still drops when Vox talks.", "code"),
     ("output-follows-device", "Voice & speed", "Replies play on the current output",
      "Switch from speakers to headphones (or back) while Vox is running: the next reply plays on the new device without a restart.", "code"),
     ("setup-voice-answers", "Vox.app", "Answer setup questions by voice",
