@@ -28,8 +28,13 @@ struct LearningReview: View {
 
     var body: some View {
         let l = store.learning
-        let suggestions = store.suggestions.filter { hit($0.phrases + [CommandWords.describe($0.intent, $0.arg), $0.context]) }
-        let learned = l.learned.filter { hit($0.phrases + [$0.label, $0.context]) }
+        // Search what the rows show, not the raw labels and context names behind them.
+        let suggestions = store.suggestions.filter {
+            hit($0.phrases + [CommandWords.describe($0.intent, $0.arg), CommandWords.place($0.context)])
+        }
+        let learned = l.learned.filter {
+            hit($0.phrases + [CommandWords.title(label: $0.label, intent: $0.intent, arg: $0.arg), CommandWords.place($0.context)])
+        }
         let aliases = (l.aliases ?? []).filter { hit([$0.text, $0.label]) }
         let rejected = l.candidates.filter { $0.blocked && hit($0.phrases + [CommandWords.describe($0.intent, $0.arg)]) }
         let nothing = suggestions.isEmpty && learned.isEmpty && aliases.isEmpty && rejected.isEmpty
@@ -57,7 +62,7 @@ struct LearningReview: View {
                         LearnedRow(command: c) { confirm = .forget(c) }
                     }
                 } header: {
-                    Text("Learned Commands")
+                    Text("Learned Commands").pageSectionHeader()
                 } footer: {
                     Text("These work now. New ones are on trial: if you don't use them enough, Vox lets them go on its own.")
                         .foregroundStyle(.secondary)
@@ -70,7 +75,7 @@ struct LearningReview: View {
                         AliasRow(alias: a) { confirm = .unalias(a) }
                     }
                 } header: {
-                    Text("New Ways to Say Things")
+                    Text("New Ways to Say Things").pageSectionHeader()
                 } footer: {
                     Text("Vox already knew how to do these, so it added your wording to the existing command. These work now.")
                         .foregroundStyle(.secondary)
@@ -83,7 +88,7 @@ struct LearningReview: View {
                         SuggestionRow(candidate: c, onApprove: { store.approve(c) }, onReject: { store.reject(c) })
                     }
                 } header: {
-                    Text("Suggestions")
+                    Text("Suggestions").pageSectionHeader()
                 } footer: {
                     Text("Suggestions don't do anything yet. Approve one and it becomes a command. Reject it and Vox won't suggest it again.")
                         .foregroundStyle(.secondary)

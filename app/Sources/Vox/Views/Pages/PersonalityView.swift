@@ -6,6 +6,7 @@ struct PersonalityView: View {
     @State private var data: Personalities?
     @State private var sayVoices: [String] = []
     @State private var error: String?
+    @State private var loadError: String?
     @State private var editing: EditTarget?
     @State private var pendingDelete: Personality?
 
@@ -19,9 +20,16 @@ struct PersonalityView: View {
     var body: some View {
         RequiresEngine {
             Group {
-                if let data { content(data) } else { PageLoading() }
+                if let data {
+                    content(data)
+                } else if let loadError {
+                    LoadErrorView(title: "Couldn't load personalities", message: loadError) { Task { await load() } }
+                } else {
+                    PageLoading()
+                }
             }
-            .inlineError($error)
+            .pageErrors($error, loadError: $loadError, loaded: data != nil)
+            .refreshesPage(load)
             .toolbar {
                 ToolbarItem {
                     Button("New Personality", systemImage: "plus") { editing = .new }
@@ -37,7 +45,6 @@ struct PersonalityView: View {
             } message: { p in
                 Text(p.id == data?.active ? "Vox will go back to its default personality." : "This can't be undone.")
             }
-            .task { await load() }
         }
     }
 
@@ -91,10 +98,9 @@ struct PersonalityView: View {
     private func load() async {
         do {
             data = try await model.api.get("personalities")
-            error = nil
+            loadError = nil
         } catch {
-            self.error = "Couldn't load personalities. \(error.localizedDescription)"
-            if data == nil { data = Personalities(active: "", presets: [], custom: []) }
+            loadError = ErrorWords.reason(error)
         }
         if sayVoices.isEmpty, let v: [String: [String]] = try? await model.api.get("voices") { sayVoices = v["voices"] ?? [] }
     }
@@ -104,7 +110,7 @@ struct PersonalityView: View {
         withAnimation(.smooth) { data?.active = p.id }
         Task {
             do { try await model.api.post("personalities/active", ["id": .string(p.id)]) }
-            catch { self.error = "Couldn't switch to \(p.name). \(error.localizedDescription)"; await load() }
+            catch { self.error = ErrorWords.message("Couldn't switch to \(p.name).", error); await load() }
         }
     }
 
@@ -112,7 +118,7 @@ struct PersonalityView: View {
         let key = voiceChoices.kokoro ? "kokoroVoice" : "suggestedVoice"
         Task {
             do { try await model.api.patch("personalities/\(p.id)/voice", [key: .string(voice)]); await load() }
-            catch { self.error = "Couldn't change the voice. \(error.localizedDescription)"; await load() }
+            catch { self.error = ErrorWords.message("Couldn't change the voice.", error); await load() }
         }
     }
 
@@ -129,7 +135,7 @@ struct PersonalityView: View {
             await load()
             return nil
         } catch {
-            return error.localizedDescription
+            return ErrorWords.message(original == nil ? "Couldn't create that personality." : "Couldn't save your changes.", error)
         }
     }
 
@@ -137,7 +143,7 @@ struct PersonalityView: View {
         withAnimation(.smooth) { data?.custom.removeAll { $0.id == p.id } }
         Task {
             do { try await model.api.delete("personalities/custom/\(p.id)") }
-            catch { self.error = "Couldn't delete \(p.name). \(error.localizedDescription)" }
+            catch { self.error = ErrorWords.message("Couldn't delete \(p.name).", error) }
             await load()
         }
     }
@@ -407,19 +413,22 @@ private struct PersonaEditor: View {
                 Section {
                     VoicePicker(title: "Voice", choices: voices, selection: $draft.voice)
                 }
-                if let error {
-                    Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
-                }
             }
             .formStyle(.grouped)
+            if let error {
+                ErrorBanner(message: error).padding(.horizontal, Metrics.gap + 4).padding(.bottom, Metrics.gap)
+            }
 
             Divider()
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                // ⌘Return, not Return: Return starts a new line in "How they talk".
                 Button(original == nil ? "Create" : "Save", action: save)
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
                     .disabled(!valid || saving)
+                    .help("\(original == nil ? "Create" : "Save") (⌘Return)")
             }
             .padding(Metrics.gap)
         }

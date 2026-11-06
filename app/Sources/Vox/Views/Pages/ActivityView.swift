@@ -7,21 +7,18 @@ struct ActivityView: View {
     @State private var summary: UsageSummary?
     @State private var recent: [UsageEvent] = []
     @State private var budget: BudgetStatus?
-    @State private var error: String?
+    @State private var loadError: String?
 
     var body: some View {
         RequiresEngine {
             content
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.help("Refresh")
-                    }
-                }
+                .pageErrors(.constant(nil), loadError: $loadError, loaded: summary != nil)
+                .refreshesPage(load)
                 .task {
                     // Keep the numbers current while the page is open.
                     while !Task.isCancelled {
-                        await load()
                         try? await Task.sleep(for: .seconds(30))
+                        if !Task.isCancelled { await load() }
                     }
                 }
         }
@@ -35,19 +32,16 @@ struct ActivityView: View {
                                        description: Text("Each time Vox asks a brain for help, the cost and reply time show up here."))
             } else {
                 PageScroll {
-                    if let error { ErrorLine(text: error) }
                     Tiles(summary: summary, recent: recent, budget: budget)
                     DailyCost(days: summary.byDay)
                     ByModel(models: summary.byModel, recent: recent)
                     RecentCalls(events: recent)
                 }
             }
-        } else if let error {
-            ContentUnavailableView {
-                Label("Couldn't load activity", systemImage: "exclamationmark.triangle")
-            } description: { Text(error) } actions: { Button("Try Again") { Task { await load() } } }
+        } else if let loadError {
+            LoadErrorView(title: "Couldn't load activity", message: loadError) { Task { await load() } }
         } else {
-            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            PageLoading()
         }
     }
 
@@ -56,8 +50,8 @@ struct ActivityView: View {
             async let s: UsageSummary = model.api.get("usage/summary")
             async let r: [UsageEvent] = model.api.get("usage/recent?limit=200")
             (summary, recent) = try await (s, r)
-            error = nil
-        } catch { self.error = error.localizedDescription }
+            loadError = nil
+        } catch { loadError = ErrorWords.reason(error) }
         // Budget answers {error} when unavailable; the page works without it.
         budget = try? await model.api.get("budget")
     }
@@ -312,12 +306,5 @@ private enum Fmt {
         case "rewrite": "Rewriting text"
         default: e.brain == "big" ? "Hard question" : "Quick reply"
         }
-    }
-}
-
-private struct ErrorLine: View {
-    var text: String
-    var body: some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.red)
     }
 }

@@ -12,63 +12,92 @@ struct VoiceLabView: View {
     @State private var activePrompt: VoicePrompt?
     @State private var lastResult: VoiceSample?
     @State private var error: String?
+    @State private var loadError: String?
     @State private var player: AVAudioPlayer?
     @State private var loaded = false
+    @State private var pendingDelete: VoiceSample?
+
+    private static let free = VoicePrompt(category: "free", text: "", why: "")
+    private var recordingFree: Bool { recorder.isRecording && activePrompt?.category == Self.free.category }
 
     var body: some View {
         RequiresEngine {
-            PageScroll {
-                intro
-                if let error {
-                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.callout)
-                }
-                if !loaded {
-                    ProgressView().frame(maxWidth: .infinity).padding(.top, 40)
+            Group {
+                if loaded {
+                    page
+                } else if let loadError {
+                    LoadErrorView(title: "Couldn't load Voice Lab", message: loadError) { Task { await load() } }
                 } else {
-                    ForEach(categories, id: \.self) { cat in
-                        SectionLabel(Self.title(for: cat))
-                        Card(padding: 0) {
-                            VStack(spacing: 0) {
-                                let rows = prompts.filter { $0.category == cat }
-                                ForEach(Array(rows.enumerated()), id: \.element.id) { i, p in
-                                    promptRow(p)
-                                    if i < rows.count - 1 { Divider().padding(.leading, Metrics.gap) }
-                                }
-                            }
-                        }
-                    }
-                    SectionLabel("Your recordings (\(samples.count))")
-                    if samples.isEmpty {
-                        Text("Nothing recorded yet.").foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity).padding(.vertical, 20)
-                    } else {
-                        Card(padding: 0) {
-                            VStack(spacing: 0) {
-                                ForEach(Array(samples.enumerated()), id: \.element.id) { i, s in
-                                    sampleRow(s)
-                                    if i < samples.count - 1 { Divider().padding(.leading, Metrics.gap) }
-                                }
-                            }
-                        }
-                    }
+                    PageLoading()
                 }
             }
+            .pageErrors($error, loadError: $loadError, loaded: loaded)
+            .refreshesPage(load)
             .toolbar {
                 ToolbarItem {
                     Button {
-                        toggle(VoicePrompt(category: "free", text: "", why: ""))
+                        toggle(Self.free)
                     } label: {
-                        Label("Record Anything", systemImage: "record.circle")
+                        Label(recordingFree ? "Stop Recording" : "Record Anything",
+                              systemImage: recordingFree ? "stop.circle.fill" : "record.circle")
                     }
-                    .help("Record any phrase. It's named from what Vox hears.")
-                    .disabled(recorder.isRecording && activePrompt?.category != "free")
+                    .help(recordingFree ? "Stop and save" : "Record any phrase. It's named from what Vox hears.")
+                    .disabled(recorder.isRecording && !recordingFree)
                 }
             }
-            .task { await load() }
+            .confirmationDialog("Delete this recording?", isPresented: deleteBinding, titleVisibility: .visible,
+                                presenting: pendingDelete) { s in
+                Button("Delete Recording", role: .destructive) { Task { await delete(s) } }
+            } message: { _ in
+                Text("This can't be undone.")
+            }
             .onChange(of: recorder.elapsed) { _, t in
                 if t > 20 && recorder.isRecording { Task { await finish() } }   // safety cap, still saved
             }
+            // Leaving mid-recording still saves the clip, and hands the microphone back to Vox.
+            .onDisappear { if recorder.isRecording { Task { await finish() } } }
         }
+    }
+
+    private var page: some View {
+        PageScroll {
+            if recordingFree {
+                RecordingBanner(recorder: recorder) { Task { await finish() } }
+            }
+            intro
+            ForEach(categories, id: \.self) { cat in
+                SectionLabel(Self.title(for: cat))
+                Card(padding: 0) {
+                    VStack(spacing: 0) {
+                        let rows = prompts.filter { $0.category == cat }
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { i, p in
+                            promptRow(p)
+                            if i < rows.count - 1 { Divider().padding(.leading, Metrics.gap) }
+                        }
+                    }
+                }
+            }
+            SectionLabel("Your recordings (\(samples.count))")
+            if samples.isEmpty {
+                ContentUnavailableView("Nothing recorded yet", systemImage: "waveform",
+                                       description: Text("Record a phrase above, or anything you like with Record Anything."))
+            } else {
+                Card(padding: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(samples.enumerated()), id: \.element.id) { i, s in
+                            SampleRow(sample: s, isNew: lastResult?.id == s.id,
+                                      onPlay: { play(s) }, onDelete: { pendingDelete = s })
+                            if i < samples.count - 1 { Divider().padding(.leading, Metrics.gap) }
+                        }
+                    }
+                }
+            }
+        }
+        .animation(.smooth, value: recordingFree)
+    }
+
+    private var deleteBinding: Binding<Bool> {
+        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
     }
 
     private var categories: [String] {
@@ -81,6 +110,7 @@ struct VoiceLabView: View {
         Card {
             HStack(alignment: .top, spacing: 14) {
                 Image(systemName: "waveform.badge.mic").font(.title).foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Teach Vox your voice").font(.headline)
                     Text("Record a few of these so changes to listening can be tested on how you actually speak. Click a phrase's record button, say it, then click stop. Vox stops listening while you record.")
@@ -106,14 +136,15 @@ struct VoiceLabView: View {
             } else if count > 0 {
                 Label("\(count)", systemImage: "checkmark.circle.fill").labelStyle(.titleAndIcon)
                     .font(.callout).foregroundStyle(.green)
+                    .accessibilityLabel(count == 1 ? "Recorded once" : "Recorded \(count) times")
             }
-            recordButton(recordingThis) { toggle(p) }
+            recordButton(recordingThis, phrase: p.text) { toggle(p) }
                 .disabled(recorder.isRecording && !recordingThis)
         }
         .padding(.horizontal, Metrics.gap).padding(.vertical, 10)
     }
 
-    private func recordButton(_ recording: Bool, action: @escaping () -> Void) -> some View {
+    private func recordButton(_ recording: Bool, phrase: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: recording ? "stop.circle.fill" : "record.circle")
                 .font(.title2)
@@ -122,27 +153,7 @@ struct VoiceLabView: View {
         }
         .buttonStyle(.plain)
         .help(recording ? "Stop and save" : "Record")
-    }
-
-    private func sampleRow(_ s: VoiceSample) -> some View {
-        HStack(spacing: 12) {
-            Button { play(s) } label: { Image(systemName: "play.circle").font(.title3) }
-                .buttonStyle(.plain).foregroundStyle(Color.accentColor).help("Play")
-            VStack(alignment: .leading, spacing: 2) {
-                Text(s.transcript.isEmpty ? "(Vox heard nothing)" : "\u{201C}\(s.transcript)\u{201D}")
-                    .foregroundStyle(s.transcript.isEmpty ? .secondary : .primary)
-                Text([s.prompt.isEmpty ? nil : "Asked: \(s.prompt)", String(format: "%.1f s", Double(s.durationMs) / 1000)]
-                    .compactMap { $0 }.joined(separator: " · "))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if lastResult?.id == s.id { Text("New").font(.caption2.weight(.semibold)).foregroundStyle(.white)
-                .padding(.horizontal, 6).padding(.vertical, 2).background(Color.accentColor, in: Capsule()) }
-            Button(role: .destructive) { Task { await delete(s) } } label: { Image(systemName: "trash") }
-                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Delete this recording")
-        }
-        .padding(.horizontal, Metrics.gap).padding(.vertical, 10)
-        .contextMenu { Button("Delete", role: .destructive) { Task { await delete(s) } } }
+        .accessibilityLabel(recording ? "Stop recording" : "Record \u{201C}\(phrase)\u{201D}")
     }
 
     // MARK: Actions
@@ -150,9 +161,10 @@ struct VoiceLabView: View {
     private func load() async {
         do {
             let r: VoiceLabList = try await model.api.get("samples")
-            samples = r.samples; prompts = r.prompts; error = nil
-        } catch { self.error = error.localizedDescription }
-        loaded = true
+            samples = r.samples; prompts = r.prompts
+            loaded = true
+            loadError = nil
+        } catch { loadError = ErrorWords.reason(error) }
     }
 
     private func toggle(_ p: VoicePrompt) {
@@ -172,7 +184,7 @@ struct VoiceLabView: View {
             try recorder.start()
             activePrompt = p
         } catch {
-            self.error = "Couldn't start recording: \(error.localizedDescription)"
+            self.error = "Couldn't start recording. Check that Vox is allowed to use the microphone in System Settings."
             if !wasPaused { try? await model.api.setPaused(false) }
         }
     }
@@ -189,22 +201,27 @@ struct VoiceLabView: View {
             ])
             lastResult = s
             samples.insert(s, at: 0)
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = ErrorWords.message("Couldn't save that recording.", error) }
     }
 
     private func play(_ s: VoiceSample) {
         Task {
             var req = URLRequest(url: URL(string: "http://127.0.0.1:\(model.api.port)/api/samples/\(s.id)/audio")!)
             req.timeoutInterval = 5
-            guard let (data, _) = try? await URLSession.shared.data(for: req) else { return }
-            player = try? AVAudioPlayer(data: data)
-            player?.play()
+            guard let (data, _) = try? await URLSession.shared.data(for: req),
+                  let p = try? AVAudioPlayer(data: data) else {
+                error = "Couldn't play that recording."
+                return
+            }
+            player = p
+            p.play()
         }
     }
 
     private func delete(_ s: VoiceSample) async {
-        samples.removeAll { $0.id == s.id }
-        do { try await model.api.delete("samples/\(s.id)") } catch { await load() }
+        withAnimation(.smooth) { samples.removeAll { $0.id == s.id } }
+        do { try await model.api.delete("samples/\(s.id)") }
+        catch { self.error = ErrorWords.message("Couldn't delete that recording.", error); await load() }
     }
 
     static func title(for category: String) -> String {
@@ -230,6 +247,76 @@ private struct LevelMeter: View {
             }
         }
         .animation(.linear(duration: 0.1), value: level)
+        .accessibilityLabel("Microphone level")
+        .accessibilityValue("\(Int(max(0, min(1, level)) * 100)) percent")
+    }
+}
+
+/// One saved clip: play it, see what Vox heard. Delete appears on hover or from the context menu.
+private struct SampleRow: View {
+    var sample: VoiceSample
+    var isNew: Bool
+    var onPlay: () -> Void
+    var onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onPlay) { Image(systemName: "play.circle").font(.title3) }
+                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                .help("Play").accessibilityLabel("Play recording")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sample.transcript.isEmpty ? "(Vox heard nothing)" : "\u{201C}\(sample.transcript)\u{201D}")
+                    .foregroundStyle(sample.transcript.isEmpty ? .secondary : .primary)
+                Text([sample.prompt.isEmpty ? nil : "Asked: \(sample.prompt)", String(format: "%.1f s", Double(sample.durationMs) / 1000)]
+                    .compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if isNew {
+                Text("New").font(.caption2.weight(.semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 6).padding(.vertical, 2).background(Color.accentColor, in: Capsule())
+            }
+            HoverDeleteButton(visible: hovering, help: "Delete Recording", action: onDelete)
+        }
+        .padding(.horizontal, Metrics.gap).padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Button("Play", action: onPlay)
+            Divider()
+            Button("Delete…", role: .destructive, action: onDelete)
+        }
+    }
+}
+
+/// Shown at the top of the page while "Record Anything" is recording: level, time, and Stop.
+private struct RecordingBanner: View {
+    var recorder: SampleRecorder
+    var onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "record.circle.fill").font(.title2).foregroundStyle(.red)
+                .symbolEffect(.pulse)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Recording…").font(.headline)
+                Text("Say anything. Vox isn't listening for commands until you stop.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            LevelMeter(level: recorder.level).frame(width: 80, height: 6)
+            Text(String(format: "%.1f s", recorder.elapsed))
+                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                .frame(minWidth: 44, alignment: .trailing)
+            Button("Stop", systemImage: "stop.fill", action: onStop)
+                .controlSize(.large)
+                .help("Stop and save")
+        }
+        .padding(Metrics.gap)
+        .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: Metrics.radius, style: .continuous))
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 }
 
@@ -242,7 +329,8 @@ final class SampleRecorder {
     private(set) var elapsed: Double = 0
     var restorePaused = false
     private var recorder: AVAudioRecorder?
-    private var timer: Timer?
+    /// Read from `deinit`, which isn't on the main actor; only ever touched on the main thread.
+    @ObservationIgnored nonisolated(unsafe) private var timer: Timer?
     private let url = FileManager.default.temporaryDirectory.appending(path: "vox-voice-lab.wav")
 
     func start() throws {
@@ -264,6 +352,10 @@ final class SampleRecorder {
                 self.elapsed = r.currentTime
             }
         }
+    }
+
+    deinit {
+        timer?.invalidate()
     }
 
     func stop() -> Data? {

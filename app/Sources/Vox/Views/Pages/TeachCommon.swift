@@ -1,45 +1,20 @@
 import AppKit
 import SwiftUI
 
-// Small pieces shared by the Teach Vox pages (Personality, Commands, Vocabulary, Rules).
-
-/// A failed request, shown in place at the top of a page. Dismissable; never a modal.
-struct InlineError: View {
-    var message: String
-    var onDismiss: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text(message).lineLimit(3)
-            Spacer(minLength: 8)
-            Button("Dismiss", systemImage: "xmark", action: onDismiss)
-                .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(.secondary)
-        }
-        .font(.callout)
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .padding(.horizontal, Metrics.page).padding(.top, Metrics.tight)
-        .transition(.move(edge: .top).combined(with: .opacity))
-    }
-}
-
-extension View {
-    /// Pins an `InlineError` above the page content while `error` is set.
-    func inlineError(_ error: Binding<String?>) -> some View {
-        safeAreaInset(edge: .top, spacing: 0) {
-            if let message = error.wrappedValue {
-                InlineError(message: message) { withAnimation(.smooth) { error.wrappedValue = nil } }
-            }
-        }
-        .animation(.smooth, value: error.wrappedValue)
-    }
-}
+// Small pieces shared by the pages.
 
 /// The centred spinner a page shows before its first load lands.
 struct PageLoading: View {
     var body: some View {
         ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+extension View {
+    /// The small grey look of `SectionLabel`, for section headers inside a Form or List, so every
+    /// page's headers match whatever layout it uses.
+    func pageSectionHeader() -> some View {
+        font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
     }
 }
 

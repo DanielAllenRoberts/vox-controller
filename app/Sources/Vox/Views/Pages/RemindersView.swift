@@ -5,6 +5,8 @@ struct RemindersView: View {
     @Environment(AppModel.self) private var model
     @State private var reminders: [Reminder]?
     @State private var error: String?
+    @State private var loadError: String?
+    @State private var loadedAt = Date.distantPast
     @State private var adding = false
     @State private var selection = Set<String>()
     @State private var deleting: [Reminder] = []
@@ -12,12 +14,20 @@ struct RemindersView: View {
     var body: some View {
         RequiresEngine {
             content
+                .pageErrors($error, loadError: $loadError, loaded: reminders != nil)
+                .refreshesPage(load)
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
                         Button("New Reminder", systemImage: "plus") { adding = true }.help("Set a timer, alarm or reminder")
                     }
                 }
-                .task { await load() }
+                .task(id: nextFire) {
+                    // Re-read just after the next one goes off: the engine drops a finished timer
+                    // and moves a repeating one on, so the list never says "Due now" for long.
+                    guard let next = nextFire else { return }
+                    try? await Task.sleep(for: .seconds(max(0, next.timeIntervalSinceNow) + 2))
+                    if !Task.isCancelled { await load() }
+                }
                 .sheet(isPresented: $adding) {
                     ReminderEditor { body in Task { await add(body) } }
                 }
@@ -30,6 +40,11 @@ struct RemindersView: View {
                     Text("It won't go off.")
                 }
         }
+    }
+
+    /// The soonest time something goes off after the last load.
+    private var nextFire: Date? {
+        reminders?.compactMap(\.fireDate).filter { $0 > loadedAt }.min()
     }
 
     private var deleteTitle: String {
@@ -48,16 +63,13 @@ struct RemindersView: View {
                 } actions: {
                     Button("New Reminder") { adding = true }
                 }
-                .overlay(alignment: .top) { if let error { ErrorLine(text: error).padding() } }
             } else {
                 list(reminders)
             }
-        } else if let error {
-            ContentUnavailableView {
-                Label("Couldn't load reminders", systemImage: "exclamationmark.triangle")
-            } description: { Text(error) } actions: { Button("Try Again") { Task { await load() } } }
+        } else if let loadError {
+            LoadErrorView(title: "Couldn't load reminders", message: loadError) { Task { await load() } }
         } else {
-            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            PageLoading()
         }
     }
 
@@ -66,10 +78,11 @@ struct RemindersView: View {
         TimelineView(.periodic(from: .now, by: 30)) { tl in
             let groups = Self.group(all, now: tl.date)
             List(selection: $selection) {
-                if let error { ErrorLine(text: error) }
                 ForEach(groups, id: \.0) { title, items in
-                    Section(title) {
+                    Section {
                         ForEach(items) { r in ReminderRow(reminder: r, now: tl.date).tag(r.id) }
+                    } header: {
+                        Text(title).pageSectionHeader()
                     }
                 }
             }
@@ -106,13 +119,17 @@ struct RemindersView: View {
     // MARK: Data
 
     private func load() async {
-        do { reminders = try await model.api.get("reminders"); error = nil }
-        catch { self.error = error.localizedDescription }
+        do {
+            let now = Date.now
+            reminders = try await model.api.get("reminders")
+            loadedAt = now
+            loadError = nil
+        } catch { loadError = ErrorWords.reason(error) }
     }
 
     private func add(_ body: ReminderAddBody) async {
         do { try await model.api.send("reminders", body); error = nil }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = ErrorWords.message("Couldn't set that \(KindInfo(body.kind).name.lowercased()).", error) }
         await load()
     }
 
@@ -123,7 +140,7 @@ struct RemindersView: View {
         do {
             for id in ids { try await model.api.delete("reminders/\(id)") }
             error = nil
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = ErrorWords.message("Couldn't cancel that.", error) }
         await load()
     }
 }
@@ -281,12 +298,5 @@ private struct ReminderEditor: View {
         let fire = isTimer ? Date.now.addingTimeInterval(Double(max(minutes, 1)) * 60) : when
         return ReminderAddBody(kind: kind, text: text.trimmingCharacters(in: .whitespacesAndNewlines),
                                fireAt: LocalISO.string(fire), recurrence: isTimer || repeats.isEmpty ? nil : repeats)
-    }
-}
-
-private struct ErrorLine: View {
-    var text: String
-    var body: some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.red)
     }
 }

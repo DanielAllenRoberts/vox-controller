@@ -6,6 +6,7 @@ struct RulesView: View {
     @State private var rules: [Rule] = []
     @State private var loaded = false
     @State private var error: String?
+    @State private var loadError: String?
     @State private var draft = ""
     @State private var pendingDelete: Rule?
     @FocusState private var addFocused: Bool
@@ -15,9 +16,16 @@ struct RulesView: View {
     var body: some View {
         RequiresEngine {
             Group {
-                if loaded { form } else { PageLoading() }
+                if loaded {
+                    form
+                } else if let loadError {
+                    LoadErrorView(title: "Couldn't load your rules", message: loadError) { Task { await load() } }
+                } else {
+                    PageLoading()
+                }
             }
-            .inlineError($error)
+            .pageErrors($error, loadError: $loadError, loaded: loaded)
+            .refreshesPage(load)
             .toolbar {
                 ToolbarItem {
                     Button("New Rule", systemImage: "plus") { addFocused = true }
@@ -30,7 +38,6 @@ struct RulesView: View {
             } message: { rule in
                 Text("\u{201C}\(rule.text)\u{201D}\nVox will stop following it.")
             }
-            .task { await load() }
         }
     }
 
@@ -68,7 +75,7 @@ struct RulesView: View {
                 }
             } header: {
                 if !rules.isEmpty {
-                    Text(rules.count == 1 ? "1 rule" : "\(rules.count) rules")
+                    Text(rules.count == 1 ? "1 rule" : "\(rules.count) rules").pageSectionHeader()
                 }
             }
         }
@@ -82,9 +89,8 @@ struct RulesView: View {
     // MARK: Data
 
     private func load() async {
-        do { rules = try await model.api.get("rules"); error = nil }
-        catch { self.error = "Couldn't load your rules. \(error.localizedDescription)" }
-        loaded = true
+        do { rules = try await model.api.get("rules"); loaded = true; loadError = nil }
+        catch { loadError = ErrorWords.reason(error) }
     }
 
     private func add() {
@@ -93,7 +99,7 @@ struct RulesView: View {
         draft = ""
         Task {
             do { try await model.api.post("rules", ["text": .string(text)]); await load() }
-            catch { draft = text; self.error = "Couldn't add that rule. \(error.localizedDescription)" }
+            catch { draft = text; self.error = ErrorWords.message("Couldn't add that rule.", error) }
         }
     }
 
@@ -113,7 +119,7 @@ struct RulesView: View {
         withAnimation(.smooth) { rules.removeAll { $0.id == rule.id } }
         Task {
             do { try await model.api.delete("rules/\(rule.id)") }
-            catch { self.error = "Couldn't delete that rule. \(error.localizedDescription)"; await load() }
+            catch { self.error = ErrorWords.message("Couldn't delete that rule.", error); await load() }
         }
     }
 
@@ -124,7 +130,7 @@ struct RulesView: View {
         change(&rules[i])
         Task {
             do { try await send() }
-            catch { self.error = "\(failure) \(error.localizedDescription)"; await load() }
+            catch { self.error = ErrorWords.message(failure, error); await load() }
         }
     }
 }

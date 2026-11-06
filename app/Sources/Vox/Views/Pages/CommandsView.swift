@@ -12,15 +12,23 @@ struct CommandsView: View {
     var body: some View {
         RequiresEngine {
             Group {
-                if !store.loaded {
-                    PageLoading()
-                } else if tab == .all {
-                    CommandList(store: store, search: search)
+                if store.loaded {
+                    if tab == .all {
+                        CommandList(store: store, search: search)
+                    } else {
+                        LearningReview(store: store, search: search)
+                    }
+                } else if let loadError = store.loadError {
+                    LoadErrorView(title: "Couldn't load commands", message: loadError) { Task { await store.load() } }
                 } else {
-                    LearningReview(store: store, search: search)
+                    PageLoading()
                 }
             }
-            .inlineError($store.error)
+            .pageErrors($store.error, loadError: $store.loadError, loaded: store.loaded)
+            .refreshesPage {
+                store.api = model.api
+                await store.load()
+            }
             .searchable(text: $search, prompt: tab == .all ? "Search commands" : "Search what Vox learned")
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -32,10 +40,6 @@ struct CommandsView: View {
                     .labelsHidden()
                     .fixedSize()
                 }
-            }
-            .task {
-                store.api = model.api
-                await store.load()
             }
         }
     }
@@ -51,7 +55,9 @@ final class CommandsStore {
     var contexts: [CommandContext] = []
     var learning = LearningView(mode: "off", aliases: [], learned: [], candidates: [])
     var loaded = false
+    /// The latest change that failed, and the latest load that failed.
     var error: String?
+    var loadError: String?
 
     var suggestions: [LearningCandidate] { learning.candidates.filter { !$0.blocked } }
 
@@ -60,11 +66,11 @@ final class CommandsStore {
             async let db: CommandDb = api.get("commands")
             async let lv: LearningView = api.get("commands/learning")
             (contexts, learning) = try await (db.contexts, lv)
-            error = nil
+            loaded = true
+            loadError = nil
         } catch {
-            self.error = "Couldn't load commands. \(error.localizedDescription)"
+            loadError = ErrorWords.reason(error)
         }
-        loaded = true
     }
 
     func command(_ id: Int) -> (CommandContext, Command)? {
@@ -91,7 +97,7 @@ final class CommandsStore {
             editCommand(commandId) { cmd in if !cmd.phrases.contains(where: { $0.id == p.id }) { cmd.phrases.append(p) } }
             return nil
         } catch {
-            return error.localizedDescription
+            return ErrorWords.message("Couldn't add that phrase.", error)
         }
     }
 
@@ -127,7 +133,7 @@ final class CommandsStore {
     private func send(_ failure: String, reloadAfter: Bool = false, _ op: @escaping () async throws -> Void) {
         Task {
             do { try await op(); if reloadAfter { await load() } }
-            catch { self.error = "\(failure) \(error.localizedDescription)"; await load() }
+            catch { self.error = ErrorWords.message(failure, error); await load() }
         }
     }
 }
@@ -187,13 +193,17 @@ private struct CommandList: View {
 
     private var query: String { search.trimmingCharacters(in: .whitespaces).lowercased() }
 
-    private func matches(_ c: Command) -> Bool {
-        query.isEmpty || c.label.lowercased().contains(query) || c.phrases.contains { $0.text.contains(query) }
+    /// Searches what the rows show: the command's title, its phrases, and where it works.
+    private func matches(_ c: Command, in ctx: CommandContext) -> Bool {
+        query.isEmpty
+            || CommandWords.title(label: c.label, intent: c.intent, arg: c.arg).lowercased().contains(query)
+            || c.phrases.contains { $0.text.lowercased().contains(query) }
+            || ctx.displayName.lowercased().contains(query)
     }
 
     var body: some View {
         let groups = store.contexts.compactMap { ctx -> (CommandContext, [Command])? in
-            let cmds = ctx.commands.filter(matches)
+            let cmds = ctx.commands.filter { matches($0, in: ctx) }
             return cmds.isEmpty ? nil : (ctx, cmds)
         }
         Group {
@@ -352,6 +362,8 @@ struct SourceTag: View {
 
 // MARK: Phrase editor
 
+/// Phrases save as you go. Return adds the phrase you typed; ⌘Return or Done adds anything still
+/// typed and closes; Escape closes without adding it.
 private struct PhraseEditor: View {
     var store: CommandsStore
     var commandId: Int
@@ -360,6 +372,9 @@ private struct PhraseEditor: View {
     @State private var draft = ""
     @State private var error: String?
     @State private var adding = false
+    @FocusState private var fieldFocused: Bool
+
+    private var pending: String { draft.trimmingCharacters(in: .whitespaces) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -389,15 +404,16 @@ private struct PhraseEditor: View {
                         HStack(spacing: 8) {
                             TextField("Another way to say it", text: $draft, prompt: Text("Add another way to say it"))
                                 .labelsHidden().textFieldStyle(.plain)
+                                .focused($fieldFocused)
                                 .onSubmit { add(cmd.id) }
                             Button("Add") { add(cmd.id) }
-                                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty || adding)
+                                .disabled(pending.isEmpty || adding)
                         }
                     } header: {
                         Text("You can say")
                     } footer: {
                         if let error {
-                            Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            ErrorBanner(message: error)
                         } else {
                             Text(cmd.phrases.contains { $0.matchType == "exact" }
                                  ? "Vox runs this command when it hears any of these, even inside a longer sentence. Exact matches only count when said on their own."
@@ -413,21 +429,45 @@ private struct PhraseEditor: View {
             Divider()
             HStack {
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Done", action: done)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(adding)
+                    .help("Close (⌘Return)")
             }
             .padding(Metrics.gap)
+            .background {
+                // Escape closes. A sheet only hears Escape through a cancel button, and there's
+                // nothing to cancel here: every phrase is already saved.
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction).opacity(0).accessibilityHidden(true)
+            }
         }
         .frame(width: 460, height: 440)
+        .onAppear { fieldFocused = true }
     }
 
     private func add(_ id: Int) {
-        let t = draft.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty, !adding else { return }
+        Task { await addPending(id) }
+    }
+
+    /// Adds what's typed, if anything. Returns false when that failed.
+    @discardableResult
+    private func addPending(_ id: Int) async -> Bool {
+        let t = pending
+        guard !t.isEmpty, !adding else { return true }
         adding = true
+        error = await store.addPhrase(id, t)
+        if error == nil { draft = "" }
+        adding = false
+        fieldFocused = true
+        return error == nil
+    }
+
+    /// Done keeps a phrase that was typed but not added yet, then closes.
+    private func done() {
         Task {
-            error = await store.addPhrase(id, t)
-            if error == nil { draft = "" }
-            adding = false
+            guard let (_, cmd) = store.command(commandId) else { dismiss(); return }
+            if await addPending(cmd.id) { dismiss() }
         }
     }
 }

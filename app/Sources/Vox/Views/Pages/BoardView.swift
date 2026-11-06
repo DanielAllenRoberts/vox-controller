@@ -6,6 +6,7 @@ struct BoardView: View {
     @Environment(AppModel.self) private var model
     @State private var board: Board?
     @State private var error: String?
+    @State private var loadError: String?
     @State private var editing: BoardCard?
     @State private var deleting: BoardCard?
     @State private var addingList = false
@@ -14,13 +15,14 @@ struct BoardView: View {
     var body: some View {
         RequiresEngine {
             content
+                .pageErrors($error, loadError: $loadError, loaded: board != nil)
+                .refreshesPage(load)
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
                         Button("Add List", systemImage: "plus") { newListName = ""; addingList = true }
                             .help("Add a list")
                     }
                 }
-                .task { await load() }
                 .sheet(item: $editing) { card in
                     CardEditor(card: card) { title, body, tags in
                         Task { await save(card, title: title, body: body, tags: tags) }
@@ -56,43 +58,38 @@ struct BoardView: View {
                     Button("Add List") { newListName = ""; addingList = true }
                 }
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let error { ErrorLine(text: error).padding(.horizontal, Metrics.page).padding(.top, 12) }
-                    ScrollView(.horizontal) {
-                        HStack(alignment: .top, spacing: Metrics.gap) {
-                            ForEach(board.lists) { list in
-                                ListColumn(list: list, others: board.lists.filter { $0.id != list.id },
-                                           onOpen: { editing = $0 },
-                                           onDelete: { deleting = $0 },
-                                           onAdd: { title in Task { await addCard(title, to: list) } },
-                                           onMove: { id, listId, before in Task { await move(id, to: listId, before: before) } })
-                            }
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: Metrics.gap) {
+                        ForEach(board.lists) { list in
+                            ListColumn(list: list, others: board.lists.filter { $0.id != list.id },
+                                       onOpen: { editing = $0 },
+                                       onDelete: { deleting = $0 },
+                                       onAdd: { title in Task { await addCard(title, to: list) } },
+                                       onMove: { id, listId, before in Task { await move(id, to: listId, before: before) } })
                         }
-                        .padding(Metrics.page)
-                        .frame(maxHeight: .infinity, alignment: .top)
                     }
+                    .padding(Metrics.page)
+                    .frame(maxHeight: .infinity, alignment: .top)
                 }
             }
-        } else if let error {
-            ContentUnavailableView {
-                Label("Couldn't load the board", systemImage: "exclamationmark.triangle")
-            } description: { Text(error) } actions: { Button("Try Again") { Task { await load() } } }
+        } else if let loadError {
+            LoadErrorView(title: "Couldn't load the board", message: loadError) { Task { await load() } }
         } else {
-            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            PageLoading()
         }
     }
 
     // MARK: Data
 
     private func load() async {
-        do { board = try await model.api.get("board"); error = nil }
-        catch { self.error = error.localizedDescription }
+        do { board = try await model.api.get("board"); loadError = nil }
+        catch { loadError = ErrorWords.reason(error) }
     }
 
     /// Runs a change against the engine, then re-reads the board so it never shows something
     /// the engine doesn't have.
-    private func commit(_ work: () async throws -> Void) async {
-        do { try await work(); error = nil } catch { self.error = error.localizedDescription }
+    private func commit(_ failure: String, _ work: () async throws -> Void) async {
+        do { try await work(); error = nil } catch { self.error = ErrorWords.message(failure, error) }
         await load()
     }
 
@@ -102,7 +99,7 @@ struct BoardView: View {
         let temp = BoardCard(id: -Int.random(in: 1...Int(Int32.max)), listId: list.id, title: t, body: "", tags: [],
                              position: (list.cards.last?.position ?? -1) + 1)
         withAnimation(.smooth) { board?.lists[li].cards.append(temp) }
-        await commit { try await model.api.post("board/cards", ["list": .string(list.name), "title": .string(t)]) }
+        await commit("Couldn't add that card.") { try await model.api.post("board/cards", ["list": .string(list.name), "title": .string(t)]) }
     }
 
     private func save(_ card: BoardCard, title: String, body: String, tags: String) async {
@@ -111,20 +108,20 @@ struct BoardView: View {
             board?.lists[li].cards[ci].body = body
             board?.lists[li].cards[ci].tags = tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         }
-        await commit {
+        await commit("Couldn't save that card.") {
             try await model.api.patch("board/cards/\(card.id)", ["title": .string(title), "body": .string(body), "tags": .string(tags)])
         }
     }
 
     private func delete(_ card: BoardCard) async {
         if let (li, ci) = locate(card.id) { _ = withAnimation(.smooth) { board?.lists[li].cards.remove(at: ci) } }
-        await commit { try await model.api.delete("board/cards/\(card.id)") }
+        await commit("Couldn't delete that card.") { try await model.api.delete("board/cards/\(card.id)") }
     }
 
     private func addList(_ name: String) async {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
-        await commit { try await model.api.post("board/lists", ["name": .string(n)]) }
+        await commit("Couldn't add that list.") { try await model.api.post("board/lists", ["name": .string(n)]) }
     }
 
     /// Moves a card into `listId`, before the card `before` (or to the end). The engine stores a raw
@@ -139,7 +136,7 @@ struct BoardView: View {
         let changed = b.lists[ti].cards.enumerated().filter { $0.element.position != $0.offset || $0.element.id == id }
         for i in b.lists[ti].cards.indices { b.lists[ti].cards[i].position = i }
         withAnimation(.smooth) { board = b }
-        await commit {
+        await commit("Couldn't move that card.") {
             // The dragged card first, so a failure part-way leaves it where the user put it.
             for (i, c) in changed.filter({ $0.element.id == id }) + changed.filter({ $0.element.id != id }) {
                 try await model.api.send("board/cards/\(c.id)/move", BoardMoveBody(toList: listId, position: i))
@@ -302,7 +299,7 @@ private struct AddCardRow: View {
                     title = ""
                     focused = true
                 }
-                .onExitCommand { finish() }
+                .onExitCommand { cancel() }
                 .onChange(of: focused) { _, f in if !f { finish() } }
                 .onAppear { focused = true }
         } else {
@@ -321,8 +318,15 @@ private struct AddCardRow: View {
         }
     }
 
+    /// Clicking away keeps what was typed, like Return.
     private func finish() {
         if !title.trimmingCharacters(in: .whitespaces).isEmpty { onAdd(title) }
+        title = ""
+        adding = false
+    }
+
+    /// Escape throws the draft away.
+    private func cancel() {
         title = ""
         adding = false
     }
@@ -382,12 +386,5 @@ private struct CardEditor: View {
         } message: {
             Text("This can't be undone.")
         }
-    }
-}
-
-private struct ErrorLine: View {
-    var text: String
-    var body: some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.red)
     }
 }

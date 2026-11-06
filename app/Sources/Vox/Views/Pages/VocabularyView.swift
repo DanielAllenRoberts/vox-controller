@@ -6,6 +6,7 @@ struct VocabularyView: View {
     @State private var entries: [VocabEntry] = []
     @State private var loaded = false
     @State private var error: String?
+    @State private var loadError: String?
     @State private var heard = ""
     @State private var write = ""
     @State private var pendingDelete: VocabEntry?
@@ -21,9 +22,16 @@ struct VocabularyView: View {
     var body: some View {
         RequiresEngine {
             Group {
-                if loaded { form } else { PageLoading() }
+                if loaded {
+                    form
+                } else if let loadError {
+                    LoadErrorView(title: "Couldn't load your corrections", message: loadError) { Task { await load() } }
+                } else {
+                    PageLoading()
+                }
             }
-            .inlineError($error)
+            .pageErrors($error, loadError: $loadError, loaded: loaded)
+            .refreshesPage(load)
             .toolbar {
                 ToolbarItem {
                     Button("New Correction", systemImage: "plus") { addFocus = .heard }
@@ -36,7 +44,6 @@ struct VocabularyView: View {
             } message: { entry in
                 Text("Vox will write \u{201C}\(entry.heard)\u{201D} as it hears it again.")
             }
-            .task { await load() }
         }
     }
 
@@ -82,6 +89,7 @@ struct VocabularyView: View {
                         Arrow().hidden()
                         Text("It writes")
                     }
+                    .pageSectionHeader()
                 }
             }
         }
@@ -95,9 +103,8 @@ struct VocabularyView: View {
     // MARK: Data
 
     private func load() async {
-        do { entries = try await model.api.get("vocab"); error = nil }
-        catch { self.error = "Couldn't load your corrections. \(error.localizedDescription)" }
-        loaded = true
+        do { entries = try await model.api.get("vocab"); loaded = true; loadError = nil }
+        catch { loadError = ErrorWords.reason(error) }
     }
 
     private func add() {
@@ -107,7 +114,7 @@ struct VocabularyView: View {
         addFocus = .heard
         Task {
             do { try await model.api.post("vocab", ["heard": .string(h), "write": .string(w)]); await load() }
-            catch { heard = h; write = w; self.error = "Couldn't add that correction. \(error.localizedDescription)" }
+            catch { heard = h; write = w; self.error = ErrorWords.message("Couldn't add that correction.", error) }
         }
     }
 
@@ -136,7 +143,7 @@ struct VocabularyView: View {
     private func send(_ failure: String, _ op: @escaping () async throws -> Void) {
         Task {
             do { try await op() }
-            catch { self.error = "\(failure) \(error.localizedDescription)"; await load() }
+            catch { self.error = ErrorWords.message(failure, error); await load() }
         }
     }
 }

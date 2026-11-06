@@ -12,6 +12,7 @@ struct MemoryView: View {
     @State private var everything: [Memory]?
     @State private var query = ""
     @State private var error: String?
+    @State private var loadError: String?
     @State private var selection = Set<String>()
     @State private var editing: Memory?
     @State private var adding = false
@@ -20,6 +21,8 @@ struct MemoryView: View {
     var body: some View {
         RequiresEngine {
             content
+                .pageErrors($error, loadError: $loadError, loaded: core != nil)
+                .refreshesPage(reloadAll)
                 .searchable(text: $query, prompt: "Search memories")
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
@@ -29,7 +32,6 @@ struct MemoryView: View {
                             .help("Tell Vox something to remember")
                     }
                 }
-                .task { await load() }
                 .task(id: day) { await loadDay() }
                 .task(id: query.isEmpty) { if !query.isEmpty { await loadEverything() } }
                 .sheet(isPresented: $adding) {
@@ -66,12 +68,10 @@ struct MemoryView: View {
             } else {
                 list(core)
             }
-        } else if let error {
-            ContentUnavailableView {
-                Label("Couldn't load memories", systemImage: "exclamationmark.triangle")
-            } description: { Text(error) } actions: { Button("Try Again") { Task { await load() } } }
+        } else if let loadError {
+            LoadErrorView(title: "Couldn't load memories", message: loadError) { Task { await reloadAll() } }
         } else {
-            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            PageLoading()
         }
     }
 
@@ -82,8 +82,6 @@ struct MemoryView: View {
         let visible = longTerm + notes
 
         return List(selection: $selection) {
-            if let error { ErrorLine(text: error) }
-
             Section {
                 if longTerm.isEmpty {
                     Placeholder(text: searching ? "No matches." : "Nothing yet. Long-term facts appear here.")
@@ -149,21 +147,21 @@ struct MemoryView: View {
             core = cs
             dates = ds
             if day.isEmpty || !ds.contains(day) { day = ds.first ?? LocalISO.string(.now).prefix(10).description }
-            error = nil
-        } catch { self.error = error.localizedDescription }
+            loadError = nil
+        } catch { loadError = ErrorWords.reason(error) }
         if !query.isEmpty { await loadEverything() }
     }
 
     private func loadDay() async {
         guard !day.isEmpty else { return }
         do { daily = try await model.api.get("memory/daily?date=\(day)") }
-        catch { self.error = error.localizedDescription }
+        catch { loadError = ErrorWords.reason(error) }
     }
 
     /// Search reads every memory across all days (limit=0 means "all").
     private func loadEverything() async {
         do { everything = try await model.api.get("memory?limit=0") }
-        catch { self.error = error.localizedDescription }
+        catch { loadError = ErrorWords.reason(error) }
     }
 
     private func reloadAll() async {
@@ -173,7 +171,7 @@ struct MemoryView: View {
 
     private func add(_ text: String, tier: String) async {
         do { try await model.api.send("memory", MemoryAddBody(text: text, tier: tier)); error = nil }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = ErrorWords.message("Couldn't save that memory.", error) }
         if tier == "daily" { day = LocalISO.string(.now).prefix(10).description }
         await reloadAll()
     }
@@ -181,7 +179,7 @@ struct MemoryView: View {
     private func update(_ m: Memory, text: String) async {
         replace(m.id) { $0.text = text }
         do { try await model.api.patch("memory/\(m.id)", ["text": .string(text)]); error = nil }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = ErrorWords.message("Couldn't save that change.", error) }
         await reloadAll()
     }
 
@@ -196,7 +194,7 @@ struct MemoryView: View {
         do {
             for id in ids { try await model.api.delete("memory/\(id)") }
             error = nil
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = ErrorWords.message("Couldn't forget that.", error) }
         await reloadAll()
     }
 
@@ -207,10 +205,14 @@ struct MemoryView: View {
         if let i = everything?.firstIndex(where: { $0.id == id }) { change(&everything![i]) }
     }
 
+    /// The engine answers `{ok: false}` with a 200 when Finder couldn't be opened, so check the body.
     private func reveal() {
         Task {
-            do { try await model.api.post("memory/reveal"); error = nil }
-            catch { self.error = error.localizedDescription }
+            let failed = "Couldn't show the memory files in Finder."
+            do {
+                let r: [String: JSONValue] = try await model.api.send("memory/reveal", method: "POST", body: [String: JSONValue]())
+                if r["ok"]?.bool == false { error = failed }
+            } catch { self.error = ErrorWords.message(failed, error) }
         }
     }
 
@@ -248,7 +250,7 @@ private struct SectionHeader: View {
     var detail: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title)
+            Text(title).pageSectionHeader()
             if let detail { Text(detail).font(.callout).fontWeight(.regular).foregroundStyle(.secondary) }
         }
         .padding(.top, 6)
@@ -274,6 +276,7 @@ private struct DayPicker: View {
             Button { step(1) } label: { Image(systemName: "chevron.left") }
                 .disabled((index ?? dates.count) >= dates.count - 1)
                 .help("Earlier day")
+                .accessibilityLabel("Earlier day")
             Menu {
                 Picker("Day", selection: $day) {
                     ForEach(dates, id: \.self) { d in Text(MemoryView.dayTitle(d)).tag(d) }
@@ -285,9 +288,11 @@ private struct DayPicker: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Choose a day")
+            .accessibilityLabel("Choose a day")
             Button { step(-1) } label: { Image(systemName: "chevron.right") }
                 .disabled((index ?? 0) <= 0)
                 .help("Later day")
+                .accessibilityLabel("Later day")
         }
         .buttonStyle(.borderless)
         .font(.callout)
@@ -346,12 +351,5 @@ private struct MemoryEditor: View {
                     .disabled(trimmed.isEmpty || trimmed == memory?.text)
             }
         }
-    }
-}
-
-private struct ErrorLine: View {
-    var text: String
-    var body: some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.red)
     }
 }

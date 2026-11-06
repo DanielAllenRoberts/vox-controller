@@ -227,3 +227,115 @@ struct SwitchRow: View {
         }
     }
 }
+
+// MARK: Errors and refreshing
+
+/// Why a request failed, in words a person would use. A connection failure means Vox isn't
+/// answering. The engine's own message is passed on only when it reads like a sentence for people;
+/// most of its messages are written for developers ("'text' is required and must be…").
+enum ErrorWords {
+    static func reason(_ error: Error) -> String {
+        if let api = error as? APIClient.APIError {
+            if (400..<500).contains(api.status), let m = readable(api.message) { return m }
+            return "Something went wrong."
+        }
+        if let url = error as? URLError, unreachable.contains(url.code) { return "Vox isn't responding. Is it running?" }
+        return "Something went wrong."
+    }
+
+    /// "Couldn't add that rule. Vox isn't responding. Is it running?"
+    static func message(_ what: String, _ error: Error) -> String { "\(what) \(reason(error))" }
+
+    private static let unreachable: Set<URLError.Code> = [
+        .cannotConnectToHost, .cannotFindHost, .networkConnectionLost, .notConnectedToInternet, .timedOut,
+    ]
+
+    private static let codeCharacters = CharacterSet(charactersIn: "_{}[]<>=|:()/\\")
+    private static let jargon = [
+        "required", "must be", "expected", "unknown", "invalid", "provide", "could not", "failed",
+        "not found", "module", "json", "null", " id",
+    ]
+
+    private static func readable(_ message: String) -> String? {
+        let t = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (3...160).contains(t.count), !t.unicodeScalars.contains(where: codeCharacters.contains),
+              !jargon.contains(where: t.lowercased().contains) else { return nil }
+        let s = t.prefix(1).uppercased() + t.dropFirst()
+        return ".!?".contains(s.last ?? ".") ? s : s + "."
+    }
+}
+
+/// A failed request, shown in place at the top of a page. Never a modal; the same on every page.
+struct ErrorBanner: View {
+    var message: String
+    var dismiss: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Text(message).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            if let dismiss {
+                Button("Dismiss", systemImage: "xmark", action: dismiss)
+                    .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Dismiss")
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// Takes a page's place when its first load fails, with a way to try again.
+struct LoadErrorView: View {
+    var title: String
+    var message: String
+    var retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Try Again", action: retry)
+        }
+    }
+}
+
+extension View {
+    /// Pins an `ErrorBanner` above the page. `error` is the latest change that failed; `loadError`
+    /// the latest refresh that failed, which only gets a banner once the page has loaded (before
+    /// that, `LoadErrorView` stands in for the page). Dismissing clears both.
+    func pageErrors(_ error: Binding<String?>, loadError: Binding<String?>, loaded: Bool) -> some View {
+        let message = error.wrappedValue ?? (loaded ? loadError.wrappedValue.map { "Couldn't refresh. \($0)" } : nil)
+        return safeAreaInset(edge: .top, spacing: 0) {
+            if let message {
+                ErrorBanner(message: message) {
+                    withAnimation(.smooth) { error.wrappedValue = nil; loadError.wrappedValue = nil }
+                }
+                .padding(.horizontal, Metrics.page).padding(.top, Metrics.tight)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.smooth, value: message)
+    }
+
+    /// Keeps a page current: loads when the page appears, again whenever Vox comes back to the
+    /// front, and from the toolbar's Refresh button (⌘R). Things done by voice show up without
+    /// leaving the page.
+    func refreshesPage(_ load: @escaping @MainActor () async -> Void) -> some View {
+        task { await load() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                Task { await load() }
+            }
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }
+                        .keyboardShortcut("r", modifiers: .command)
+                        .help("Refresh (⌘R)")
+                }
+            }
+    }
+}
