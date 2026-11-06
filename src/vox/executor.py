@@ -38,6 +38,9 @@ _SYSTEM = (
     "Commands (output the command line verbatim, nothing else):\n"
     "  open <app or website>          ·  go to <website>             ·  search <query>\n"
     "  quit <app>  (close a whole app, e.g. 'close Notion' → quit Notion; NOT close tab)\n"
+    "  press <keys>  (a keyboard shortcut in the app in front. Use it for every standard shortcut\n"
+    "                 you're sure of: 'save this' → press cmd+s, 'reopen the closed tab' → press\n"
+    "                 cmd+shift+t, 'undo that' → press cmd+z, 'print' → press cmd+p, press escape)\n"
     "  reload  (reload the current page — ALWAYS prefer this over clicking a reload button, which\n"
     "           only exists on some pages and breaks on the next one)\n"
     "  go to my <name> tab            ·  next tab / previous tab     ·  go back  ·  close tab\n"
@@ -57,6 +60,10 @@ _SYSTEM = (
     "prices, opening hours, facts you may not know, or how to do something in a particular app): output  "
     "WEB: <the question>. Vox looks it up and answers out loud. (Use 'search <query>' only when they "
     "want the browser to show search results.)\n"
+    "To use a command from the app's MENUS when it's app-specific and you don't know its shortcut, or the user names a menu "
+    "command ('export as PDF', 'show the developer tools', 'reopen the closed tab', 'zoom in'): output  "
+    "MENU: <the menu item's title as the app would write it, e.g. Export as PDF>. Vox finds it in the "
+    "front app's menu bar and chooses it. Prefer this over CLICK for anything that lives in a menu.\n"
     "When the user wants to LOG / REPORT AN ISSUE, BUG OR PROBLEM WITH VOX for the developer ('log an "
     "issue', 'report a bug', 'note this problem', even if mis-heard as 'login issue'): output  ISSUE: "
     "<their description, cleaned up but in their words>. Never answer it yourself.\n"
@@ -712,6 +719,19 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         msg = web_search.answer(q)
         assistant._dbg("[executor]", f"decision=WEB {q!r} → {msg!r}")
         return False, msg
+    if upper.startswith("MENU:"):
+        want = raw.split(":", 1)[1].strip()
+        from vox import ax
+        res = ax.press_menu(want)
+        status, item = res if res else ("unavailable", None)
+        assistant._dbg("[executor]", f"decision=MENU {want!r} → {status} {item and item['title']!r}")
+        if status == "pressed":
+            return True, f"{item['title']}."
+        if status == "disabled":
+            return True, f"{item['title']} isn't available right now."
+        if status == "not_found":
+            return True, f"I couldn't find {want!r} in this app's menus."
+        return True, "I couldn't use that menu."
     if upper.startswith("ISSUE:"):
         msg = actions.run_intent("log_issue", raw.split(":", 1)[1].strip())
         assistant._dbg("[executor]", f"decision=ISSUE → {msg!r}")

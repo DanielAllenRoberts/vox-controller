@@ -19,8 +19,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   front. Vox now draws its own switch, green when on, used everywhere (Settings and menu bar too).
 - ☐ **Memory saved odd long-term facts** (e.g. how to refresh a page). Research how good memory
   systems decide what's long-term vs daily (MemPalace, ideas #28/#55) and tighten what gets promoted.
-- ☐ **"Refresh the page" should be able to press ⌘R.** Vox has `press` (ideas #61); make sure the brain
-  knows it can send keyboard shortcuts, and can look up an app's shortcuts when it doesn't know one.
+- ☑ **"Refresh the page" should be able to press ⌘R.** The router now lists `press <keys>` with the
+  standard shortcuts (save, undo, reopen tab, print), and a new `MENU: <item>` directive reads the front
+  app's menu bar over AX (every command + its shortcut, ~0.1-0.2 s, no focus change) and chooses the
+  matching item, so app-specific commands work without knowing the shortcut. Strict matching ("show
+  sidebar" never picks "Show All"). "refresh" still maps to the reload command (Zen has no Reload menu).
 
 ## Design
 - 💬 **Not different enough from the old dashboard; Home isn't pretty.** "Recent" card is misshaped

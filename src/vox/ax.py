@@ -330,6 +330,118 @@ def _press(fns, el) -> bool:
     return False
 
 
+# --- the menu bar: every command an app has, with its keyboard shortcut ----------------------------
+# "Refresh the page", "export as PDF", "reopen the closed tab": the app's own menus already name these
+# commands and their shortcuts, so Vox can choose the menu item instead of guessing a key combo.
+
+_MENU_MODS = ((1, "shift"), (2, "option"), (4, "control"))  # AXMenuItemCmdModifiers bits; 8 = no ⌘
+
+
+def _shortcut(fns, item) -> str:
+    char = _attr(fns, item, "AXMenuItemCmdChar")
+    if not isinstance(char, str) or not char.strip():
+        return ""
+    mods = _attr(fns, item, "AXMenuItemCmdModifiers") or 0
+    try:
+        mods = int(mods)
+    except (TypeError, ValueError):
+        mods = 0
+    parts = [] if mods & 8 else ["cmd"]
+    parts += [name for bit, name in _MENU_MODS if mods & bit]
+    return "+".join(parts + [char.strip().lower()])
+
+
+def menu_items(pid=None, limit: int = 600) -> list[dict]:
+    """The app's menu commands: [{"menu": "View", "title": "Reload Page", "shortcut": "cmd+r",
+    "enabled": True, "_el": <AX element>}], one submenu level deep. Reading needs no focus change.
+    Empty when AX is unavailable."""
+    fns = _load()
+    if not fns:
+        return []
+    pid = pid or _target_pid()
+    if not pid:
+        return []
+    app = fns["AXUIElementCreateApplication"](pid)
+    bar = _attr(fns, app, "AXMenuBar")
+    out: list[dict] = []
+
+    def walk(menu_el, path: str, depth: int):
+        for menu in (_attr(fns, menu_el, "AXChildren") or []):          # the AXMenu under a bar item
+            for item in (_attr(fns, menu, "AXChildren") or []):
+                if len(out) >= limit:
+                    return
+                title = _attr(fns, item, "AXTitle")
+                if not isinstance(title, str) or not title.strip():
+                    continue                                              # separators
+                kids = _attr(fns, item, "AXChildren") or []
+                if kids and depth < 2:
+                    walk(item, f"{path} > {title.strip()}", depth + 1)
+                    continue
+                out.append({"menu": path, "title": title.strip(), "shortcut": _shortcut(fns, item),
+                            "enabled": _attr(fns, item, "AXEnabled") is not False, "_el": item})
+
+    for top in (_attr(fns, bar, "AXChildren") or [])[1:]:                # [0] is the Apple menu
+        name = _attr(fns, top, "AXTitle")
+        if isinstance(name, str) and name.strip():
+            walk(top, name.strip(), 1)
+    return out
+
+
+def _menu_norm(s: str) -> str:
+    """Lowercase words without punctuation, plurals folded ("Tabs" matches "tab")."""
+    import re as _re
+    words = _re.sub(r"[^a-z0-9 ]+", "", s.lower().replace("…", "").replace("...", "")).split()
+    return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words)
+
+
+def find_menu_item(target: str, items: list[dict] | None = None) -> dict | None:
+    """The menu command matching `target`: the exact title, else a title containing every word of
+    the target ("developer tools" → "Web Developer Tools"), else a target containing every word of
+    the title ("zoom in please" → "Zoom In"). Nothing looser: "show sidebar" must not choose
+    "Show All". Shorter titles and enabled items win ties; the first menu wins after that."""
+    items = menu_items() if items is None else items
+    want = _menu_norm(target)
+    if not want or not items:
+        return None
+    words = set(want.split())
+    best, best_score = None, 0.0
+    for it in items:
+        t = _menu_norm(it["title"])
+        if not t:
+            continue
+        tw = set(t.split())
+        if t == want:
+            score = 3.0
+        elif words <= tw:
+            score = 2.0 + len(words) / len(tw)
+        elif tw <= words and len(tw) >= max(2, len(words) - 1):
+            score = 1.0 + len(tw) / len(words)
+        else:
+            continue
+        score += 0.1 if it["enabled"] else 0.0
+        if score > best_score:
+            best, best_score = it, score
+    return best
+
+
+def press_menu(target: str):
+    """Choose the menu command matching `target` in the target app. Returns (status, item) with
+    status "pressed" / "disabled" / "not_found" / "press_failed", or None without AX."""
+    fns = _load()
+    if not fns:
+        return None
+    item = find_menu_item(target)
+    if item is None:
+        return ("not_found", None)
+    if not item["enabled"]:
+        return ("disabled", item)
+    try:
+        ok = fns["AXUIElementPerformAction"](item["_el"], "AXPress") == 0
+    except Exception:
+        ok = False
+    return ("pressed" if ok else "press_failed", item)
+
+
 def click(target: str):
     """Find a control labelled `target` in the target app and AXPress the nearest pressable element.
     Returns ("clicked", label) / ("not_found", None) / ("press_failed", label) /

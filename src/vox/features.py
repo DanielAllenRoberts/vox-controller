@@ -131,6 +131,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "⌘-click cards on the Board, then Move To / Archive / Delete from the bar at the bottom. Esc or Done clears it. Paste several lines into Add Card to add one card per line.", "code"),
     ("board-extras", "Organise", "Tags, checklists, archive, search",
      "Tags get colours; a checklist shows 2/3 on the card; Archive hides a card (toolbar archive button shows them, Restore brings one back); search filters every list. By voice: 'tag the invoice card work', 'add draft it to the invoice checklist', 'archive the invoice card', 'what's due this week?'.", "code"),
+    ("shortcuts-menus", "Control", "Shortcuts and menu commands",
+     "In any app: 'save this' (⌘S), 'undo that' (⌘Z), 'reopen the tab I closed' (⌘⇧T). For app-specific commands Vox uses the app's own menus: in Zen 'open the developer tools', 'zoom in'; in Pages/Preview 'export as PDF'.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),
