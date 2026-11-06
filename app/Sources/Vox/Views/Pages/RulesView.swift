@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Standing instructions the brain follows in every conversation.
@@ -8,6 +9,7 @@ struct RulesView: View {
     @State private var error: String?
     @State private var loadError: String?
     @State private var draft = ""
+    @State private var draftApp: String?
     @State private var pendingDelete: Rule?
     @FocusState private var addFocused: Bool
 
@@ -52,10 +54,11 @@ struct RulesView: View {
                         .textFieldStyle(.plain)
                         .focused($addFocused)
                         .onSubmit(add)
+                    AppScopePicker(app: $draftApp)
                     Button("Add", action: add).disabled(trimmedDraft.isEmpty)
                 }
             } footer: {
-                Text("Rules are standing instructions. Vox follows every rule that's switched on, in every conversation.")
+                Text("Rules are standing instructions Vox follows. Give a rule an app and it only applies while that app is in front, like \u{201C}in Zen, refresh means ⌘R\u{201D}. You can also say \u{201C}from now on in Zen, when I say refresh, press command R\u{201D}.")
                     .foregroundStyle(.secondary)
             }
 
@@ -68,6 +71,7 @@ struct RulesView: View {
                 } else {
                     ForEach(rules) { rule in
                         RuleRow(rule: rule,
+                                onApp: { setApp(rule, $0) },
                                 onToggle: { setEnabled(rule, $0) },
                                 onCommit: { rename(rule, $0) },
                                 onDelete: { pendingDelete = rule })
@@ -93,12 +97,21 @@ struct RulesView: View {
         catch { loadError = ErrorWords.reason(error) }
     }
 
+    private func setApp(_ rule: Rule, _ app: String?) {
+        if let i = rules.firstIndex(where: { $0.id == rule.id }) { rules[i].app = app }
+        Task {
+            do { try await model.api.patch("rules/\(rule.id)", ["app": app.map { .string($0) } ?? .null]) }
+            catch { self.error = ErrorWords.message("Couldn't change that rule.", error); await load() }
+        }
+    }
+
     private func add() {
         let text = trimmedDraft
         guard !text.isEmpty else { return }
         draft = ""
+        let app = draftApp
         Task {
-            do { try await model.api.post("rules", ["text": .string(text)]); await load() }
+            do { try await model.api.post("rules", ["text": .string(text), "app": app.map { .string($0) } ?? .null]); await load() }
             catch { draft = text; self.error = ErrorWords.message("Couldn't add that rule.", error) }
         }
     }
@@ -137,6 +150,7 @@ struct RulesView: View {
 
 private struct RuleRow: View {
     var rule: Rule
+    var onApp: (String?) -> Void
     var onToggle: (Bool) -> Void
     var onCommit: (String) -> Void
     var onDelete: () -> Void
@@ -154,6 +168,7 @@ private struct RuleRow: View {
                 .focused($focused)
                 .onSubmit(commit)
                 .onChange(of: focused) { _, f in if !f { commit() } }
+            AppScopePicker(app: Binding(get: { rule.app }, set: onApp))
             HoverDeleteButton(visible: hovering, help: "Delete Rule", action: onDelete)
             Toggle("Follow this rule", isOn: Binding(get: { rule.enabled }, set: onToggle))
                 .labelsHidden().toggleStyle(.switch).controlSize(.small)
@@ -173,5 +188,34 @@ private struct RuleRow: View {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { text = rule.text; return }
         if t != rule.text { onCommit(t) }
+    }
+}
+
+
+/// "Everywhere" or one app: a rule scoped to an app only reaches the prompt while that app is in front.
+private struct AppScopePicker: View {
+    @Binding var app: String?
+
+    private var apps: [String] {
+        let running = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap(\.localizedName)
+            .filter { $0 != "Vox" }
+        return Array(Set(running + (app.map { [$0] } ?? []))).sorted()
+    }
+
+    var body: some View {
+        Menu {
+            Button("Everywhere") { app = nil }
+            Divider()
+            ForEach(apps, id: \.self) { a in Button(a) { app = a } }
+        } label: {
+            Text(app ?? "Everywhere")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(app == nil ? Color.secondary : Color.accentColor)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(app == nil ? "Applies in every app" : "Only applies while \(app!) is in front")
     }
 }

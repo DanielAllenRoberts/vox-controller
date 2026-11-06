@@ -268,6 +268,14 @@ _SYSTEM = (
 )
 
 
+def _agent_system() -> str:
+    try:
+        from vox import prompts
+        return prompts.get("agent")
+    except Exception:
+        return _SYSTEM
+
+
 # The result for a finished run with nothing to say. Spoken callers chime instead of reading it;
 # MCP callers (run_agent) still get a readable result.
 SILENT_DONE = "Done."
@@ -490,7 +498,7 @@ def _run_inner(task: str, t0: float) -> tuple[bool, str]:
                 model=model,
                 max_tokens=4096,
                 betas=["computer-use-2025-11-24", "context-management-2025-06-27"],
-                system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                system=[{"type": "text", "text": _agent_system(), "cache_control": {"type": "ephemeral"}}],
                 tools=tools,
                 # Old screenshots are dead weight — without this every step resends every earlier
                 # frame and the context (and cost) grows quadratically.

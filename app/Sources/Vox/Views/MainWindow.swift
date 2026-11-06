@@ -41,6 +41,7 @@ struct MainWindow: View {
         case .activity: ActivityView()
         case .voiceLab: VoiceLabView()
         case .testing: TestingView()
+        case .prompts: PromptsView()
         }
     }
 }

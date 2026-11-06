@@ -307,7 +307,13 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     if sched is not None:
         return sched
 
-    db = _command_db(text)  # app/site-scoped commands, in front of the regex parser (gated; off by default)
+    # A more specific app wins over a saved command that merely CONTAINS a shorter one: "open notion
+    # calendar" matched the saved "open notion" and opened Notion (seen live). If the parser reads a
+    # multi-word app name that's actually installed, skip the command DB and open that app.
+    parsed = actions.parse(text)
+    specific = (parsed is not None and parsed[0] == "navigate" and len(parsed[1].split()) > 1
+                and not actions.known_url(parsed[1]) and actions._app_exists(actions.resolve_app_name(parsed[1])))
+    db = None if specific else _command_db(text)  # app/site-scoped commands, in front of the regex parser
     if db is not None:
         return db
 

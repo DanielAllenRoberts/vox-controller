@@ -141,7 +141,10 @@ private struct FeatureRow: View {
     var feature: Feature
     var onChange: (_ status: String?, _ comment: String?) -> Void
     @State private var comment = ""
+    @State private var savedFlash = false
     @FocusState private var editing: Bool
+
+    private var dirty: Bool { comment.trimmingCharacters(in: .whitespacesAndNewlines) != feature.comment }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -167,12 +170,28 @@ private struct FeatureRow: View {
                 .fixedSize()
                 .help("Your verdict")
             }
-            TextField("Notes: what happened, what felt off…", text: $comment, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...4)
-                .focused($editing)
-                .onSubmit { commit() }
-                .onChange(of: editing) { _, e in if !e { commit() } }
+            HStack(alignment: .top, spacing: 8) {
+                TextField("Notes: what happened, what felt off…", text: $comment, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...4)
+                    .focused($editing)
+                    .onSubmit { commit() }
+                    .onChange(of: editing) { _, e in if !e { commit() } }
+                // An explicit Save, so it's obvious notes are kept (Return and clicking away save too).
+                if dirty {
+                    Button("Save") { commit() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .help("Save note (Return or ⌘Return)")
+                } else if savedFlash {
+                    Label("Saved", systemImage: "checkmark.circle.fill")
+                        .font(.callout).foregroundStyle(.green)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: dirty)
+            .animation(.easeOut(duration: 0.2), value: savedFlash)
         }
         .padding(.horizontal, Metrics.gap).padding(.vertical, 12)
         .onAppear { comment = feature.comment }
@@ -190,8 +209,10 @@ private struct FeatureRow: View {
     }
 
     private func commit() {
-        guard comment != feature.comment else { return }
-        onChange(nil, comment)
+        guard dirty else { return }
+        onChange(nil, comment.trimmingCharacters(in: .whitespacesAndNewlines))
+        savedFlash = true
+        Task { try? await Task.sleep(for: .seconds(2)); savedFlash = false }
     }
 }
 

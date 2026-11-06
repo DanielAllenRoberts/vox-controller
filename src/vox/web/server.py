@@ -376,6 +376,38 @@ def create_app() -> FastAPI:
         print(f"🔔 agent alert: {text}")
         return Response(status_code=204)
 
+    # --- Prompts: every prompt Vox sends, editable by the user (vox/prompts.py) ---
+    @app.get("/api/prompts")
+    def get_prompts() -> list:
+        from .. import prompts
+        return prompts.all_prompts()
+
+    @app.get("/api/prompts/recent")
+    def get_prompts_recent(prompt: str = "", limit: int = 10) -> list:
+        from .. import prompts
+        return prompts.recent(prompt or None, max(1, min(limit, 50)))
+
+    @app.put("/api/prompts/{name}")
+    async def put_prompt(name: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import prompts
+        try:
+            return prompts.put(name, str(body.get("text", "")))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such prompt")
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    @app.delete("/api/prompts/{name}")
+    def reset_prompt(name: str):
+        from .. import prompts
+        try:
+            return prompts.reset(name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such prompt")
+
     # --- Onboarding: voice previews + get to know you (vox/onboarding.py) ---
     @app.post("/api/voices/preview")
     async def post_voice_preview(request: Request):
@@ -676,8 +708,9 @@ def create_app() -> FastAPI:
         text = body.get("text")
         if not isinstance(text, str) or not text.strip():
             return _bad_request("'text' is required and must be a non-empty string")
+        app_name = body.get("app")
         try:
-            return mod.add_rule(text.strip())
+            return mod.add_rule(text.strip(), app=app_name if isinstance(app_name, str) else None)
         except ValueError as exc:
             return _bad_request(str(exc))
         except Exception as exc:
@@ -704,8 +737,11 @@ def create_app() -> FastAPI:
             if not isinstance(enabled, bool):
                 return _bad_request("'enabled' must be a boolean")
             patch["enabled"] = enabled
+        if "app" in body:  # null / "" = everywhere
+            a = body.get("app")
+            patch["app"] = a if isinstance(a, str) else None
         if not patch:
-            return _bad_request("provide at least one of 'text' or 'enabled'")
+            return _bad_request("provide at least one of 'text', 'enabled' or 'app'")
         try:
             updated = mod.update_rule(the_id, **patch)
         except ValueError as exc:

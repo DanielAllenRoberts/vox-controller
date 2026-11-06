@@ -32,7 +32,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☐ **Commands page reorganised:** start with a grid of apps that have commands (with counts), click
   in for details. Collapse the long "Open GitHub / Open Gmail…" list. Add **blocking an app** so Vox
   can't open it, instead of listing every site it can open. Less scrolling.
-- ☐ **Prompts in the database + a Prompts editor:** every prompt Vox sends, viewable and editable by
+- ☑ **Prompts in the database + a Prompts editor:** every prompt Vox sends, viewable and editable by
   the user (and by me on request), never by Vox itself. Show what was actually sent per prompt type.
 - ☐ **Web search for the brain:** answer questions and find app tutorials from the web (Clicky's power).
 - ☑ **Onboarding: choose a voice** (list, preview button speaking preset text, no AI call).
@@ -82,7 +82,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☑ **Media in the background:** "pause Spotify", "next song", "pause the music" control Spotify / Music
   without bringing them forward (AppleScript), with the system media key for anything else. Direct
   command, no brain.
-- ☐ **App-scoped notes (the user's idea):** rules/preferences tied to an app, added to the prompt only when
+- ☑ **App-scoped notes (the user's idea):** rules/preferences tied to an app, added to the prompt only when
   that app is in front ("in Zen, 'refresh' means press ⌘R"), the same way the command DB loads
   per-app commands. Keeps the main prompt lean. Saved by voice ("from now on in Zen, when I say
   refresh press command R") or on the Rules page.
@@ -91,6 +91,15 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   tags/labels, deadlines (due dates) that Vox can check ("what's due this week?") and that create linked
   reminders automatically, plus the usual Trello features (checklists, archive, search, card
   descriptions, colour labels). Exposed by voice, in the app, and to agents over MCP.
+
+## Round 1e
+- ☑ **Hold-to-talk cut off after ~15 s** (with a click), splitting the sentence. The key now decides; 5-min safety net only.
+- ☑ **Logged issues weren't arriving:** Whisper heard "log an issue" as "login issue". Phrase variants accepted,
+  plus an ISSUE: directive so any wording works. The lost issue (close Notion / Notion Calendar) recovered and filed.
+- ☑ **"close Notion" closed a browser tab:** new quit-app command. **"open Notion Calendar" opened Notion:** a more
+  specific installed app now beats a saved command that merely contains a shorter name.
+- ☑ **Testing page notes need an obvious Save:** Save button + "Saved" confirmation.
+- 💬 **"Are you using the Apple UI skill?"** No such skill is available here; designing from Apple's HIG directly.
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.

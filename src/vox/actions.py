@@ -131,6 +131,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "log_issue": _log_issue,
         "set_setting": set_setting,
         "media": media,
+        "quit_app": quit_app,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -174,6 +175,14 @@ def _parse(text: str) -> tuple[str, str] | None:
     # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
     # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
 
+    # Quit an app: "close notion", "quit spotify". Without this, "close notion" went to the brain,
+    # which picked close_tab and closed a browser tab (seen live). Tabs/windows/Vox are excluded;
+    # the handler only quits an app that's actually running.
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you)[,]?\s+)*(?:close|closed|quit|exit|shut down)\s+"
+                     r"(?:the\s+|my\s+)?([a-z0-9][a-z0-9 .+-]*?)(?:\s+app)?", t)
+    if m and not re.search(r"\b(?:tabs?|windows?|this|that|it|vox|fox|box|dashboard|everything|all)\b", m.group(1)):
+        return ("quit_app", m.group(1).strip())
+
     # Media: "pause spotify", "next song", "pause the music": straight to the player, in the
     # background, no brain (it used to go to the LLM, which opened Spotify and clicked Pause).
     m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*"
@@ -203,8 +212,10 @@ def _parse(text: str) -> tuple[str, str] | None:
             return ("set_setting", f"{key}={value}")
 
     # "log an issue: the circle thing didn't work" → saved with what was happening (vox/issues.py).
-    m = re.match(r"(?:(?:please|vox|can you|could you)[,:]?\s+)*(?:log|report|note|file)\s+(?:this|an|a|the|that)?\s*"
-                 r"(?:issue|bug|problem)\b[\s,:.-]*(.*)$", t)
+    # Whisper hears "log an issue" as "login issue" / "log in issue" / "logging issue" (seen live).
+    m = re.match(r"(?:(?:please|vox|can you|could you|i want to|i'd like to)[,:]?\s+)*"
+                 r"(?:log(?:\s*in|ging)?|report|note|file|lock|logan)\s+(?:this|an|a|the|that|another|new)?\s*"
+                 r"(?:issue|bug|problem)s?\b[\s,:.-]*(?:for me[\s,:.-]*)?(.*)$", t)
     if m:
         return ("log_issue", text.strip()[len(text.strip()) - len(m.group(1)):] if m.group(1) else "")
 
@@ -378,7 +389,8 @@ def _parse(text: str) -> tuple[str, str] | None:
     # screen" became an app called "can you circle something on the".
     m = re.match(r"(?:(?:please|vox)\s+)?(?:next\s+|switch\s+to\s+(?:the\s+|my\s+)?|go\s+to\s+(?:the\s+|my\s+)?)?"
                  r"([a-z]+(?:\s+[a-z]+){0,2}?)\s+(?:window|space|screen)$", t)
-    if m and m.group(1).strip() not in ("the", "my", "a", "this", "next", "on the", "the whole"):
+    if (m and m.group(1).strip() not in ("the", "my", "a", "this", "next", "on the", "the whole")
+            and not re.match(r"(?:close|closed|quit|exit|open|minimi[sz]e|hide|show)\b", m.group(1))):
         return ("app_cycle", m.group(1).strip())
     m = re.search(r"\b(?:switch|cycle|toggle)\s+(?:to\s+)?([a-z]+(?:\s+[a-z]+)?)\b", t)
     if m:
@@ -1798,6 +1810,19 @@ def _media_key(action: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def quit_app(name: str) -> str:
+    """Quit an app that's running (matched against running apps, so it never launches anything)."""
+    want = (name or "").strip().lower()
+    running = running_apps()
+    hit = (next((a for a in running if a.lower() == want), None)
+           or next((a for a in running if a.lower() == resolve_app_name(want).lower()), None)
+           or next((a for a in running if a.lower().startswith(want + " ") or want.startswith(a.lower())), None))
+    if hit is None:
+        return f"{resolve_app_name(want)} isn't open."
+    ok, out = _osa(f'tell application "{hit}" to quit')
+    return f"Closed {hit}." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't close {hit} ({out}).")
 
 
 def set_setting(arg: str) -> str:

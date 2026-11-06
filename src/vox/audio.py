@@ -517,7 +517,9 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
             return typed
         if runtime.ptt_down():
             ptt = True
-            max_frames = int(cfg.max_utterance_seconds * sr / fs)  # idle's short cap doesn't apply
+            # The user holds the key for as long as they talk: no 15 s utterance cap (it split long
+            # sentences in two, with a click mid-way). runtime.PTT_MAX_HOLD is the only safety net.
+            max_frames = int(runtime.PTT_MAX_HOLD * sr / fs)
             break
         if not runtime.paused and rms(frame) >= cfg.speech_rms:
             break

@@ -135,7 +135,16 @@ def _recent_actions_block() -> str:
         return ""
 
 
-def _rules_block() -> str:
+def _focused_app() -> str | None:
+    """The app in front, as the command cache tracks it (cheap: no AppleScript)."""
+    try:
+        from vox import command_cache
+        return command_cache.current_app()
+    except Exception:
+        return None
+
+
+def _rules_block(app: str | None = None) -> str:
     """The user's enabled custom rules, rendered for the system prompt.
 
     Reads the dashboard's rules store (vox.web.rules.enabled_rules_text()). Fully
@@ -143,7 +152,7 @@ def _rules_block() -> str:
     exactly as today (no rules layered on)."""
     try:
         from vox.web import rules
-        text = (rules.enabled_rules_text() or "").strip()
+        text = (rules.enabled_rules_text(app) or "").strip()
         if text:
             return ("Additional rules from the user (follow these, they override "
                     f"defaults where they conflict):\n{text}")
@@ -337,13 +346,15 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     whether Vox keeps listening. The small brain may emit [BIG] to defer the turn to the big
     brain. Falls back to a '?' heuristic if the model omits the tag.
     """
+    from vox import prompts
+    base = prompts.get("chat")
     persona = _active_persona()
-    system = _SYSTEM if not persona else \
-        f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {persona}"
+    system = base if not persona else \
+        f"{base}\n\nYour personality (stay in character while staying helpful): {persona}"
     # Layer the user's dashboard rules + relevant memories + what Vox just did (all guarded →
     # no-op if absent). The recent-actions block is what stops the chat brain denying or inventing
     # its own behaviour — it has no other way to know an action ran.
-    for block in (_rules_block(), _memory_block(text), _recent_actions_block()):
+    for block in (_rules_block(_focused_app()), _memory_block(text), _recent_actions_block()):
         if block:
             system = f"{system}\n\n{block}"
     # The clock (ideas #47). The command brain had it; the chat brain didn't, so "hey vox, what time
@@ -353,10 +364,10 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
         system = f"{system}\n\n{actions._now_line()}"
     except Exception:
         pass
-    raw = complete(text, history, brain=brain, system=system)
+    raw = complete(text, history, brain=brain, system=system, prompt="chat")
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):
-        raw = complete(text, history, brain="big", system=system)  # small brain deferred
+        raw = complete(text, history, brain="big", system=system, prompt="chat")  # small brain deferred
     # Memory (both guarded): an explicit "remember that X" user turn → core; a
     # MEMORY[core|daily] directive the model appended → captured and stripped from the reply.
     _capture_from_user(text)
@@ -374,10 +385,13 @@ def _brain(name: str) -> tuple[str, str]:
             _setting("small_brain_model", CONFIG.small_brain_model))
 
 
-def complete(text: str, history=None, *, brain: str = "small", system: str = _SYSTEM,
-             kind: str = "chat") -> str:
+def complete(text: str, history=None, *, brain: str = "small", system: str | None = None,
+             kind: str = "chat", prompt: str = "") -> str:
     """One raw completion from the named brain with the given system prompt. Provider-agnostic.
     `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record."""
+    if system is None:
+        from vox import prompts
+        system = prompts.get("chat")
     provider, model = _brain(brain)
     # Debug: dump the COMPLETE outgoing prompt — system + full messages (history + user
     # text) — for every LLM call (covers chat AND the executor, which calls complete()
@@ -398,6 +412,11 @@ def complete(text: str, history=None, *, brain: str = "small", system: str = _SY
     # Debug: dump the COMPLETE raw response, BEFORE any [OPEN]/[DONE]/[BIG]/SAY:/MEMORY[...]
     # stripping happens downstream in respond_turn / _split_signal / _capture_from_reply.
     _dbg("[raw-response]", raw)
+    try:  # what was actually sent, for the Prompts page (Vox.app)
+        from vox import prompts
+        prompts.record(prompt or kind, brain, model, system, _fmt_messages(history, text), raw)
+    except Exception:
+        pass
     return raw
 
 
@@ -734,6 +753,12 @@ def look(question: str, image_path: str, brain: str = "small") -> str:
         raw = _anthropic_look(question, image_path, model, brain)
     else:
         raw = "Looking at the screen needs a Claude or Anthropic brain — this one can't see images."
+    try:
+        from vox import prompts
+        prompts.record("click_vision" if "badge" in question else "vision", brain, model,
+                       "(image) " + image_path, question, raw)
+    except Exception:
+        pass
     # Debug: dump the COMPLETE raw vision response before any downstream handling.
     _dbg("[raw-response]", raw)
     return raw

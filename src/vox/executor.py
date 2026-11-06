@@ -9,7 +9,7 @@ LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 
 import re
 
-from vox import actions, assistant
+from vox import actions, assistant, prompts
 from vox.config import CONFIG
 
 # Sentinel returned as the message (with acted=True) when the brain decides the user wants to
@@ -37,6 +37,7 @@ _SYSTEM = (
     "parser couldn't handle what the user just said. Turn it into ONE Vox command, or a short reply.\n"
     "Commands (output the command line verbatim, nothing else):\n"
     "  open <app or website>          ·  go to <website>             ·  search <query>\n"
+    "  quit <app>  (close a whole app, e.g. 'close Notion' → quit Notion; NOT close tab)\n"
     "  reload  (reload the current page — ALWAYS prefer this over clicking a reload button, which\n"
     "           only exists on some pages and breaks on the next one)\n"
     "  go to my <name> tab            ·  next tab / previous tab     ·  go back  ·  close tab\n"
@@ -52,6 +53,13 @@ _SYSTEM = (
     "kind of text it is — the selection is fetched and rewritten automatically.\n"
     "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
     "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
+    "When the user wants to LOG / REPORT AN ISSUE, BUG OR PROBLEM WITH VOX for the developer ('log an "
+    "issue', 'report a bug', 'note this problem', even if mis-heard as 'login issue'): output  ISSUE: "
+    "<their description, cleaned up but in their words>. Never answer it yourself.\n"
+    "To SAVE A STANDING PREFERENCE about how to do things, especially in one app ('from now on in "
+    "Zen, when I say refresh press command R', 'in Spotify always search instead of browsing'): output  "
+    "NOTE: <app name, or everywhere> | <the preference, written as an instruction to yourself>. Use "
+    "TEACH instead when it's simply a phrase that should run one fixed command.\n"
     "To CHANGE ONE OF VOX'S OWN SETTINGS when asked ('use a deeper voice', 'show bubbles at the "
     "bottom left', 'think before answering'): output  SET: <key> | <value>  using ONLY these keys: "
     "tts_enabled (true/false), kokoro_voice (am_onyx deep US male, am_michael US male, af_bella US "
@@ -155,7 +163,7 @@ _EDIT_SYSTEM = (
 def _rewrite(selected: str, instruction: str) -> str:
     """Apply a rewrite instruction to selected text (used by the EDIT / 'make this pretty' flow)."""
     return assistant.complete(f"Instruction: {instruction}\n\nText to rewrite:\n{selected}",
-                              system=_EDIT_SYSTEM, brain="small")
+                              system=prompts.get("edit"), brain="small", prompt="edit")
 
 
 _LOOK_AXTREE_SYSTEM = (
@@ -188,7 +196,7 @@ def _look_axtree(question: str) -> str | None:
     # the brain replies '[BIG]'. Re-reading the SAME empty tree on the big brain doesn't add vision
     # (it just replies '[BIG]' again, which then got spoken aloud) — so instead we return None to
     # hand the caller off to REAL vision: the screenshot path, which already uses the big brain.
-    answer = assistant.complete(prompt, system=_LOOK_AXTREE_SYSTEM, brain="small", kind="vision_axtree")
+    answer = assistant.complete(prompt, system=prompts.get("look"), brain="small", kind="vision_axtree", prompt="look")
     if answer.strip().upper().startswith("[BIG]"):
         return None
     return answer
@@ -270,7 +278,7 @@ def _click_fuzzy(target: str) -> str:
     prompt = (f"Clickable elements on screen:\n{listing}\n\n"
               f"The user wants to click: {target!r}\n"
               f"Your answer (a verbatim label, or ASK: <label>, or NONE):")
-    raw = assistant.complete(prompt, system=_CLICK_PICK_SYSTEM, brain="big", kind="click_axtree")
+    raw = assistant.complete(prompt, system=prompts.get("click_pick"), brain="big", kind="click_axtree", prompt="click_pick")
     kind, label = _parse_pick(raw, labels)
     assistant._dbg("[executor]", f"click pick for {target!r} from {len(labels)} on-screen labels → {kind}:{label!r}")
     if kind == "pick":
@@ -337,6 +345,29 @@ def _labels_agree(said: str, label: str) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.6
 
 
+def _vision_prompt(target: str, n: int) -> str:
+    """The find-it-in-a-screenshot prompt, falling back to the default if an edit broke its
+    {target}/{n} placeholders (a broken prompt must not break clicking)."""
+    try:
+        return prompts.get("click_vision").format(target=target, n=n)
+    except (KeyError, IndexError, ValueError):
+        return _CLICK_VISION_PROMPT.format(target=target, n=n)
+
+
+def _router_system() -> str:
+    """The router prompt plus the notes for the app in front (app-scoped notes: the user's idea,
+    loaded per app like the command DB, so the main prompt doesn't carry every app's quirks)."""
+    system = prompts.get("router")
+    try:
+        from vox import assistant as _a
+        block = _a._rules_block(_a._focused_app())
+        if block:
+            system = f"{system}\n\n{block}"
+    except Exception:
+        pass
+    return system
+
+
 def _point_by_vision(target: str) -> str | None:
     """Point at something the AX/DOM lookup couldn't find by name: badge every visible target on a
     screenshot, ask the big brain which badge the user means (the click-by-vision recipe), then ring
@@ -350,7 +381,7 @@ def _point_by_vision(target: str) -> str | None:
         marked = overlay.annotate(shot, items) if shot else None
         if not marked:
             return None
-        prompt = _CLICK_VISION_PROMPT.format(target=target, n=len(items)).replace(
+        prompt = _vision_prompt(target, len(items)).replace(
             "The user wants to click:", "The user wants to SEE where this is (nothing will be clicked):")
         answer = assistant.look(prompt, marked, brain="big")
         nums = re.findall(r"\d{1,3}", answer or "")
@@ -387,7 +418,7 @@ def _click_by_vision(target: str, items) -> str | None:
         if not marked:
             return None
         answer = assistant.look(
-            _CLICK_VISION_PROMPT.format(target=target, n=len(items)), marked, brain="big")
+            _vision_prompt(target, len(items)), marked, brain="big")
         # LAST number wins, not the first: the model reasons out loud despite being told not to, so
         # its answer is at the END ("...I can see 3 dialogs... badge 11" must click 11, not 3). Same
         # hardening _parse_pick already does on the label path.
@@ -616,7 +647,7 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     board = actions.board_block()   # so it can answer about the board and name cards precisely
     if board:
         prompt = f"{prompt}\n\n{board}"
-    raw = assistant.complete(prompt, history, system=_SYSTEM, brain="small").strip()
+    raw = assistant.complete(prompt, history, system=_router_system(), brain="small", prompt="router").strip()
     if not raw:
         return False, assistant.respond(text, history)
     # The brain's raw output IS the "tool call" (Vox uses translate-to-command, not native function-
@@ -630,6 +661,22 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
         return False, reply
+    if upper.startswith("ISSUE:"):
+        msg = actions.run_intent("log_issue", raw.split(":", 1)[1].strip())
+        assistant._dbg("[executor]", f"decision=ISSUE → {msg!r}")
+        return True, msg
+    if upper.startswith("NOTE:"):
+        where, _, what = raw.split(":", 1)[1].partition("|")
+        where, what = where.strip(), what.strip()
+        app = None if where.lower() in ("", "everywhere", "global", "all apps", "any app") else where
+        try:
+            from vox.web import rules
+            rules.add_rule(what, app=app)
+            msg = f"Noted for {app}." if app else "Noted."
+        except Exception as exc:
+            msg = f"Couldn't save that note ({exc})."
+        assistant._dbg("[executor]", f"decision=NOTE app={app!r} {what!r} → {msg!r}")
+        return False, msg
     if upper.startswith("SET:"):
         key, _, value = raw.split(":", 1)[1].partition("|")
         msg = actions.set_setting(f"{key.strip()}={value.strip()}")

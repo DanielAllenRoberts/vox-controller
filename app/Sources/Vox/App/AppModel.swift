@@ -188,7 +188,7 @@ final class AppModel {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case home, conversation, personality, commands, vocabulary, rules, board, reminders, memory, activity, testing, voiceLab
+    case home, conversation, personality, commands, vocabulary, rules, prompts, board, reminders, memory, activity, testing, voiceLab
     var id: String { rawValue }
 
     var title: String {
@@ -205,6 +205,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .activity: "Activity"
         case .voiceLab: "Voice Lab"
         case .testing: "Testing"
+        case .prompts: "Prompts"
         }
     }
 
@@ -222,12 +223,13 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .activity: "chart.bar.xaxis"
         case .voiceLab: "waveform.badge.mic"
         case .testing: "checklist"
+        case .prompts: "text.alignleft"
         }
     }
 
     static let sections: [(String?, [Page])] = [
         (nil, [.home, .conversation]),
-        ("Teach Vox", [.personality, .commands, .vocabulary, .rules]),
+        ("Teach Vox", [.personality, .commands, .vocabulary, .rules, .prompts]),
         ("Organise", [.board, .reminders, .memory]),
         ("Insights", [.activity, .testing, .voiceLab]),
     ]

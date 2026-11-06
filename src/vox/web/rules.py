@@ -47,7 +47,9 @@ def _clean_rule(r) -> dict | None:
         return None
     if not isinstance(text, str):
         return None
-    return {"id": rid, "text": text, "enabled": bool(r.get("enabled", True))}
+    app = r.get("app")
+    return {"id": rid, "text": text, "enabled": bool(r.get("enabled", True)),
+            "app": app.strip() if isinstance(app, str) and app.strip() else None}
 
 
 def _load_rules() -> list[dict]:
@@ -86,7 +88,7 @@ def list_rules() -> list[dict]:
         return _load_rules()
 
 
-def add_rule(text) -> dict:
+def add_rule(text, app=None) -> dict:
     """Create and persist a new rule (``enabled`` defaults True). Returns the Rule.
 
     ``text`` is required; raises ``ValueError`` (→ 400) if blank.
@@ -94,7 +96,8 @@ def add_rule(text) -> dict:
     text = (text or "").strip()
     if not text:
         raise ValueError("rule 'text' is required")
-    rule = {"id": uuid.uuid4().hex[:12], "text": text, "enabled": True}
+    app = app.strip() if isinstance(app, str) and app.strip() else None
+    rule = {"id": uuid.uuid4().hex[:12], "text": text, "enabled": True, "app": app}
     with _LOCK:
         rules = _load_rules()
         rules.append(rule)
@@ -102,7 +105,10 @@ def add_rule(text) -> dict:
     return rule
 
 
-def update_rule(rid, text=None, enabled=None, **_ignored) -> dict:
+_UNSET = object()
+
+
+def update_rule(rid, text=None, enabled=None, app=_UNSET, **_ignored) -> dict:
     """Update a rule's ``text`` and/or ``enabled``. Returns the updated Rule.
 
     Only the provided fields change; unknown kwargs are ignored so an over-eager
@@ -121,6 +127,8 @@ def update_rule(rid, text=None, enabled=None, **_ignored) -> dict:
                     rule["text"] = new_text
                 if enabled is not None:
                     rule["enabled"] = bool(enabled)
+                if app is not _UNSET:
+                    rule["app"] = app.strip() if isinstance(app, str) and app.strip() else None
                 _save_rules(rules)
                 return rule
     raise ValueError(f"unknown rule id: {rid!r}")
@@ -141,16 +149,21 @@ def remove_rule(rid) -> bool:
     return removed
 
 
-def enabled_rules_text() -> str:
-    """Return the enabled rule texts as a short bulleted block, or "" if none.
+def enabled_rules_text(app: str | None = None) -> str:
+    """Return the enabled rules as a short block, or "" if none: every rule for everywhere, plus
+    the rules for ``app`` (the app in front) under their own heading. Rules for other apps are left
+    out, which is the point of app notes: each app's quirks reach the prompt only when that app is
+    in front, instead of every app's list riding along on every call.
 
-    What ``assistant.py`` injects into the system prompt. Safe to call anytime;
-    never raises — any failure returns "" so the daemon behaves as today.
-    """
+    What ``assistant.py`` and the command router inject into the system prompt. Never raises."""
     try:
         with _LOCK:
-            rules = _load_rules()
-        lines = [f"- {r['text'].strip()}" for r in rules if r.get("enabled") and r["text"].strip()]
+            rules = [r for r in _load_rules() if r.get("enabled") and r["text"].strip()]
+        lines = [f"- {r['text'].strip()}" for r in rules if not r.get("app")]
+        here = [r for r in rules if r.get("app") and app and r["app"].lower() == app.lower()]
+        if here:
+            lines.append(f"While {app} is in front:")
+            lines += [f"- {r['text'].strip()}" for r in here]
         return "\n".join(lines)
     except Exception:
         return ""
