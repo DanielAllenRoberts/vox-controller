@@ -105,6 +105,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   thread parked in an unbounded `done.wait()` after an interrupted reply, while speech playback was wedged
   (AirPods mic/output were stalling minutes earlier). Wait is now bounded; `kill -USR1 <pid>` dumps Python
   stacks to the console log for any future hang. Restarted the engine to unfreeze.
+- ☑ **Typing cut Vox off mid-reply.** Interruptions now need real voiced speech (Silero: typing 0 ms, short words
+  >= 256 ms; threshold 160 ms) and ignore Whisper's noise phrases ("you", "thank you"). Also found: the interrupt
+  thresholds were stored as text ("0.6"), so every interruption check raised a TypeError mid-reply, the likely
+  trigger for the freeze. Coerced. Stop words ("stop", "wait") bypass the word minimum.
 - ☐ **Web search** made urgent by the same request: Vox said it has no live weather access. (Already on the list.)
 
 ## Liked (keep)

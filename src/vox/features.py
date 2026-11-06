@@ -52,6 +52,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
     ("app-holdtotalk", "Vox.app", "Hold Right ⌥ to talk",
      "Hold, speak, let go: runs immediately, no wake word. ⌥-shortcuts still work.", "code"),
     # --- Voice & speed ------------------------------------------------------------------------
+    ("barge-in-real-speech", "Voice & speed", "Typing doesn't interrupt Vox",
+     "While Vox is speaking a reply, type on your keyboard: it keeps talking. Saying 'stop' or 'wait' still cuts it off.", "claude"),
     ("fast-wake", "Voice & speed", "Fast wake",
      "Say 'hey vox': the ready sound comes about half a second sooner than before.", "code"),
     ("small-brain-fast", "Voice & speed", "Quick replies are faster",

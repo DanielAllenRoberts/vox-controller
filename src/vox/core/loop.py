@@ -571,14 +571,41 @@ def _passes_interrupt_gate(audio, text, cfg) -> bool:
     from vox import runtime
     if runtime.is_typed(audio) or runtime.last_capture_ptt:
         return True
-    min_secs = _setting("interrupt_min_seconds", cfg.interrupt_min_seconds)
+    # Real speech, not noise: typing next to the mic cut a reply off (seen live; the old gate only
+    # needed 0.4 s of sound + one transcribed word, and Whisper "hears" words like "you" in clicks).
+    # Measured: short spoken words carry >= 256 ms of Silero-voiced audio, typing carries 0 ms.
+    norm = normalize(text)
+    if norm in _NOISE_HALLUCINATIONS:
+        print(f"  [barge-in] ignored {text!r}: a phrase Whisper invents from noise", flush=True)
+        return False
+    try:
+        from vox.audio import voiced_ms
+        v = voiced_ms(audio)
+        min_v = int(_setting("interrupt_min_voiced_ms", getattr(cfg, "interrupt_min_voiced_ms", 160)))
+        if v < min_v:
+            print(f"  [barge-in] ignored {text!r}: only {v} ms of voice (needs {min_v})", flush=True)
+            return False
+    except Exception:
+        pass
+    # These settings arrive as TEXT from the settings store ("0.4"). Comparing them raw raised a
+    # TypeError on the first barge-in, mid-reply, which is how a reply ended in a frozen loop.
+    try:
+        min_secs = float(_setting("interrupt_min_seconds", cfg.interrupt_min_seconds) or 0)
+        min_words = int(float(_setting("interrupt_min_words", cfg.interrupt_min_words) or 0))
+    except (TypeError, ValueError):
+        min_secs, min_words = cfg.interrupt_min_seconds, cfg.interrupt_min_words
+    if _is_call_stop(text):  # "stop" / "wait" are one word on purpose; the voice check above still applies
+        return True
     if min_secs and len(audio) / cfg.sample_rate < min_secs:
         return False
-    min_words = _setting("interrupt_min_words", cfg.interrupt_min_words)
-    if min_words and len(normalize(text).split()) < min_words:
+    if min_words and len(norm.split()) < min_words:
         return False
     return True
 
+
+# What Whisper transcribes from keyboard clicks, breaths and silence. Never a real interruption.
+_NOISE_HALLUCINATIONS = {"you", "thank you", "thanks", "thank you for watching", "thanks for watching",
+                         "bye", "so", "um", "uh", "hmm", "mm", "huh", "the", "i", "a"}
 
 _CALL_STOP = ("stop", "stop it", "cancel", "cancel it", "wait", "hold on", "hang on",
               "no stop", "stop stop")
@@ -694,6 +721,7 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
             text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
             if not text or not _passes_interrupt_gate(audio, text, cfg):
                 continue  # blip / too short → not a real barge-in; let the reply continue
+            print(f"  [barge-in] interrupting the reply: heard {text!r}", flush=True)
             tts.stop_speaking()  # gated, real speech over the reply → cut the voice now
             if _is_abort(text, cfg) or _is_sleep(text, cfg):
                 return "sleep", None

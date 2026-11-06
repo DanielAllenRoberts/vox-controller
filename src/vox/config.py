@@ -151,6 +151,7 @@ class Config:
     # Targets O7 (ambient/speaker audio falsely interrupting) and O8 (flaky barge-in).
     interrupt_min_words: int = 1         # ≥ this many transcribed words before a barge-in counts
     interrupt_min_seconds: float = 0.4   # captured audio must be at least this long to count
+    interrupt_min_voiced_ms: int = 160   # ...and contain this much real speech (typing measures 0 ms, short words >= 256 ms)
     # Only arm the interrupt-listener for SLOW calls (big-brain / vision / compose). Fast
     # small-brain/deterministic calls finish before the poll ever fires — arming barge-in there
     # just wastes a capture window and risks a spurious cancel (part of O8). True = slow-only.
