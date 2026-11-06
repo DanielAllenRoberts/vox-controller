@@ -17,8 +17,14 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   opens a popover instead of growing it.
 - ☑ **Command switches show grey when ON.** The system switch goes grey whenever its window isn't in
   front. Vox now draws its own switch, green when on, used everywhere (Settings and menu bar too).
-- ☐ **Memory saved odd long-term facts** (e.g. how to refresh a page). Research how good memory
-  systems decide what's long-term vs daily (MemPalace, ideas #28/#55) and tighten what gets promoted.
+- ☑ **Memory saved odd long-term facts** (e.g. how to refresh a page). Cause: the chat prompt listed
+  "standing instructions" as core. Now, following Mem0's tested extraction rules (personal details,
+  people, preferences, work, plans, health; never system/assistant text) core is only facts ABOUT THE
+  PERSON; how-to notes are demoted to the daily log by a code gate too; "remember to X" is a task (daily),
+  "remember that X" is stored self-contained ("The user said: …"); near-duplicate core facts are skipped.
+  The two existing "refresh" entries in core were left for the user to delete on the Memory page.
+  Next (ideas #28): Mem0-style UPDATE/DELETE when a new fact contradicts an old one, and nightly
+  consolidation of daily notes.
 - ☑ **"Refresh the page" should be able to press ⌘R.** The router now lists `press <keys>` with the
   standard shortcuts (save, undo, reopen tab, print), and a new `MENU: <item>` directive reads the front
   app's menu bar over AX (every command + its shortcut, ~0.1-0.2 s, no focus change) and chooses the

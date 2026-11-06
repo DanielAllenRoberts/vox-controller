@@ -284,6 +284,18 @@ def _score(query_tokens: list[str], entry: dict) -> float:
 
 # --- Public API --------------------------------------------------------------
 
+def _near_duplicate(text: str, entries: list[dict], threshold: float = 0.75) -> dict | None:
+    """An entry saying (almost) the same thing: shared words over all words >= ``threshold``."""
+    a = set(_tokens(text))
+    if not a:
+        return None
+    for e in entries:
+        b = set(_tokens(e.get("text", "")))
+        if b and len(a & b) / len(a | b) >= threshold:
+            return e
+    return None
+
+
 def add(text: str, tier: str = "daily", tags: list[str] | None = None) -> dict:
     """Append a memory bullet and return the stored entry dict.
 
@@ -316,6 +328,11 @@ def add(text: str, tier: str = "daily", tags: list[str] | None = None) -> dict:
 
     with _LOCK:
         _ensure_ready()
+        if tier == "core":
+            # Same fact again ("The user's name is Sam" twice) → keep the one we have.
+            dup = _near_duplicate(text, _read_file_entries(_CORE_FILE, "core"))
+            if dup is not None:
+                return dup
         try:
             if tier == "core":
                 path = _CORE_FILE

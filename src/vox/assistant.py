@@ -44,13 +44,16 @@ _SYSTEM = (
     "reply is kept only in the logs / dashboard, which the user is not looking at.)\n\n"
     "Memory: you can remember things across conversations. When the user shares something worth "
     "keeping, append a capture directive on its own line at the very end of your reply — "
-    "'MEMORY[core]: <fact>' for durable, always-relevant facts (their name, standing "
-    "preferences, long-term projects, standing instructions) or 'MEMORY[daily]: <note>' for "
-    "passing, session-specific things (what you did today, one-off requests). "
+    "'MEMORY[core]: <fact>' ONLY for lasting facts ABOUT THE PERSON: who they are, the people in "
+    "their life, what they like and dislike, their work and projects, their goals, health and diet, "
+    "important dates. Or 'MEMORY[daily]: <note>' for passing things (what you did today, one-off "
+    "requests). NEVER save how Vox should do something (a phrase meaning a key, a click, an app "
+    "habit): those are commands and app notes, saved elsewhere, not memories. Never save tasks or "
+    "reminders, or anything you said yourself. "
     "Write each fact as a COMPLETE, SELF-CONTAINED sentence that a FUTURE session with NO context "
     "could understand on its own — always state WHAT the fact is about, never just the bare answer. "
-    "After asking the user's name and hearing 'Daniel', store \"MEMORY[core]: The user's name is "
-    "Daniel\" — NEVER \"MEMORY[core]: Daniel\". Likewise \"The user prefers concise replies\", not "
+    "After asking the user's name and hearing 'Sam', store \"MEMORY[core]: The user's name is "
+    "Sam\" — NEVER \"MEMORY[core]: Sam\". Likewise \"The user prefers concise replies\", not "
     "\"concise\"; \"The user works at Acme as a designer\", not \"Acme\". If it can't stand alone "
     "and be understood months later, rewrite it so it can. "
     "It's stripped before the reply is shown or spoken; never mention it. Use it sparingly and only "
@@ -223,14 +226,31 @@ def _autocapture_on() -> bool:
     return bool(_setting("memory_autocapture", True))
 
 
+# How-to-operate notes are commands or app notes, not facts about the person. Seen live: "The user
+# wants the spoken word 'refresh' to refresh the browser tab" saved as a permanent memory.
+_HOW_TO = re.compile(
+    r"(?i)\b(?:spoken (?:word|phrase)|when (?:i|they|the user) says?|keystroke|key ?board shortcut|"
+    r"shortcut|cmd ?\+|command ?\+|⌘|press(?:es|ing)? (?:the )?(?:key|cmd|command)|refresh(?:es)? the|"
+    r"reload|click(?:s|ing)? (?:on|the)|vox should|vox (?:must|needs to))\b")
+
+
+def _core_ok(text: str) -> bool:
+    """Whether a fact belongs in long-term memory: about the person, not about operating Vox."""
+    return not _HOW_TO.search(text or "")
+
+
 def _mem_add(text: str, tier: str) -> None:
     """Save one memory at the given tier. Tries the tiered API (add(text, tier=...))
     and falls back to the legacy flat API (add(text)) if it doesn't accept a tier.
+    A "core" fact that's really a how-to note is kept, but in the daily log.
     Fully guarded: a missing/broken memory module is a silent no-op — capture must
     never break a reply."""
     text = (text or "").strip()
     if not text:
         return
+    if tier == "core" and not _core_ok(text):
+        _dbg("[memory]", f"not long-term (a how-to note) → daily: {text!r}")
+        tier = "daily"
     try:
         from vox import memory
         try:
@@ -245,9 +265,11 @@ def _mem_add(text: str, tier: str) -> None:
 # Matched on its own line; the rest of the line (to EOL) is the fact/note.
 _MEMORY_DIRECTIVE = re.compile(r"(?im)^[ \t]*MEMORY\[(core|daily)\]:[ \t]*(.+?)[ \t]*$")
 
-# Explicit user request to remember something → core by default. Captures the fact
-# after "remember that/to" so "remember that I like tea" stores "I like tea".
-_REMEMBER_THAT = re.compile(r"(?i)\bremember\s+(?:that|to)\s+(.+)", re.DOTALL)
+# Explicit user request to remember something → core. Captures the fact after "remember that"
+# so "remember that I like tea" stores "I like tea". "Remember to call Sam" is a task, not a fact:
+# it goes to the daily log instead.
+_REMEMBER_THAT = re.compile(r"(?i)\bremember\s+that\s+(.+)", re.DOTALL)
+_REMEMBER_TO = re.compile(r"(?i)\bremember\s+to\s+(.+)", re.DOTALL)
 _REMEMBER_THIS = re.compile(r"(?i)\bremember\s+(?:this|that)\b")
 
 
@@ -285,8 +307,13 @@ def _capture_from_user(user_text: str) -> None:
         if not _autocapture_on():
             return
         m = _REMEMBER_THAT.search(user_text)
+        to = _REMEMBER_TO.search(user_text)
         if m:
-            _mem_add(m.group(1), "core")
+            # Kept in their words but made self-contained: "I'm vegetarian" alone, read months
+            # later, doesn't say who.
+            _mem_add(f"The user said: {m.group(1).strip()}", "core")
+        elif to:
+            _mem_add(f"Asked to remember to {to.group(1).strip()}", "daily")
         elif _REMEMBER_THIS.search(user_text):
             # "remember this" with no explicit fact → store the surrounding utterance.
             _mem_add(user_text, "core")

@@ -133,6 +133,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Tags get colours; a checklist shows 2/3 on the card; Archive hides a card (toolbar archive button shows them, Restore brings one back); search filters every list. By voice: 'tag the invoice card work', 'add draft it to the invoice checklist', 'archive the invoice card', 'what's due this week?'.", "code"),
     ("shortcuts-menus", "Control", "Shortcuts and menu commands",
      "In any app: 'save this' (⌘S), 'undo that' (⌘Z), 'reopen the tab I closed' (⌘⇧T). For app-specific commands Vox uses the app's own menus: in Zen 'open the developer tools', 'zoom in'; in Pages/Preview 'export as PDF'.", "code"),
+    ("memory-quality", "Memory", "Long-term memory keeps facts about you",
+     "Hey Vox: 'my sister Jess lives in Durban' and 'remember that I'm vegetarian' → Memory → long-term. 'From now on when I say refresh press command R' and 'remember to call the bank' → not long-term (today's notes only). Saying the same fact twice keeps one.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),
