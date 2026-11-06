@@ -225,7 +225,7 @@ private struct PermissionStep: View {
             if !granted {
                 VStack(spacing: 10) {
                     if kind == .accessibility {
-                        Text("macOS opens System Settings. Turn on **Vox** in the list, then come back here.")
+                        Text("macOS will ask. Choose **Open System Settings**, turn on **Vox**, then come back here.")
                             .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     } else if perms.status(kind) == .denied {
                         Text("Microphone access was turned off earlier. Turn on **Vox** in System Settings → Privacy & Security → Microphone.")

@@ -74,7 +74,12 @@ final class Permissions {
     func status(_ k: Kind) -> Status { statuses[k] ?? .notAsked }
     var requiredGranted: Bool { Kind.allCases.filter(\.required).allSatisfy { status($0) == .granted } }
 
+    /// Ask the way every Mac app does: the FIRST press shows macOS's own prompt, whose "Open System
+    /// Settings" button takes the user to the right pane. Only a repeat press (the prompt was dismissed
+    /// or macOS won't show it again) opens System Settings directly. Doing both at once, as an earlier
+    /// version did, put the prompt and the Settings window on screen together.
     func request(_ k: Kind) {
+        let again = asked.contains(k)
         asked.insert(k)
         switch k {
         case .microphone:
@@ -84,12 +89,19 @@ final class Permissions {
                 AVCaptureDevice.requestAccess(for: .audio) { _ in Task { @MainActor in self.refresh() } }
             }
         case .accessibility:
-            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(opts)
-            NSWorkspace.shared.open(k.settingsURL)
+            if again {
+                NSWorkspace.shared.open(k.settingsURL)
+            } else {
+                let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(opts)
+            }
             watch()
         case .screenRecording:
-            if !CGRequestScreenCaptureAccess() { NSWorkspace.shared.open(k.settingsURL) }
+            if again {
+                NSWorkspace.shared.open(k.settingsURL)
+            } else {
+                _ = CGRequestScreenCaptureAccess()   // shows the system prompt the first time
+            }
             watch()
         }
     }
