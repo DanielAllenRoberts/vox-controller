@@ -1708,6 +1708,11 @@ def _log_issue(text: str) -> str:
         return "Say 'log an issue' and then what went wrong, in one go."
     from vox import issues
     issues.add(text)
+    try:  # one-shots succeed silently, so confirm on screen (quietly) that it was saved
+        from vox import bubble
+        bubble.show(f"Issue logged: {text[:120]}", source="Vox", duration=4)
+    except Exception:
+        pass
     return "Logged it."
 
 

@@ -1340,9 +1340,13 @@ def main() -> None:
                         # Same shared dispatch as control/assistant: deterministic (what-app /
                         # scheduler / command) first, else the executor (write / make-pretty /
                         # vision / fuzzy) — so one-shots cover everything the other modes do.
+                        # One-shots belong in the conversation too: they were missing from the
+                        # Conversation page, Home's Recent, and the context saved with a logged issue.
+                        _record_turn("user", cmd, kind="oneshot")
                         det = dispatch.try_deterministic(cmd)
                         if det is not None:
                             acted, msg = det
+                            _record_turn("assistant", str(msg), kind="command")
                             if acted:
                                 out.emit(f"⚡ {cmd!r} → {msg}")
                             else:
@@ -1357,6 +1361,9 @@ def main() -> None:
                             out.emit("→ entering dictation…")
                             label = "dictation"  # fall through to the mode-chaining loop below
                         else:
+                            if msg:
+                                _record_turn("assistant", assistant.split_say(str(msg))[0], brain="small",
+                                             kind="command" if acted else "reply")
                             if acted:
                                 out.emit(f"⚡ {msg}")
                             elif msg:

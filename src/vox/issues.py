@@ -33,7 +33,27 @@ def _context() -> dict:
         ctx["recentTurns"] = [f"{t.get('role')}: {t.get('text')}" for t in reversed(turns)]
     except Exception:
         pass
+    ctx["recentLog"] = _recent_log()
     return ctx
+
+
+_LOG_MARKERS = ("heard", "you:", "you (typed)", "decision=", "⚡", "🔊", "[learn]", "click", "→")
+
+
+def _recent_log(n: int = 25) -> list[str]:
+    """The last few meaningful lines of vox.log: what was heard and decided just before the issue.
+    Unlike the conversation feed (in memory, emptied by every restart), the log survives."""
+    try:
+        from vox.config import CONFIG
+        with open(CONFIG.log_file, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 60_000))
+            tail = f.read().decode("utf-8", "replace").splitlines()[1:]
+        keep = [ln.strip()[:300] for ln in tail if any(m in ln for m in _LOG_MARKERS)
+                and not ln.lstrip().startswith(("[debug][prompt", "[user]", "[assistant]"))]
+        return keep[-n:]
+    except Exception:
+        return []
 
 
 def add(text: str) -> dict:
