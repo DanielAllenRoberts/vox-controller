@@ -329,6 +329,34 @@ def _labels_agree(said: str, label: str) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.6
 
 
+def _point_by_vision(target: str) -> str | None:
+    """Point at something the AX/DOM lookup couldn't find by name: badge every visible target on a
+    screenshot, ask the big brain which badge the user means (the click-by-vision recipe), then ring
+    that element instead of clicking it. None when vision is off or can't tell."""
+    if not _setting("screen_vision_enabled", CONFIG.screen_vision_enabled):
+        return None
+    try:
+        from vox import overlay, targets
+        items = targets.visible_targets() or []
+        shot = actions.capture_screen() if items else None
+        marked = overlay.annotate(shot, items) if shot else None
+        if not marked:
+            return None
+        prompt = _CLICK_VISION_PROMPT.format(target=target, n=len(items)).replace(
+            "The user wants to click:", "The user wants to SEE where this is (nothing will be clicked):")
+        answer = assistant.look(prompt, marked, brain="big")
+        nums = re.findall(r"\d{1,3}", answer or "")
+        n = int(nums[-1]) if nums else 0
+        assistant._dbg("[executor]", f"point-by-vision for {target!r} over {len(items)} marks → {(answer or '').strip()!r}")
+        if not 1 <= n <= len(items):
+            return None
+        it = items[n - 1]
+        overlay.point([{**it, "label": it.get("label") or target}])
+        return f"There's {it.get('label') or target}."
+    except Exception:
+        return None
+
+
 def _click_by_vision(target: str, items) -> str | None:
     """Vision escalation for clicking (idea #37's set-of-marks, off the back of #52).
 
@@ -599,6 +627,9 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         from vox import ax
         with ax.pinned_to(*(aim or (0, ""))):
             result = actions.point_at(target)
+            if not result.startswith("There's"):
+                # Not found by name: LOOK at the screen before giving up, like clicking does.
+                result = _point_by_vision(target) or result
         assistant._dbg("[executor]", f"decision=POINT target={target!r} → {result!r}")
         return result.startswith("There's"), result
     if upper.startswith("DICTATE"):  # user wants to type by voice → tell the loop to enter dictation

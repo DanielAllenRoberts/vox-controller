@@ -40,6 +40,7 @@ struct MainWindow: View {
         case .memory: MemoryView()
         case .activity: ActivityView()
         case .voiceLab: VoiceLabView()
+        case .testing: TestingView()
         }
     }
 }

@@ -39,6 +39,25 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☐ **Onboarding: get to know you:** look at installed apps, infer interests, ask a few personalised
   questions, save the answers to memory.
 
+## Round 1b (later notes, same session)
+- ☑ **Clicking/pointing inside Vox.app failed** ("click on memory", "point at personality"). Cause:
+  sidebar rows' text sits in AXValue and rows have no AXPress, so the click engine couldn't see them.
+  Fixed in `ax.py` (also fixes Finder/Mail/Notes/System Settings sidebars).
+- ☑ **"can you circle something on the screen" searched for an element named "something on the
+  screen"**, then a second greedy pattern read it as an app. Vague targets now go to the brain;
+  the app-window pattern is anchored; pointing falls back to looking at the screen.
+- ☑ **Browser switched Arc → Zen; "show tabs" opened Arc.** Browser commands now follow the browser
+  in front / the Mac's default browser, with per-browser tab control (Zen: ⌥⌘S, ⌃Tab, ⌘1–9, `%` tab search).
+- ☑ **"Log this issue" by voice** → `data/issues.jsonl` with context, shown in Testing → Logged issues.
+  I check it on every pass (`GET /api/issues`).
+- ☐ **Agent task board + background agents** (like Paperclip, Hermes, OpenClaw): a board of agent
+  tasks that agents pick up and run in the background, on schedules (cron), straight into Claude Code
+  or others. Open an agent's chat from the app. Its own section in Settings. Reuse what exists
+  (Claude Agent SDK, Hermes/OpenClaw patterns, Paperclip's delegation) rather than reinvent.
+  Research Paperclip first (the user has it starred).
+- ☐ **ChatGPT / OpenAI as a brain option** alongside Claude and DeepSeek.
+- ☐ **Expand the task board** (more than lists + cards; scope to discuss).
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).

@@ -376,6 +376,44 @@ def create_app() -> FastAPI:
         print(f"🔔 agent alert: {text}")
         return Response(status_code=204)
 
+    # --- Issues logged by voice (vox/issues.py) ---
+    @app.get("/api/issues")
+    def get_issues() -> list:
+        from .. import issues
+        return issues.all_issues()
+
+    @app.patch("/api/issues/{iid}")
+    async def patch_issue(iid: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import issues
+        try:
+            return issues.set_status(iid, str(body.get("status", "open")), body.get("note"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such issue")
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    # --- Insights → Testing: every feature, how to test it, and the user's verdict (vox/features.py) ---
+    @app.get("/api/features")
+    def get_features() -> list:
+        from .. import features
+        return features.all_features()
+
+    @app.patch("/api/features/{fid}")
+    async def patch_feature(fid: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import features
+        try:
+            return features.update(fid, status=body.get("status"), comment=body.get("comment"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such feature")
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
     # --- Voice Lab: the user's own recordings for testing (vox/voice_samples.py) ---
     @app.get("/api/samples")
     def get_samples() -> dict:

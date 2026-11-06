@@ -128,6 +128,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "right_click": _right_click, "double_click": _double_click,
         "drag": _drag, "set_value": _set_value,
         "point": point_at,
+        "log_issue": _log_issue,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -171,6 +172,12 @@ def _parse(text: str) -> tuple[str, str] | None:
     # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
     # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
 
+    # "log an issue: the circle thing didn't work" → saved with what was happening (vox/issues.py).
+    m = re.match(r"(?:(?:please|vox|can you|could you)[,:]?\s+)*(?:log|report|note|file)\s+(?:this|an|a|the|that)?\s*"
+                 r"(?:issue|bug|problem)\b[\s,:.-]*(.*)$", t)
+    if m:
+        return ("log_issue", text.strip()[len(text.strip()) - len(m.group(1)):] if m.group(1) else "")
+
     # Point at something without clicking it (ideas #69.2): "point at export", "circle the save
     # button", "where's the settings icon". "where is" only counts with a UI noun at the end, so
     # "where is the nearest pharmacy" still reaches the brain as a question.
@@ -183,7 +190,9 @@ def _parse(text: str) -> tuple[str, str] | None:
     if m:
         tgt = re.sub(r"\s+(?:button|link|icon|tab|menu|field|setting|option|toggle|checkbox|switch)$", "",
                      m.group(1).strip())
-        if tgt and tgt not in {"it", "that", "this"}:
+        # A vague target ("circle something on the screen") isn't a label to search for; the brain
+        # decides what to show. Seen live: it searched for an element called "something on the screen".
+        if tgt and tgt not in {"it", "that", "this"} and not re.match(r"(?:something|anything|stuff|whatever|things?)\b", tgt):
             return ("point", tgt)
 
     # Right / double click, by control label or by a badge number from the overlay.
@@ -335,8 +344,11 @@ def _parse(text: str) -> tuple[str, str] | None:
         return ("profile", str(_to_index(m.group(1))))
     # Cycle a specific app's windows across Spaces (simulated Dock-click) — "cursor
     # window", "next cursor window", "cursor space", "switch cursor".
-    m = re.search(r"\b(?:next\s+)?([a-z][a-z ]*?)\s+(?:window|space|screen)\b", t)
-    if m and m.group(1).strip() not in ("the", "my", "a", "this", "next"):
+    # Anchored + at most three words of app name: unanchored, "can you circle something on the
+    # screen" became an app called "can you circle something on the".
+    m = re.match(r"(?:(?:please|vox)\s+)?(?:next\s+|switch\s+to\s+(?:the\s+|my\s+)?|go\s+to\s+(?:the\s+|my\s+)?)?"
+                 r"([a-z]+(?:\s+[a-z]+){0,2}?)\s+(?:window|space|screen)$", t)
+    if m and m.group(1).strip() not in ("the", "my", "a", "this", "next", "on the", "the whole"):
         return ("app_cycle", m.group(1).strip())
     m = re.search(r"\b(?:switch|cycle|toggle)\s+(?:to\s+)?([a-z]+(?:\s+[a-z]+)?)\b", t)
     if m:
@@ -1688,6 +1700,15 @@ def _click_variant(target: str, button: str, clicks: int, verb: str) -> str:
     except Exception as exc:
         return f"failed: couldn't {verb} {label!r} ({exc})."
     return f"{verb}ed {label}"
+
+
+def _log_issue(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return "Say 'log an issue' and then what went wrong, in one go."
+    from vox import issues
+    issues.add(text)
+    return "Logged it."
 
 
 def point_at(target: str) -> str:
