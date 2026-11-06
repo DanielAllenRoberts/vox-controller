@@ -14,7 +14,7 @@ struct OnboardingView: View {
     @State var step: Step = .welcome
     @State private var perms = Permissions()
     @State private var installer = Installer()
-    @State private var brainReady = false
+    @State private var brain = BrainSetup()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +26,7 @@ struct OnboardingView: View {
                 case .microphone: PermissionStep(kind: .microphone, perms: perms)
                 case .accessibility: PermissionStep(kind: .accessibility, perms: perms)
                 case .engine: EngineStep(installer: installer)
-                case .brain: BrainStep(ready: $brainReady)
+                case .brain: BrainStep(setup: brain)
                 case .tryIt: TryItStep()
                 case .done: DoneStep()
                 }
@@ -66,9 +66,18 @@ struct OnboardingView: View {
         .transaction { $0.animation = nil }
     }
 
+    // The blue button is never a dead end: on every step it does the next useful thing (ask for the
+    // permission, test the brain, move on), and a Skip sits beside anything that can stall.
+    // An earlier version disabled Continue until a condition was met that the screen didn't explain
+    // (press Test, wait for a permission check), and people got stuck.
+
     private var primaryLabel: String {
         switch step {
         case .welcome: "Get Started"
+        case .microphone where perms.status(.microphone) == .denied: "Open Settings"
+        case .microphone where perms.status(.microphone) != .granted: "Allow Microphone"
+        case .accessibility where perms.status(.accessibility) != .granted: "Allow Access…"
+        case .brain where brain.isTesting: "Testing…"
         case .done: "Open Vox"
         default: "Continue"
         }
@@ -76,21 +85,17 @@ struct OnboardingView: View {
 
     private var skipLabel: String? {
         switch step {
-        case .brain where !brainReady: "Set Up Later"
+        case .microphone where perms.status(.microphone) != .granted: "Skip for Now"
         case .accessibility where perms.status(.accessibility) != .granted: "Skip for Now"
+        case .engine where !model.engine.isRunning: "Skip for Now"
+        case .brain where !brain.passed: "Set Up Later"
         case .tryIt: "Skip"
         default: nil
         }
     }
 
     private var canContinue: Bool {
-        switch step {
-        case .microphone: perms.status(.microphone) == .granted
-        case .accessibility: perms.status(.accessibility) == .granted
-        case .engine: model.engine.isRunning
-        case .brain: brainReady
-        default: true
-        }
+        !(step == .brain && brain.isTesting)
     }
 
     private func primary() {
@@ -98,6 +103,14 @@ struct OnboardingView: View {
         case .welcome:
             beginEngineInBackground()
             go(1)
+        case .microphone where perms.status(.microphone) != .granted:
+            perms.request(.microphone)
+        case .accessibility where perms.status(.accessibility) != .granted:
+            perms.request(.accessibility)
+        case .engine where !model.engine.isRunning:
+            go(1)   // the brain step waits for the engine itself
+        case .brain:
+            Task { if await brain.run(model) { go(1) } }
         case .done:
             model.onboardingDone = true
             openWindow(id: "main")
@@ -203,20 +216,14 @@ private struct Bullet: View {
 private struct PermissionStep: View {
     var kind: Permissions.Kind
     var perms: Permissions
-    @State private var askedAt: Date?
 
     var body: some View {
         let granted = perms.status(kind) == .granted
         StepLayout(symbol: granted ? "checkmark.circle.fill" : kind.symbol, tint: granted ? .green : .accentColor,
                    title: granted ? "\(kind.title) allowed" : "Allow \(kind.title)",
-                   message: kind.why) {
+                   message: granted ? "All set. Press Continue." : kind.why) {
             if !granted {
                 VStack(spacing: 10) {
-                    Button(perms.status(kind) == .denied ? "Open System Settings" : "Allow \(kind.title)…") {
-                        perms.request(kind)
-                        askedAt = Date()
-                    }
-                    .controlSize(.large)
                     if kind == .accessibility {
                         Text("macOS opens System Settings. Turn on **Vox** in the list, then come back here.")
                             .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -224,7 +231,7 @@ private struct PermissionStep: View {
                         Text("Microphone access was turned off earlier. Turn on **Vox** in System Settings → Privacy & Security → Microphone.")
                             .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
-                    if askedAt != nil && kind == .accessibility {
+                    if perms.asked.contains(kind) && kind == .accessibility {
                         // Seen in practice: Vox is switched on in System Settings but this process
                         // still isn't trusted (an older build's entry, or a grant macOS only applies
                         // on relaunch). Never leave the user stuck on this screen.
@@ -302,57 +309,41 @@ private struct EngineStep: View {
 
 // MARK: Brain
 
-private struct BrainStep: View {
-    @Environment(AppModel.self) private var model
-    @Binding var ready: Bool
-    @State private var choice: BrainPreset = .current
-    @State private var keys: [String: Bool] = [:]
-    @State private var test: TestState = .idle
-    @State private var claudeLoggedIn: Bool?
-
+/// The brain step's state, owned by OnboardingView so the footer's Continue can run it.
+@MainActor
+@Observable
+final class BrainSetup {
     enum TestState: Equatable { case idle, testing, passed(Int), failed(String) }
 
-    var body: some View {
-        StepLayout(symbol: "brain", title: "Choose a brain",
-                   message: "Vox recognises commands on its own. A language model handles everything else.", compact: true) {
-            VStack(spacing: 8) {
-                ForEach(BrainPreset.allCases) { p in
-                    PresetRow(preset: p, selected: choice == p, keys: keys, claudeLoggedIn: claudeLoggedIn) {
-                        choice = p; test = .idle; ready = false
-                    }
-                }
-                ForEach(choice.keysNeeded, id: \.self) { name in KeyField(name: name, isSet: keys[name] ?? false) { await refreshKeys() } }
-                HStack {
-                    testStatus
-                    Spacer()
-                    Button(choice == .current ? "Test" : "Use This") { Task { await apply() } }
-                        .disabled(test == .testing || !model.engine.isRunning || choice.keysNeeded.contains { !(keys[$0] ?? false) })
-                }
-                .padding(.top, 4)
-            }
-        }
-        .task { await refreshKeys(); claudeLoggedIn = await ClaudeCLI.loggedIn() }
-    }
+    var choice: BrainPreset = .current { didSet { if choice != oldValue { test = .idle } } }
+    private(set) var test: TestState = .idle
+    private(set) var keys: [String: Bool] = [:]
+    var claudeLoggedIn: Bool?
 
-    @ViewBuilder private var testStatus: some View {
-        switch test {
-        case .idle: Text(model.engine.isRunning ? " " : "Waiting for the engine…").font(.callout).foregroundStyle(.secondary)
-        case .testing: HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Testing…").foregroundStyle(.secondary) }
-        case .passed(let ms): Label("Working. Replied in \(String(format: "%.1f", Double(ms) / 1000)) s", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case .failed(let why): Label(why, systemImage: "xmark.octagon.fill").foregroundStyle(.red).lineLimit(2).font(.callout)
-        }
-    }
+    var isTesting: Bool { test == .testing }
+    var passed: Bool { if case .passed = test { return true }; return false }
 
-    private func refreshKeys() async {
+    func refreshKeys(_ model: AppModel) async {
         if let k: [String: Bool] = try? await model.api.get("secrets") { keys = k }
     }
 
-    private func apply() async {
+    /// Apply the chosen preset (if any), then prove the brain answers. True when it's working.
+    func run(_ model: AppModel) async -> Bool {
+        if passed { return true }
+        if let missing = choice.keysNeeded.first(where: { !(keys[$0] ?? false) }) {
+            test = .failed("Paste your \(KeyField.label(for: missing)) above first, or choose another option.")
+            return false
+        }
         test = .testing
+        for _ in 0..<120 where !model.engine.isRunning { try? await Task.sleep(for: .milliseconds(500)) }
+        guard model.engine.isRunning else {
+            test = .failed("The speech engine isn't running yet. Go back a step to see why, or set this up later.")
+            return false
+        }
         if let p = choice.settings {
             for (k, v) in p { try? await model.api.setSetting(k, .string(v)) }
-            // Provider changes apply on restart.
-            model.engine.restart()
+            model.engine.restart()   // provider changes apply on restart
+            try? await Task.sleep(for: .seconds(1))
             for _ in 0..<120 where !model.engine.isRunning { try? await Task.sleep(for: .milliseconds(500)) }
             await model.reloadSettings()
         }
@@ -360,9 +351,55 @@ private struct BrainStep: View {
         do {
             let r: R = try await model.api.send("brain/test", method: "POST", body: ["brain": "small"])
             test = r.ok ? .passed(r.ms) : .failed(r.reply)
-            ready = r.ok
+            return r.ok
         } catch {
             test = .failed(error.localizedDescription)
+            return false
+        }
+    }
+}
+
+private struct BrainStep: View {
+    @Environment(AppModel.self) private var model
+    var setup: BrainSetup
+
+    var body: some View {
+        StepLayout(symbol: "brain", title: "Choose a brain",
+                   message: "Vox recognises commands on its own. A language model handles everything else.", compact: true) {
+            VStack(spacing: 8) {
+                ForEach(BrainPreset.allCases) { p in
+                    PresetRow(preset: p, selected: setup.choice == p, keys: setup.keys, claudeLoggedIn: setup.claudeLoggedIn) {
+                        setup.choice = p
+                    }
+                }
+                ForEach(setup.choice.keysNeeded, id: \.self) { name in
+                    KeyField(name: name, isSet: setup.keys[name] ?? false) { await setup.refreshKeys(model) }
+                }
+                HStack { testStatus; Spacer() }
+                    .frame(minHeight: 22)
+                    .padding(.top, 4)
+            }
+        }
+        .task {
+            await setup.refreshKeys(model)
+            setup.claudeLoggedIn = await ClaudeCLI.loggedIn()
+            // Keeping the current setup needs nothing from the user, so check it straight away.
+            if setup.choice == .current { _ = await setup.run(model) }
+        }
+    }
+
+    @ViewBuilder private var testStatus: some View {
+        switch setup.test {
+        case .idle:
+            Text(setup.choice == .current ? "Press Continue to check it works." : "Press Continue to switch and test it.")
+                .font(.callout).foregroundStyle(.secondary)
+        case .testing:
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Checking the brain answers…").foregroundStyle(.secondary) }
+        case .passed(let ms):
+            Label("Working. Replied in \(String(format: "%.1f", Double(ms) / 1000)) s", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .failed(let why):
+            Label(why, systemImage: "xmark.octagon.fill").foregroundStyle(.red).lineLimit(3).font(.callout)
         }
     }
 }
@@ -450,7 +487,9 @@ private struct KeyField: View {
     @State private var value = ""
     @State private var error: String?
 
-    private var label: String {
+    private var label: String { Self.label(for: name) }
+
+    static func label(for name: String) -> String {
         switch name {
         case "DEEPSEEK_API_KEY": "DeepSeek API key"
         case "ANTHROPIC_API_KEY": "Anthropic API key"

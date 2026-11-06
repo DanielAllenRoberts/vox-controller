@@ -53,6 +53,8 @@ final class Permissions {
     enum Status { case granted, denied, notAsked }
 
     private(set) var statuses: [Kind: Status] = [:]
+    /// Kinds the user has already pressed Allow for (drives "still not working?" help).
+    private(set) var asked: Set<Kind> = []
     private var pollTask: Task<Void, Never>?
 
     init() { refresh() }
@@ -73,6 +75,7 @@ final class Permissions {
     var requiredGranted: Bool { Kind.allCases.filter(\.required).allSatisfy { status($0) == .granted } }
 
     func request(_ k: Kind) {
+        asked.insert(k)
         switch k {
         case .microphone:
             if status(.microphone) == .denied {
