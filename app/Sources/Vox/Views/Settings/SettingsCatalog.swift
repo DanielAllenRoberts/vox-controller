@@ -64,6 +64,9 @@ enum SettingsCatalog {
                 s("agent_alerts", "When an agent is waiting for you", "Says which agent needs you, e.g. \u{201C}David needs your OK.\u{201D}"),
                 s("agent_done_alerts", "Also tell me when an agent finishes"),
             ]),
+            .init(title: "You", footer: nil, items: [
+                s("home_location", "Home location", "Used for \u{201C}what's the weather?\u{201D} when you don't name a place."),
+            ]),
             .init(title: "Spending", footer: nil, items: [
                 s("monthly_budget_usd", "Monthly budget (USD)", "Warns you as API spending approaches this. 0 turns it off."),
             ]),

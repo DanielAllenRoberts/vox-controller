@@ -34,7 +34,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   can't open it, instead of listing every site it can open. Less scrolling.
 - ☑ **Prompts in the database + a Prompts editor:** every prompt Vox sends, viewable and editable by
   the user (and by me on request), never by Vox itself. Show what was actually sent per prompt type.
-- ☐ **Web search for the brain:** answer questions and find app tutorials from the web (Clicky's power).
+- ☑ **Web search for the brain:** answer questions and find app tutorials from the web (Clicky's power).
 - ☑ **Onboarding: choose a voice** (list, preview button speaking preset text, no AI call).
 - ☑ **Onboarding: get to know you:** look at installed apps, infer interests, ask a few personalised
   questions, save the answers to memory.
@@ -109,7 +109,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   >= 256 ms; threshold 160 ms) and ignore Whisper's noise phrases ("you", "thank you"). Also found: the interrupt
   thresholds were stored as text ("0.6"), so every interruption check raised a TypeError mid-reply, the likely
   trigger for the freeze. Coerced. Stop words ("stop", "wait") bypass the word minimum.
-- ☐ **Web search** made urgent by the same request: Vox said it has no live weather access. (Already on the list.)
+- ☑ **Web search** made urgent by the same request: Vox said it has no live weather access. (Already on the list.)
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.

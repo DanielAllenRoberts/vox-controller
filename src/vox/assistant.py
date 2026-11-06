@@ -364,7 +364,16 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
         system = f"{system}\n\n{actions._now_line()}"
     except Exception:
         pass
+    system += ("\n\nYou CAN look things up on the internet. If answering needs live or current "
+               "information (weather, news, scores, prices, opening hours) or facts you're unsure of, "
+               "reply with ONLY:  WEB: <the question>  and Vox will look it up and answer.")
     raw = complete(text, history, brain=brain, system=system, prompt="chat")
+    if raw.strip().upper().startswith("WEB:"):  # the chat brain asked to look it up
+        try:
+            from vox import web_search
+            raw = web_search.answer(raw.strip()[4:].strip() or text) + " [DONE]"
+        except Exception:
+            raw = "I couldn't reach the web just now. [DONE]"
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):
         raw = complete(text, history, brain="big", system=system, prompt="chat")  # small brain deferred

@@ -435,6 +435,14 @@ _SCHEMA_META: list[dict] = [
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
     },
     {
+        "key": "home_location",
+        "label": "Home location",
+        "group": "Behavior",
+        "type": "text",
+        "help": "Where you are, for \"what's the weather?\" with no place named. Empty uses the city in "
+                "your Mac's time zone.",
+    },
+    {
         "key": "fast_wake",
         "label": "Fast wake",
         "group": "Voice",

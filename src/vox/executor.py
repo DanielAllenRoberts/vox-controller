@@ -53,6 +53,10 @@ _SYSTEM = (
     "kind of text it is — the selection is fetched and rewritten automatically.\n"
     "To SEE the screen (e.g. 'what does this say?', 'what's on my screen', 'read this error', "
     "'what's this article about'): output  LOOK: <the question to answer about the screen>\n"
+    "For a QUESTION that needs live or current information from the internet (weather, news, scores, "
+    "prices, opening hours, facts you may not know, or how to do something in a particular app): output  "
+    "WEB: <the question>. Vox looks it up and answers out loud. (Use 'search <query>' only when they "
+    "want the browser to show search results.)\n"
     "When the user wants to LOG / REPORT AN ISSUE, BUG OR PROBLEM WITH VOX for the developer ('log an "
     "issue', 'report a bug', 'note this problem', even if mis-heard as 'login issue'): output  ISSUE: "
     "<their description, cleaned up but in their words>. Never answer it yourself.\n"
@@ -662,6 +666,12 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
         return False, reply
+    if upper.startswith("WEB:"):
+        from vox import web_search
+        q = raw.split(":", 1)[1].strip() or text
+        msg = web_search.answer(q)
+        assistant._dbg("[executor]", f"decision=WEB {q!r} → {msg!r}")
+        return False, msg
     if upper.startswith("ISSUE:"):
         msg = actions.run_intent("log_issue", raw.split(":", 1)[1].strip())
         assistant._dbg("[executor]", f"decision=ISSUE → {msg!r}")
