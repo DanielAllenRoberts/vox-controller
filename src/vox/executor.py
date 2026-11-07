@@ -821,6 +821,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     held = _held_apps_reply(text)
     if held is not None:
         return held
+    # A bare "no" / "nope" with nothing waiting for an answer is not an instruction. Given to the brain
+    # with recent deletions in short-term memory it was read as "undo" and restored 8 board cards
+    # (2026-11-07). Corrections that say what's wrong ("no, the other one") still go through.
+    if not history and re.fullmatch(r"\s*(?:no|nope|nah|no thanks|no thank you)[.!]?\s*", text or "", re.I):
+        return False, "Okay."
 
     cand = _confirmed_click_target(text, history)
     if cand:
