@@ -32,6 +32,7 @@ struct MainWindow: View {
         case .home: HomeView()
         case .conversation: ConversationView()
         case .guide: GuideView()
+        case .agents: AgentsView()
         case .personality: PersonalityView()
         case .commands: CommandsView()
         case .vocabulary: VocabularyView()

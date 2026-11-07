@@ -251,6 +251,12 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
     ("agent-screen", "Agents", "Screen agent for multi-step jobs (off by default)",
      "Settings → turn on the agent. 'Open Slack and send Sam a message saying testing': it does every step; Esc or 'stop' halts it.", "code"),
     # --- Agents -------------------------------------------------------------------------------
+    ("team-start", "Agents", "Start a coding agent in a project",
+     "Say 'start an agent in the getprice folder to <task>' (or Organise → Agents → +). It runs Claude Code in ~/Repos/GetPrice, reading its CLAUDE.md, and the Agents page shows it Working, with every step in its transcript. When done it says what it did.", "code"),
+    ("team-ask", "Agents", "Ask an agent / get an update",
+     "'What's the update on the GetPrice agent?', 'ask the getprice agent if it's done', 'what are my agents doing?'. A busy agent's latest update is read out and your message queued; an idle one answers in its own words.", "code"),
+    ("team-approve", "Agents", "Agents ask before risky actions",
+     "Give an agent a task that needs installing something or touching another folder. Vox says '<agent> wants to run …. Should it go ahead?' and the Agents page shows Allow / Don't Allow. Say yes or no, or click.", "code"),
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),
     ("named-agents", "Agents", "Named agents speak as themselves",

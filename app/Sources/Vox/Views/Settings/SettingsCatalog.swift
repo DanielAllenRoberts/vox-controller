@@ -65,6 +65,8 @@ enum SettingsCatalog {
             .init(title: "Coding agents", footer: "Needs the Vox hook in Claude Code's settings (see mcp/README.md).", items: [
                 s("agent_alerts", "When an agent is waiting for you", "Says which agent needs you, e.g. \u{201C}David needs your OK.\u{201D}"),
                 s("agent_done_alerts", "Also tell me when an agent finishes"),
+                s("team_projects_root", "Projects folder", "Where Vox looks for 'the getprice folder' when you start an agent."),
+                s("team_speak_updates", "Agents speak their updates"),
             ]),
             .init(title: "Reminders", footer: "Alarms and timers always go off on time.", items: [
                 s("reminders_wait_for_you", "Wait until I'm back", "A reminder or routine due while you're away is said when you return."),

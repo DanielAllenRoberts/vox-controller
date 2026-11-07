@@ -465,6 +465,23 @@ _SCHEMA_META: list[dict] = [
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
     },
     {
+        "key": "team_projects_root",
+        "label": "Projects folder",
+        "group": "Behavior",
+        "type": "text",
+        "default": "~/Repos",
+        "help": "Where your project folders live. 'Start an agent in the getprice folder' looks for it "
+                "here (up to three levels down).",
+    },
+    {
+        "key": "team_speak_updates",
+        "label": "Agents speak their updates",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "Coding agents say when they finish or need you (a bubble shows either way).",
+    },
+    {
         "key": "spotify_client_id",
         "label": "Spotify Client ID",
         "group": "Behavior",

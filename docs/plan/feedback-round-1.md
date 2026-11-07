@@ -208,7 +208,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   trial (don't build on it yet). Waiting for the trial to end.
 
 ## Round 1i (2026-11-07 evening): scope and the agent system
-- **Agent system (Paperclip-inspired), the next big build.** Vox → CEO agent → worker agents. Workers are
+- ◐ **Agent system: v1 built 2026-11-07** (vox/team.py, Organise → Agents, AGENTS: directive, approvals by
+  voice/app; defaults: edit own folder + safe/test commands, ask for the rest; projects root ~/Repos).
+  Next: agent task cards on the Board, routines handing tasks to agents, Codex. **Agent system (Paperclip-inspired).** Vox → CEO agent → worker agents. Workers are
   real Claude Code sessions in the user's project folders (read that project's CLAUDE.md), kept running
   and resumable; "what's the update on X", "ask the GetPrice agent if it's done" (answers in its own
   voice); agents report up / speak through the Vox MCP; built-in agent board in the app (who's on what,

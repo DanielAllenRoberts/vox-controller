@@ -184,6 +184,11 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
          "where": "Settings → Listening → Recognition."},
     ]),
     ("Coding agents", "terminal", [
+        {"title": "Your agent team", "what": "Vox runs Claude Code agents in your project folders and manages them for you: start one, ask for updates, give new instructions, stop it.",
+         "say": ["Start an agent in the getprice folder to fix the login bug", "What's the update on the GetPrice agent?",
+                 "Ask the getprice agent if it's done", "Tell the getprice agent to also run the tests", "What are my agents doing?", "Stop the getprice agent"],
+         "where": "Organise → Agents: who's on what, live transcripts, message, stop, approve. Settings → General → Coding agents → Projects folder.",
+         "how": "Agents edit files in their own folder and run tests freely; installs, deletes, pushes or other folders ask you first (say yes or no)."},
         {"title": "Agents speak through Vox", "what": "Claude Code and other agents can talk to you, one voice at a time, in their own voice.",
          "say": ["(to Claude Code) Tell me out loud when you're done"],
          "how": "Add the vox-control MCP server (mcp/README.md)."},

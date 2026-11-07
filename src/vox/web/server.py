@@ -286,7 +286,71 @@ def create_app() -> FastAPI:
                 except OSError:
                     pass
             return best
-        return {"board": stamp("board.db", "board.db-wal"), "reminders": stamp("reminders.json")}
+        team_files = ["team.json"]
+        try:
+            team_files += [f"team/{f}" for f in os.listdir(DATA_DIR / "team")]
+        except OSError:
+            pass
+        return {"board": stamp("board.db", "board.db-wal"), "reminders": stamp("reminders.json"),
+                "team": stamp(*team_files)}
+
+    # --- Coding agents (vox.team; the Agents page) ---
+    @app.get("/api/team")
+    def team_list() -> dict:
+        from vox import team
+        pend = team.pending_approval()
+        return {"agents": team.status(), "projectsRoot": str(team.projects_root()),
+                "pending": {"agent": pend["agent"], "what": pend["what"]} if pend else None}
+
+    @app.get("/api/team/{name}/log")
+    def team_log(name: str, limit: int = 300) -> dict:
+        from vox import team
+        return {"events": team.transcript(name, limit)}
+
+    @app.post("/api/team")
+    async def team_start(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        folder, task = str(body.get("folder", "")).strip(), str(body.get("task", "")).strip()
+        if not folder or not task:
+            return _bad_request("'folder' and 'task' are required")
+        return {"message": team.start(folder, task, str(body.get("name", "")).strip() or None)}
+
+    @app.post("/api/team/{name}/message")
+    async def team_message(name: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        import asyncio as _aio
+        text = str(body.get("text", "")).strip()
+        if not text:
+            return _bad_request("'text' is required")
+        # Don't hold the request open for the whole turn: the page shows progress from the log.
+        return {"message": await _aio.to_thread(team.message, name, text, 1)}
+
+    @app.post("/api/team/{name}/stop")
+    async def team_stop(name: str, request: Request):
+        _b, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        return {"message": team.stop(name)}
+
+    @app.delete("/api/team/{name}")
+    def team_remove(name: str):
+        from vox import team
+        return {"ok": True} if team.remove(name) else _not_found("agent")
+
+    @app.post("/api/team/approval")
+    async def team_approval(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        return {"message": team.answer(bool(body.get("allow")), body.get("agent") or None)}
 
     # --- MCP connections (vox.mcp_servers; Settings → Connections) ---
     @app.get("/api/mcp")

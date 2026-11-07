@@ -124,6 +124,12 @@ _SYSTEM = (
     "stretch' → SCHEDULE: reminder | 2026-06-24T09:00 | stretch | daily  ·  'remind me every 30 "
     "minutes to check on the cat' → SCHEDULE: reminder | 2026-06-23T15:34 | check on the cat | "
     "every 30 minutes.\n"
+    "The user's CODING AGENTS (Claude Code sessions Vox runs in their project folders, managed by a "
+    "CEO): to start one, ask one something, get an update, give one new instructions, stop one, or ask "
+    "who's working on what ('start an agent in the getprice folder to fix the login bug', 'what's the "
+    "update on the scraper?', 'ask the getprice agent if it's done', 'tell the docs agent to also update "
+    "the README', 'stop the getprice agent', 'what are my agents doing?'), output  AGENTS: <the request "
+    "in the user's words>. This is NOT the on-screen AGENT for clicking around apps.\n"
     "To use the user's CONNECTED APPS (their email/Gmail, Google Calendar events, Slack, Notion, Trello, "
     "GitHub, Drive… whatever the Mac state lists under 'Connections'): output  APPS: <the request in the "
     "user's words, with any detail they gave>. Use it for reading ('any new email from Sam?', 'what's in "
@@ -290,6 +296,15 @@ def _apps(request: str, *, approved: bool = False) -> str:
 
 def _held_apps_reply(text: str):
     global _HELD_APPS
+    try:  # an agent waiting for the user's OK ("The GetPrice agent wants to run npm install…")
+        from vox import team
+        if team.pending_approval() is not None:
+            if _AFFIRMATIVE.match(text or ""):
+                return False, team.answer(True)
+            if _NEGATIVE_REPLY.match(text or ""):
+                return False, team.answer(False)
+    except Exception:
+        pass
     if _HELD_APPS is None or time.time() - _HELD_APPS[1] > 180:
         return None
     if _AFFIRMATIVE.match(text or ""):
@@ -996,6 +1011,12 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         phrase, _, action = body.partition("|")
         msg = _teach(phrase.strip(), action.strip())
         assistant._dbg("[executor]", f"decision=TEACH {phrase.strip()!r} → {action.strip()!r} :: {msg!r}")
+        return False, msg
+    if upper.startswith("AGENTS:"):
+        req = raw.split(":", 1)[1].strip() or text
+        from vox import team
+        msg = team.ceo(req)
+        assistant._dbg("[executor]", f"decision=AGENTS {req!r} → {msg!r}")
         return False, msg
     if upper.startswith("APPS:"):
         req = raw.split(":", 1)[1].strip() or text
