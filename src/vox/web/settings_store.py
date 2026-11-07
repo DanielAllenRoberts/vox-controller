@@ -247,6 +247,24 @@ _SCHEMA_META: list[dict] = [
                 "command\" to run it instead. Never types into password fields. Applies live.",
     },
     {
+        "key": "reminders_wait_for_you",
+        "label": "Reminders wait until you're back",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "If a reminder or routine comes due while you're away (screen locked, or no typing, "
+                "mouse or talking to Vox for a few minutes), Vox holds it and says it when you're "
+                "back. Alarms and timers always go off on time.",
+    },
+    {
+        "key": "reminder_away_minutes",
+        "label": "Away after (minutes)",
+        "group": "Behavior",
+        "type": "number",
+        "default": 5,
+        "help": "How long without any input before you count as away.",
+    },
+    {
         "key": "memory_dream",
         "label": "Tidy memory overnight",
         "group": "Behavior",

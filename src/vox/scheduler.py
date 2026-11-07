@@ -112,6 +112,7 @@ def _clean_job(j) -> dict | None:
         "recurrence": rec,
         "created_at": j.get("created_at") or _iso(_now()),
         "enabled": bool(j.get("enabled", True)),
+        **({"held": True} if j.get("held") else {}),   # waiting for the user to be back (#60)
     }
 
 
@@ -654,6 +655,28 @@ class _SchedulerThread(threading.Thread):
                 pass  # a bad tick must never take down the thread / daemon
 
 
+_HOLD_MAX = timedelta(hours=12)   # past this a held reminder is said anyway (or dropped by catch-up)
+
+
+def _should_hold(job: dict, now: datetime) -> bool:
+    if job.get("kind") not in ("reminder", "routine"):
+        return False
+    try:
+        from vox.web import settings_store
+        if settings_store.get("reminders_wait_for_you") is False:
+            return False
+    except Exception:
+        pass
+    fire = _parse_iso(job.get("fire_at"))
+    if fire is not None and now - fire > _HOLD_MAX:
+        return False
+    try:
+        from vox import presence
+        return presence.away()
+    except Exception:
+        return False
+
+
 def _tick() -> None:
     """Fire every due+enabled job; roll recurring ones, delete fired one-shots."""
     try:  # once a day after 03:00: the overnight memory tidy (vox.dream), in its own thread
@@ -671,7 +694,14 @@ def _tick() -> None:
             fire = _parse_iso(job["fire_at"])
             if fire is None or fire > now:
                 continue
-            _announce(job)
+            # Reminders and routines wait until you're at the Mac (ideas #60): said to an empty
+            # room they're simply lost. Alarms and timers are meant to go off regardless.
+            if _should_hold(job, now):
+                if not job.get("held"):
+                    job["held"] = True
+                    changed = True
+                continue
+            _announce(job, prefix="While you were away: " if job.pop("held", False) else "")
             if job.get("recurrence"):
                 nxt = _advance(fire, job["recurrence"])
                 while nxt <= now:  # don't replay missed recurrences; catch up to the future
@@ -712,6 +742,9 @@ def _catch_up() -> None:
                 changed = True
                 continue
             # overdue one-shot
+            if job.get("held") and now - fire < _HOLD_MAX:   # still waiting for the user: keep it
+                keep.append(job)
+                continue
             if job.get("enabled", True) and now - fire < _CATCHUP_WINDOW:
                 _announce(job, prefix="While you were away — ")
             changed = True  # dropped (fired-late or stale) either way

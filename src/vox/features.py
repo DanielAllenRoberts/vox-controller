@@ -145,6 +145,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "With the iPad (Sidecar) or a second monitor connected: 'move Slack to the iPad', 'move this window to the other screen', 'send it to the main monitor'. Then 'maximise this window', 'snap this to the left half', 'center this window'.", "code"),
     ("pause-mishear", "Control", "'Pose my music' still pauses",
      "With music playing: 'Vox, pause my music' (it's often heard as 'pose'). It pauses, and never presses Space in the app in front.", "code"),
+    ("reminders-wait", "Organise", "Reminders wait until you're back",
+     "Say 'remind me in 2 minutes to stretch', then lock the screen (or leave the Mac) for 7 minutes. Nothing is said while you're away; when you're back it says 'While you were away: …'. Alarms and timers still go off on time. Settings → General → Reminders.", "code"),
     ("routines", "Organise", "Routines",
      "Say 'every weekday at 7, tell me what's on my calendar and the weather' (or Reminders → + → Routine). It shows under Reminders → Routines; press ▶ to run it now: a short spoken briefing. Also try 'every day at 9 check my calendar and board and tell me what to work on', and 'every morning at 8 open my email'.", "code"),
     ("calendar", "Organise", "Calendar access",
