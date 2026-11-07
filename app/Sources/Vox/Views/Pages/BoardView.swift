@@ -32,6 +32,7 @@ struct BoardView: View {
                 .animation(.smooth(duration: 0.2), value: selection.isEmpty)
                 .pageErrors($error, loadError: $loadError, loaded: board != nil)
                 .refreshesPage(load)
+                .reloadsOnChange("board", api: model.api, load)   // changed by voice or an agent → shows at once
                 .searchable(text: $search, prompt: "Search cards")
                 .toolbar {
                     ToolbarItem {

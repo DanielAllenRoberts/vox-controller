@@ -25,6 +25,7 @@ Voice-upgrade loop 3 — KILLABLE STREAMING TTS (Kokoro path only):
 """
 
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -65,9 +66,32 @@ def _persona_voice(field: str) -> str:
 _RECENT_SPEECH: list[dict] = []  # what Vox said lately: [{text, start, end}], for the echo guard
 
 
+# Units the voices read letter by letter ("16 m m"): spoken as words (logged issue 3a049a57). Only a
+# number followed by the unit, so "mm" in a word or "MB" in a sentence about files is left alone.
+_UNITS = [
+    (r"°\s?C\b", " degrees Celsius"), (r"°\s?F\b", " degrees Fahrenheit"), (r"°", " degrees"),
+    (r"km/h\b", " kilometres per hour"), (r"mph\b", " miles per hour"), (r"m/s\b", " metres per second"),
+    (r"mm\b", " millimetres"), (r"cm\b", " centimetres"), (r"km\b", " kilometres"), (r"m\b", " metres"),
+    (r"kg\b", " kilograms"), (r"g\b", " grams"), (r"ml\b", " millilitres"), (r"l\b", " litres"),
+    (r"hPa\b", " hectopascals"), (r"mb\b", " millibars"), (r"KB\b", " kilobytes"), (r"MB\b", " megabytes"),
+    (r"GB\b", " gigabytes"), (r"TB\b", " terabytes"), (r"%", " percent"),
+]
+# Case-sensitive on purpose: "5 MB" is megabytes, "5 mb" millibars.
+_UNIT_RE = [(re.compile(r"(?<=\d)\s?" + pat), word) for pat, word in _UNITS]
+
+
+def speakable(text: str) -> str:
+    """Text as it should be SAID: numbers' units spelled out."""
+    out = text
+    for rx, word in _UNIT_RE:
+        out = rx.sub(word, out)
+    return out
+
+
 def speak(text: str) -> None:
     if not _setting("tts_enabled", CONFIG.tts_enabled) or not text.strip():
         return
+    text = speakable(text)
     # Wait for any agent that's already talking — Vox and each MCP server are separate processes
     # and would otherwise speak over each other (see vox/speech_lock.py).
     with speech_lock.hold("vox"):

@@ -271,6 +271,23 @@ def create_app() -> FastAPI:
         runtime.set_ptt(bool(body.get("held")))
         return {"ok": True}
 
+    @app.get("/api/changes")
+    def changes() -> dict:
+        """When the board and the reminders last changed (file mtimes, any writer: voice, MCP, app).
+        The app polls this cheaply and reloads a page only when its number moves."""
+        import os
+        from vox.paths import DATA_DIR
+
+        def stamp(*names):
+            best = 0.0
+            for n in names:
+                try:
+                    best = max(best, os.path.getmtime(DATA_DIR / n))
+                except OSError:
+                    pass
+            return best
+        return {"board": stamp("board.db", "board.db-wal"), "reminders": stamp("reminders.json")}
+
     # --- MCP connections (vox.mcp_servers; Settings → Connections) ---
     @app.get("/api/mcp")
     def mcp_list() -> dict:

@@ -21,14 +21,7 @@ struct RemindersView: View {
                         Button("New Reminder", systemImage: "plus") { adding = true }.help("Set a timer, alarm or reminder")
                     }
                 }
-                .task {
-                    // Something set by voice while this page is already open: there's no push from the
-                    // engine, so look again every 10 s while the page is on screen (one cheap GET).
-                    while !Task.isCancelled {
-                        try? await Task.sleep(for: .seconds(10))
-                        if !Task.isCancelled { await load() }
-                    }
-                }
+                .reloadsOnChange("reminders", api: model.api, load)   // set by voice → shows at once
                 .task(id: nextFire) {
                     // Re-read just after the next one goes off: the engine drops a finished timer
                     // and moves a repeating one on, so the list never says "Due now" for long.

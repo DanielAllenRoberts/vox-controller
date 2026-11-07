@@ -371,6 +371,22 @@ extension View {
         .animation(.smooth, value: message)
     }
 
+    /// Reloads as soon as `key` ("board" / "reminders") changes in the engine, whoever changed it
+    /// (voice, an agent, another window). Polls GET /api/changes every 1.5 s while the page is shown;
+    /// that answer is two numbers, so it costs nothing; the page itself reloads only on a change.
+    func reloadsOnChange(_ key: String, api: APIClient, _ load: @escaping @MainActor () async -> Void) -> some View {
+        task {
+            var last: Double?
+            while !Task.isCancelled {
+                if let stamps: [String: Double] = try? await api.get("changes"), let now = stamps[key] {
+                    if let seen = last, now != seen { await load() }
+                    last = now
+                }
+                try? await Task.sleep(for: .seconds(1.5))
+            }
+        }
+    }
+
     /// Keeps a page current: loads when the page appears, again whenever Vox comes back to the
     /// front, and from the toolbar's Refresh button (⌘R). Things done by voice show up without
     /// leaving the page.

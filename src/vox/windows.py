@@ -11,6 +11,8 @@ NSScreen uses the BOTTOM-left. Everything here is converted to AX space.
 
 from __future__ import annotations
 
+import time
+
 _AXVALUE_CGPOINT = 1   # kAXValueCGPointType
 _AXVALUE_CGSIZE = 2    # kAXValueCGSizeType
 _SET: dict | None = None
@@ -166,6 +168,26 @@ def _set_frame(fns, win, x, y, w, h) -> bool:
     return ok
 
 
+def _leave_fullscreen(fns, win) -> bool:
+    """A window in macOS full screen can't be moved or resized (AXPosition fails with -25200): take it
+    out first and wait for the animation. Returns True if it WAS full screen."""
+    from vox import ax
+    if not ax._attr(fns, win, "AXFullScreen"):
+        return False
+    fns["AXUIElementSetAttributeValue"](win, "AXFullScreen", False)
+    for _ in range(30):   # up to ~3 s for the exit animation
+        time.sleep(0.1)
+        if not ax._attr(fns, win, "AXFullScreen"):
+            break
+    time.sleep(0.6)       # the frame settles a moment after the flag flips
+    return True
+
+
+def _restore_fullscreen(fns, win) -> None:
+    time.sleep(0.3)
+    fns["AXUIElementSetAttributeValue"](win, "AXFullScreen", True)
+
+
 # --- what Vox calls ------------------------------------------------------------------------------
 
 def move_to_display(which: str = "other", app: str = "") -> str:
@@ -182,10 +204,24 @@ def move_to_display(which: str = "other", app: str = "") -> str:
         return f"I couldn't read where {name or 'that window'} is."
     cur = _display_of(f, ds)
     to = _pick(which, ds, cur)
+    if to is not None and to != cur and _leave_fullscreen(fns, win):
+        f = _frame(fns, win) or f
+        moved = _move(fns, win, f, ds, cur, to)
+        _restore_fullscreen(fns, win)   # full screen again, now on the new display
+        return moved if not moved.startswith("Moved") else f"Moved {name or 'it'} to the {_spoken(ds[to], to, ds)}, full screen."
+    return _move_checked(fns, win, f, ds, cur, to, which, name)
+
+
+def _move_checked(fns, win, f, ds, cur, to, which, name) -> str:
     if to is None:
         return f"I couldn't tell which screen '{which}' is."
     if to == cur:
         return f"{name or 'It'} is already on that screen."
+    out = _move(fns, win, f, ds, cur, to)
+    return out if not out.startswith("Moved") else f"Moved {name or 'it'} to the {_spoken(ds[to], to, ds)}."
+
+
+def _move(fns, win, f, ds, cur, to) -> str:
     a, b = ds[cur], ds[to]
     # Same relative position and size on the new display, shrunk to fit if needed.
     w = min(f[2] * b["w"] / a["w"], b["w"]) if f[2] > b["w"] else min(f[2], b["w"])
@@ -195,8 +231,8 @@ def move_to_display(which: str = "other", app: str = "") -> str:
     x = b["x"] + max(0.0, min(1.0, rx)) * max(0.0, b["w"] - w)
     y = b["y"] + max(0.0, min(1.0, ry)) * max(0.0, b["h"] - h)
     if not _set_frame(fns, win, x, y, w, h):
-        return f"{name or 'That app'} wouldn't let me move its window."
-    return f"Moved {name or 'it'} to the {_spoken(b, to, ds)}."
+        return "That window wouldn't let me move it."
+    return "Moved."
 
 
 def place(layout: str, app: str = "") -> str:
@@ -211,6 +247,8 @@ def place(layout: str, app: str = "") -> str:
     f = _frame(fns, win)
     if f is None:
         return f"I couldn't read where {name or 'that window'} is."
+    if _leave_fullscreen(fns, win):   # maximise/snap a full-screen window: it leaves full screen
+        f = _frame(fns, win) or f
     d = ds[_display_of(f, ds)]
     lay = (layout or "").lower()
     if lay in ("fill", "maximize", "maximise", "max", "full"):
