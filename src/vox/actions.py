@@ -446,13 +446,18 @@ def _parse(text: str) -> tuple[str, str] | None:
     if m and _to_index(m.group(1)) is not None:
         return ("desktop_index", str(_to_index(m.group(1))))
     # Arc profile switching — relative (⌘⌥←/→) or absolute (Ctrl+<n>).
-    m = re.search(r"\b(next|previous|prev)\s+profile\b", t)
+    m = re.search(r"\b(next|previous|prev)\s+(?:profile|workspace)\b", t)
     if m:
         return ("profile_move", "next" if m.group(1) == "next" else "previous")
-    m = (re.search(r"\bprofile\s+(?:number\s+)?(\w+)\b", t)
+    m = (re.search(r"\b(?:profile|space|workspace)\s+(?:number\s+)?(\w+)\b", t)
          or re.search(r"\b(?:go to|switch to|open)\s+(?:the\s+)?(\w+)\s+profile\b", t))
     if m and _to_index(m.group(1)) is not None:
         return ("profile", str(_to_index(m.group(1))))
+    # A browser space by name: "switch to the GetPrice space", "go to my uni workspace".
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*(?:go to|switch to|open|change to)\s+"
+                     r"(?:the\s+|my\s+)?([a-z0-9][a-z0-9 ]{0,30}?)\s+(?:profile|space|workspace)(?:\s+please)?", t)
+    if m and _to_index(m.group(1)) is None:
+        return ("profile", m.group(1).strip())
     # Cycle a specific app's windows across Spaces (simulated Dock-click) — "cursor
     # window", "next cursor window", "cursor space", "switch cursor".
     # Anchored + at most three words of app name: unanchored, "can you circle something on the
@@ -1464,10 +1469,58 @@ def _desktop_move(direction: str) -> str:
     return _perm_msg() if _is_perm_err(out) else f"Couldn't switch desktop ({out})."
 
 
+def _browser_spaces(name: str) -> tuple[int | None, list[dict]]:
+    """The browser's spaces/profiles from its own "Spaces" menu (Zen and Arc both have one):
+    (pid, [{"title", "shortcut", "_el"}]). The spaces are the items with a Control+<n> shortcut;
+    "Next Space" / "Previous Space" are included too. Read-only: walks the menu bar, presses nothing."""
+    from vox import ax
+    try:
+        from AppKit import NSWorkspace
+        pid = next((int(a.processIdentifier()) for a in NSWorkspace.sharedWorkspace().runningApplications()
+                    if (a.localizedName() or "").replace("\u200e", "").lower() == name.lower()), None)
+    except Exception:
+        pid = None
+    if pid is None:
+        return None, []
+    items = [it for it in (ax.menu_items(pid) or []) if it.get("menu", "").split(" > ")[0] in ("Spaces", "Space", "Profiles")]
+    return pid, items
+
+
+def _press_space_item(name: str, pid: int, item: dict) -> bool:
+    from vox import ax
+    _osa(f'tell application "{name}" to activate')
+    fns = ax._load()
+    try:
+        return bool(fns) and fns["AXUIElementPerformAction"](item["_el"], "AXPress") == 0
+    except Exception:
+        return False
+
+
 def _profile(arg: str) -> str:
-    # Arc switches profiles/spaces with Ctrl+<n> when it's focused.
-    if browser() != "Arc":
-        return f"Spaces are an Arc feature; you're using {browser()}."
+    """Switch the browser's space/profile by number ("profile 2") or name ("the GetPrice space").
+    Uses the browser's own Spaces menu, so it works in Zen as well as Arc (logged 75ee9efa: "profile
+    1" did nothing in Zen because this only knew Arc's keystroke)."""
+    name = browser()
+    pid, items = _browser_spaces(name)
+    shown = name[:1].upper() + name[1:]
+    spaces = [it for it in items if re.fullmatch(r"control\+\d", it.get("shortcut") or "")]
+    if spaces:
+        want = arg.strip().lower()
+        if want.isdigit():
+            hit = next((it for it in spaces if it["shortcut"] == f"control+{want}"), None)
+            if hit is None:
+                return f"{shown} has {len(spaces)} spaces: " + ", ".join(it["title"] for it in spaces) + "."
+        else:
+            hit = (next((it for it in spaces if it["title"].lower() == want), None)
+                   or next((it for it in spaces if want in it["title"].lower()), None))
+            if hit is None:
+                return f"No space called {arg!r} in {shown}. You have " + ", ".join(it["title"] for it in spaces) + "."
+        if _press_space_item(name, pid, hit):
+            return f"{hit['title']}."
+    if name != "Arc":
+        return f"{shown} doesn't have spaces I can switch."
+    if not arg.isdigit():
+        return f"Say the space's number in {name}, like 'profile 2'."
     ok, out = _osa('tell application "Arc" to activate\n'
                    f'tell application "System Events" to keystroke "{arg}" using control down')
     if ok:
@@ -1476,10 +1529,16 @@ def _profile(arg: str) -> str:
 
 
 def _profile_move(direction: str) -> str:
-    # Arc switches profiles/spaces with ⌘⌥←/→ when focused.
+    """Next / previous space: the browser's own menu item if it has one, else Arc's ⌘⌥←/→."""
+    name = browser()
+    pid, items = _browser_spaces(name)
+    want = "next space" if direction == "next" else "previous space"
+    hit = next((it for it in items if it.get("title", "").lower() == want), None)
+    if hit is not None and _press_space_item(name, pid, hit):
+        return f"{'Next' if direction == 'next' else 'Previous'} space."
+    if name != "Arc":
+        return f"{name[:1].upper() + name[1:]} doesn't have spaces I can switch."
     code = 124 if direction == "next" else 123  # right / left arrow
-    if browser() != "Arc":
-        return f"Spaces are an Arc feature; you're using {browser()}."
     ok, out = _osa('tell application "Arc" to activate\n'
                    f'tell application "System Events" to key code {code} using {{command down, option down}}')
     if ok:
