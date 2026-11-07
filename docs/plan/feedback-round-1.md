@@ -207,6 +207,23 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ⏸ #36 site-scoped learning: builds on command learning, which CLAUDE.md says is in an active
   trial (don't build on it yet). Waiting for the trial to end.
 
+## Round 1i (2026-11-07 evening): scope and the agent system
+- **Agent system (Paperclip-inspired), the next big build.** Vox → CEO agent → worker agents. Workers are
+  real Claude Code sessions in the user's project folders (read that project's CLAUDE.md), kept running
+  and resumable; "what's the update on X", "ask the GetPrice agent if it's done" (answers in its own
+  voice); agents report up / speak through the Vox MCP; built-in agent board in the app (who's on what,
+  plans, transcripts); the CEO manages it. Replaces the "coding brain" (#38). 💬 Open: what agents may
+  do without asking (proposed: edit in own folder + safe commands; ask for the rest; no screen), and the
+  projects root folder.
+- ☐ **Composio in Vox** (the user's calendar is Google via Composio; Mac Calendar is empty): Composio
+  API key in Settings → API keys; calendars fall back to Composio Google Calendar; later Gmail/Slack/etc.
+- ◐ **Routines → agentic**: built as scheduled briefings/commands; next: a routine becomes a task for the
+  CEO agent.
+- ☐ **#58 brain looks up its commands**: experimental setting only; the main controls stay in the prompt.
+- ☐ **Memory search**: SQLite FTS5 index beside the Markdown (research/memory-backends.md). MemPalace:
+  not adopted.
+- ✂ Descoped: gaze typing (#1), Windows/Linux (#20), coding brain (#38 → agent system).
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).
