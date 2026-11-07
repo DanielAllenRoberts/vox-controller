@@ -465,8 +465,8 @@ def run(task: str) -> tuple[bool, str]:
 def _run_inner(task: str, t0: float) -> tuple[bool, str]:
     client = _client()
     model = _setting("agent_model", CONFIG.agent_model)
-    max_steps = int(_setting("agent_max_steps", CONFIG.agent_max_steps) or 15)
-    max_seconds = float(_setting("agent_max_seconds", CONFIG.agent_max_seconds) or 180.0)
+    max_steps = int(_setting("agent_max_steps", CONFIG.agent_max_steps) or 50)
+    max_seconds = float(_setting("agent_max_seconds", CONFIG.agent_max_seconds) or 600.0)
     effort = _setting("agent_effort", CONFIG.agent_effort) or "medium"
 
     screen = capture()

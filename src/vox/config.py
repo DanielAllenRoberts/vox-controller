@@ -323,8 +323,8 @@ class Config:
     # token-heavy (~2.8k image tokens PER STEP at 1920px), so the model choice dominates the bill.
     # Measured on the first Opus runs here: ~$0.035/step, i.e. ~$0.35 for a 10-step task.
     agent_model: str = "claude-sonnet-5"
-    agent_max_steps: int = 15        # hard cap on tool round-trips in one run (runaway guard)
-    agent_max_seconds: float = 180.0  # wall-clock ceiling for one run
+    agent_max_steps: int = 50        # cap on tool round-trips in one run: a runaway guard, not a task limit
+    agent_max_seconds: float = 600.0  # wall-clock ceiling for one run (50 steps at ~5-10 s each)
     # Width the screenshot is sent at. The tool's declared display size MUST match the image we
     # actually send or every coordinate is skewed. 1920 = native here (scale 1.0, most accurate);
     # 1280 is the docs' cost-saving baseline. Height follows the display's aspect ratio.

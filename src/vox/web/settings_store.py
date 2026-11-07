@@ -200,8 +200,9 @@ _SCHEMA_META: list[dict] = [
         "label": "Agent step limit",
         "group": "Behavior",
         "type": "number",
-        "help": "Hard cap on how many actions one agent run may take before it gives up. Lower is "
-                "safer and cheaper; each step costs a screenshot.",
+        "help": "Safety cap on how many actions one agent run may take (default 50). It stops a "
+                "runaway, not a long task. Each step costs a screenshot (about 3 US cents); runs "
+                "also stop after 10 minutes, and the ⏹ button stops one at any time.",
     },
     {
         "key": "agent_effort",
