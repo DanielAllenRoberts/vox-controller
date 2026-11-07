@@ -1,0 +1,188 @@
+"""The Guide: every Vox feature, what it does and how to use it (Vox.app → Guide).
+
+The Testing page (``vox.features``) is a temporary checklist for trying new things; this is the
+permanent manual. One entry per feature, grouped into sections. When a user-facing feature is
+added, add it here too.
+
+Entry fields:
+  title   short name
+  what    one sentence: what it does for you
+  say     example phrases (optional): the exact words to try
+  how     extra steps when it isn't just "say this" (optional)
+  where   where it lives in the app (optional)
+  note    caveat, e.g. off by default (optional)
+"""
+
+from __future__ import annotations
+
+# (section title, SF Symbol, entries)
+GUIDE: list[tuple[str, str, list[dict]]] = [
+    ("Getting started", "sparkles", [
+        {"title": "Talk to Vox", "what": "Wake Vox, then ask a question or have a chat. It answers out loud.",
+         "say": ["Hey Vox, what's a good name for a coffee shop?", "Hey Vox what's the weather like"],
+         "how": "You can ask straight after \"Hey Vox\" in one breath. Say \"goodbye\" when you're done."},
+        {"title": "Give one command", "what": "From idle, say \"Vox\" and a command. It does it and goes back to idle.",
+         "say": ["Vox, open Safari", "Vox, set a timer for 5 minutes"]},
+        {"title": "Control mode", "what": "Stay in command mode and say one command after another, with no wake word each time.",
+         "say": ["Take control", "open Notes", "next tab", "Stand down"]},
+        {"title": "Hold to talk", "what": "Hold the Right ⌥ key, speak and let go. Runs straight away, no wake word.",
+         "how": "Other ⌥ shortcuts keep working."},
+        {"title": "Type to Vox", "what": "Type a request instead of saying it. It's handled exactly as if spoken.",
+         "where": "The box at the top of Home, or the menu bar panel."},
+        {"title": "Stop button", "what": "Stops whatever Vox is doing right now: speaking, thinking, or an agent task. It keeps listening.",
+         "where": "⏹ next to the type box on Home and in the menu bar panel. Shortcut ⌘.",
+         "say": ["stop"], "how": "Saying \"stop\" or \"wait\" while it's thinking or talking does the same."},
+        {"title": "Sleep and quit", "what": "Send Vox back to idle, stop it in an emergency, restart or quit it.",
+         "say": ["Stand down", "Go to sleep", "Emergency stop", "Restart Vox", "Quit Vox"]},
+        {"title": "Pause listening", "what": "Vox ignores the mic until you resume. Typing to it still works.",
+         "where": "Home → Pause, or Listening in the menu bar panel."},
+        {"title": "Menu bar", "what": "The waveform in the menu bar shows Vox's state and gives you the type box, the last reply, Listening and Speak replies switches.",
+         "how": "Closing the window keeps Vox running in the menu bar. Quit stops it."},
+    ]),
+    ("Apps, websites and windows", "macwindow", [
+        {"title": "Open apps and websites", "what": "Launch or switch to an app, open a site or search the web in your own browser.",
+         "say": ["Open Spotify", "Go to github", "Search best pizza near me", "Open Notion Calendar"]},
+        {"title": "Close an app", "what": "Quit an app by name.", "say": ["Close Notion", "Quit Slack"],
+         "note": "\"Close tab\" closes a browser tab instead."},
+        {"title": "Tabs", "what": "Move between and close browser tabs, or jump to one by what it's about.",
+         "say": ["Next tab", "Previous tab", "First tab", "Close tab", "Go to my GitHub tab", "Show tabs", "Go back"]},
+        {"title": "Windows", "what": "Switch between windows, or cycle one app's windows.",
+         "say": ["Next window", "Previous window", "Cursor window"]},
+        {"title": "Arc profiles", "what": "Switch Arc profiles by number or name.", "say": ["Profile 2", "Next profile", "Switch to the work profile"]},
+        {"title": "Block apps and sites", "what": "Apps and sites Vox will never open or switch to.",
+         "where": "Commands → Blocked: type a name, Choose App…, or right-click an app tile."},
+    ]),
+    ("Clicking and the screen", "cursorarrow.click", [
+        {"title": "Click by name", "what": "Press a button, link or sidebar item by what it says.",
+         "say": ["Click Send", "Click the search box", "Click Downloads"],
+         "how": "If the name doesn't match exactly, Vox picks the closest one, and asks \"Did you mean …?\" when unsure. If nothing has that name, it looks at the screen."},
+        {"title": "Numbered click badges", "what": "Puts a number on everything clickable so you can click by number.",
+         "say": ["Show clickable", "Click 12", "Hide"]},
+        {"title": "Point at things", "what": "Draws a ring around something on screen without clicking it.",
+         "say": ["Point at the export button", "Circle the save button"]},
+        {"title": "Scroll, keys, right-click, drag", "what": "The rest of the mouse and keyboard.",
+         "say": ["Scroll down", "Press command R", "Press escape", "Right click Submit", "Drag 3 to 7"]},
+        {"title": "Shortcuts and app menus", "what": "Uses standard shortcuts, and an app's own menus for anything app-specific.",
+         "say": ["Save this", "Undo that", "Reopen the tab I closed", "Open the developer tools", "Export as PDF", "Zoom in"]},
+        {"title": "Questions about the screen", "what": "Reads what's on screen and answers.",
+         "say": ["What's on my screen?", "Read this error to me", "What is this article about?"],
+         "where": "Settings → Control → Answer questions about the screen."},
+        {"title": "Multi-step tasks (screen agent)", "what": "Does a job that takes several steps across apps by looking at the screen and acting.",
+         "say": ["Open Slack and send Sam a message saying testing"],
+         "where": "Settings → Brains → Screen agent → Allow multi-step tasks.",
+         "note": "Off by default. Uses an Anthropic API key (about 3¢ a step, up to 50 steps). Esc, \"stop\" or ⏹ halts it."},
+    ]),
+    ("Typing with your voice", "keyboard", [
+        {"title": "Dictation", "what": "Everything you say is typed at the cursor.",
+         "say": ["Start typing", "New line", "New paragraph", "Enter", "Scratch that", "Stop typing"],
+         "how": "Click into a text field first. Stops by itself after a long silence."},
+        {"title": "Type automatically in text fields", "what": "Like Dragon: in a text box, what you say is typed unless the whole sentence is a command.",
+         "where": "Settings → Control → Typing.", "note": "Off by default. \"Scratch that\" undoes the last bit."},
+        {"title": "Write text for you", "what": "Composes finished text and types it at the cursor.",
+         "say": ["Write a short note to Sam saying I'll be ten minutes late", "Write an email asking for the invoice"]},
+        {"title": "Rewrite selected text", "what": "Rewrites whatever you've selected.",
+         "say": ["Make this more formal", "Fix the spelling", "Shorten this"]},
+        {"title": "Vocabulary", "what": "Fix words Vox keeps mishearing, e.g. clawed → Claude.",
+         "where": "Teach Vox → Vocabulary."},
+    ]),
+    ("Music and media", "music.note", [
+        {"title": "Control music and video", "what": "Play, pause and skip in Spotify, Music or a video in your browser, without bringing them to the front.",
+         "say": ["Pause", "Play music", "Next song", "Previous track", "Pause the video"],
+         "how": "An unnamed \"pause\" goes to whatever is actually playing."},
+    ]),
+    ("Timers, reminders and the board", "checklist", [
+        {"title": "Timers and alarms", "what": "Countdowns that chime, and alarms at a time of day.",
+         "say": ["Set a timer for 5 minutes", "Set an alarm for 7am"]},
+        {"title": "Reminders", "what": "Spoken reminders, once or repeating.",
+         "say": ["Remind me at 5pm to call the bank", "Remind me to stretch in 20 minutes", "Remind me every weekday at 9 to check email",
+                 "What reminders do I have?", "Cancel the bank reminder"],
+         "where": "Organise → Reminders lists them."},
+        {"title": "Board", "what": "A Trello-style task board you can change by voice or by hand.",
+         "say": ["Add buy milk, call the plumber and book flights to my to do list", "Move the invoice card to Doing",
+                 "Put a note on the scraper card that it needs proxies", "What's on my board?"],
+         "where": "Organise → Board: drag cards, add columns, click a card to edit it."},
+        {"title": "Deadlines on cards", "what": "Give a card a due date. Vox reminds you on the day.",
+         "say": ["The invoice card is due Friday", "Clear the deadline on the invoice card"],
+         "how": "Or open a card → Due date. Orange when close, red when late."},
+        {"title": "Tags, checklists, archive", "what": "Organise cards further.",
+         "say": ["Tag the invoice card urgent", "Add send it to the checklist on the invoice card", "Archive the old card"],
+         "where": "Board → Archived shows archived cards; search finds any card."},
+        {"title": "Several cards at once", "what": "Change many cards in one go, by voice or by selecting them.",
+         "say": ["Delete the test cards", "Clear my board"],
+         "how": "On the Board, ⌘-click cards, then Move To, Archive or Delete. Paste several lines into Add Card for one card per line."},
+        {"title": "Undo a delete", "what": "Deleted cards can be brought back with their notes, tags and deadlines.",
+         "say": ["Put them all back", "Bring back the invoice card"]},
+    ]),
+    ("Answers and the web", "globe", [
+        {"title": "Look things up", "what": "Searches the web for anything current or that Vox isn't sure of, and answers in a sentence.",
+         "say": ["How do I quantize MIDI in Logic Pro?", "Who won the last F1 race?"]},
+        {"title": "Weather", "what": "Today's weather anywhere, or at home.",
+         "say": ["What's the weather like?", "What's the weather in Cape Town tomorrow?"],
+         "where": "Settings → General → Home location."},
+        {"title": "Date and time", "what": "Knows the date, time and day.", "say": ["What time is it?", "What's the date on Friday?"]},
+    ]),
+    ("Memory", "brain", [
+        {"title": "Short-term memory", "what": "Remembers what was just said and done (about the last half hour), so \"it\", \"that one\" and \"put them back\" work.",
+         "say": ["Add a card called buy ink", "Move it to Doing", "What was that name I just said?"]},
+        {"title": "Remember things about you", "what": "Keeps facts about you for later conversations.",
+         "say": ["Remember that my sister is called Sam", "What's my sister called?", "My name is …"],
+         "where": "Organise → Memory shows and deletes what it knows.",
+         "note": "Settings → Control → Memory → Remember things on its own lets it pick facts up from conversation."},
+        {"title": "Rules", "what": "Standing instructions Vox always follows, everywhere or in one app.",
+         "where": "Teach Vox → Rules.", "how": "e.g. \"Always answer in one sentence\", or set to Zen: \"refresh means press command R\"."},
+    ]),
+    ("Teaching Vox", "graduationcap", [
+        {"title": "Teach a phrase", "what": "Make your own command, for every app or just the one in front.",
+         "say": ["Whenever I say refresh, press command R", "From now on in Zen, when I say refresh press command R"]},
+        {"title": "Commands Vox learns", "what": "Requests the brain had to work out are saved, so they're instant next time.",
+         "say": ["Remember that", "Forget that", "No, that's wrong"],
+         "where": "Teach Vox → Commands (by app) and Commands → Learning.",
+         "how": "\"No, that's wrong\" straight after a mistake switches that command off."},
+        {"title": "Change settings by voice", "what": "Adjust Vox without opening Settings.",
+         "say": ["Reply silently from now on", "Speak replies again", "Use a deeper voice", "Stop learning commands"]},
+        {"title": "Personalities", "what": "Pick a character and voice for Vox, edit one, or write your own.",
+         "where": "Teach Vox → Personality."},
+        {"title": "Prompts", "what": "Read and edit the instructions each part of Vox's brain gets, and see exactly what was sent last time.",
+         "where": "Teach Vox → Prompts."},
+    ]),
+    ("Brains and voice", "cpu", [
+        {"title": "Quick and hard-question brains", "what": "A fast brain handles most things and hands hard questions to a stronger one.",
+         "where": "Settings → Brains. Claude (subscription or API), ChatGPT or DeepSeek.",
+         "how": "API keys go in Settings → Brains → API keys."},
+        {"title": "Voices", "what": "Choose Vox's voice: the Mac's built-in voices or natural neural voices.",
+         "where": "Settings → Voice, or a personality's voice. Try voices in Insights → Voice Lab."},
+        {"title": "Interrupt Vox", "what": "Talk over Vox to stop it mid-sentence.",
+         "where": "Settings → Listening → Interrupting Vox.", "note": "Best with headphones."},
+        {"title": "Smarter end of sentence", "what": "Waits when you pause mid-thought instead of cutting you off.",
+         "where": "Settings → Listening → End of sentence → Smart."},
+        {"title": "Instant commands", "what": "Common commands are recognised in a few milliseconds instead of waiting for full transcription.",
+         "where": "Settings → Listening → Recognition."},
+    ]),
+    ("Coding agents", "terminal", [
+        {"title": "Agents speak through Vox", "what": "Claude Code and other agents can talk to you, one voice at a time, in their own voice.",
+         "say": ["(to Claude Code) Tell me out loud when you're done"],
+         "how": "Add the vox-control MCP server (mcp/README.md)."},
+        {"title": "Quiet bubbles", "what": "Agents can show a notification bubble instead of speaking.", "where": "Settings → General → Notification bubble."},
+        {"title": "Alerts when an agent needs you", "what": "A bubble or voice line names the agent that's waiting for your permission.",
+         "where": "Settings → General → Coding agents.", "how": "Needs the Vox hook in Claude Code's settings."},
+        {"title": "Named agents", "what": "Give an agent a name so its messages say who's talking.",
+         "say": ["(to an agent) Your name is Scout, register yourself"]},
+        {"title": "Agents use your Mac and board", "what": "Through the MCP, agents can click, type, read the screen and change your board.",
+         "say": ["(to Claude Code) Add a card to my Vox board called review the PR"]},
+    ]),
+    ("The app", "app.badge", [
+        {"title": "Conversation", "what": "Everything you and Vox have said, live.", "where": "Conversation."},
+        {"title": "Activity", "what": "Recent requests, which brain answered, time and cost.", "where": "Insights → Activity."},
+        {"title": "Log an issue by voice", "what": "Report a problem the moment it happens; Vox saves what was on screen with it.",
+         "say": ["Log an issue, it clicked the wrong button"], "where": "Insights → Testing → Logged issues."},
+        {"title": "Testing", "what": "Every new feature with how to try it; mark each one works, partly or broken.",
+         "where": "Insights → Testing."},
+        {"title": "Setup", "what": "Permissions, voice, brain and a few questions about you.",
+         "where": "Settings → Advanced → Run Setup Again."},
+    ]),
+]
+
+
+def guide() -> list[dict]:
+    """The guide as JSON-ready sections: [{"title", "symbol", "items": [entry, …]}]."""
+    return [{"title": t, "symbol": sym, "items": [dict(e) for e in items]} for t, sym, items in GUIDE]

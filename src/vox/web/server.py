@@ -1378,6 +1378,12 @@ def create_app() -> FastAPI:
             return {"error": f"could not build MCP config: {exc}"}
 
     # --- Handbook (catalog of voice commands & features) ---
+    @app.get("/api/guide")
+    def get_guide() -> list:
+        """Every feature, what it does and how to use it (Vox.app → Guide)."""
+        from vox import guide
+        return guide.guide()
+
     @app.get("/api/handbook")
     def get_handbook() -> list:
         """A structured reference catalog for the dashboard Handbook page.

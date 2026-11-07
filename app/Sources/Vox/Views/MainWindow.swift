@@ -31,6 +31,7 @@ struct MainWindow: View {
         switch page {
         case .home: HomeView()
         case .conversation: ConversationView()
+        case .guide: GuideView()
         case .personality: PersonalityView()
         case .commands: CommandsView()
         case .vocabulary: VocabularyView()
