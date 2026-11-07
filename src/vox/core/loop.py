@@ -1281,6 +1281,34 @@ def _pid_on_port(cfg) -> "int | None":
         return None
 
 
+_INSTANCE_LOCK = None  # held open for the life of the process; the OS releases it when we exit
+
+
+def _acquire_instance_lock(wait: float) -> bool:
+    """Take the one-engine-at-a-time lock (``data/vox.lock``), retrying for up to ``wait`` seconds.
+    False if another live engine holds it. Platforms without flock skip the lock (True)."""
+    global _INSTANCE_LOCK
+    try:
+        import fcntl
+    except ImportError:
+        return True
+    try:
+        fh = open(DATA_DIR / "vox.lock", "a+")
+    except OSError:
+        return True   # can't even create the file: don't block startup over it
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _INSTANCE_LOCK = fh
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                return False
+            time.sleep(0.25)
+
+
 def _running_pid(cfg) -> "int | None":
     """The live Vox daemon's PID: trust the pidfile if it points at a live process, else fall back
     to whatever holds the dashboard port."""
@@ -1353,7 +1381,8 @@ def main() -> None:
     # leaves the dashboard served by a stale process). Refuse to start a second copy — EXCEPT on a
     # restart, where the process we're replacing is exiting and may still briefly hold the port
     # (restart spawns us with VOX_RESTART=1; pop it so our own child processes don't inherit it).
-    if os.environ.pop("VOX_RESTART", "") != "1" and _another_instance_running(cfg):
+    restarting = os.environ.pop("VOX_RESTART", "") == "1"
+    if not restarting and _another_instance_running(cfg):
         if args & {"--replace", "--force"}:  # `vox --replace`: stop the old one, then start fresh
             out.emit(f"↻ --replace: stopping the running {cfg.assistant_name} first…")
             _stop_running(cfg, out)
@@ -1370,6 +1399,17 @@ def main() -> None:
                 f" — that's why it kept running.)"
             )
             return
+
+    # The real single-instance guarantee: an exclusive lock held for this process's lifetime. The
+    # port check above has a gap: during a restart the port is briefly free, and a second start in
+    # that moment (the app reopening while the engine restarts) slipped through. That copy failed to
+    # bind the port, kept its mic loop, and typed every dictated word a second time for a day
+    # (2026-11-07). A restart waits for the old process to let go of the lock.
+    if not _acquire_instance_lock(wait=15.0 if restarting else 2.0):
+        pid = _running_pid(cfg)
+        out.emit(f"⚠️  {cfg.assistant_name} is already running{f' (PID {pid})' if pid else ''}; "
+                 f"not starting a second copy.")
+        return
 
     from vox import runtime
     try:  # `kill -USR1 <pid>` prints every thread's Python stack to the console log: a wedged loop
