@@ -258,6 +258,9 @@ def click(target: str) -> str:
     t = (target or "").strip()
     if not t:
         return "(click needs a label or a number)"
+    refused = _refusal()
+    if refused:
+        return refused
     try:
         from vox import actions, targets
         if t.isdigit():
@@ -302,6 +305,9 @@ def type_text(text: str) -> str:
     clipboard is restored afterwards). Click into the field first if the cursor isn't there."""
     if not (text or ""):
         return "(nothing to type)"
+    refused = _refusal()
+    if refused:
+        return refused
     try:
         from vox import actions
         return actions.type_text(text)
@@ -345,10 +351,47 @@ def set_value(control: str, value: str) -> str:
     return _intent("set_value", f"{control.strip()}||{value.strip()}", "")
 
 
+# Tools that act on whatever app is in front. Refused when that app is protected (#66 stage 2):
+# the agent deny list (terminals, editors, System Settings — an agent typing into its own terminal
+# could approve its own permission prompts) plus the user's blocked apps (Commands → Blocked).
+_ACTING = {"right_click", "double_click", "drag", "set_value", "press"}
+
+
+def _protected_front() -> str | None:
+    """Name of the frontmost app if acting tools must not touch it, else None."""
+    try:
+        from vox import actions
+        from vox.config import CONFIG
+        front = (actions.frontmost_app() or "").strip()
+        if not front:
+            return None
+        denied = _setting("agent_denied_apps", CONFIG.agent_denied_apps) or ()
+        if isinstance(denied, str):
+            denied = [d.strip() for d in denied.split(",") if d.strip()]
+        names = {str(d).lower() for d in denied} | {b.lower() for b in actions.blocked_apps()}
+        return front if front.lower() in names else None
+    except Exception:
+        return None
+
+
+def _refusal() -> str | None:
+    app = _protected_front()
+    if app is None:
+        return None
+    return (f"(refused: {app} is in front, and agents may not click or type there: it's on Vox's "
+            f"protected list (terminals, code editors, System Settings, and the apps the user blocked "
+            f"in Vox → Commands → Blocked). Ask the user to do this step, or switch to another app "
+            f"first with run_command.)")
+
+
 def _intent(name: str, arg: str, empty_msg: str) -> str:
     """Run one ``actions.run_intent`` primitive with the guard rails every tool here has."""
     if not (arg or "").strip():
         return f"({empty_msg})"
+    if name in _ACTING:
+        refused = _refusal()
+        if refused:
+            return refused
     try:
         from vox import actions
         return actions.run_intent(name, arg.strip())
@@ -376,6 +419,9 @@ def replace_selection(text: str) -> str:
     Leaves the text alone if nothing is selected."""
     if not (text or "").strip():
         return "(replace_selection needs the replacement text)"
+    refused = _refusal()
+    if refused:
+        return refused
     try:
         from vox import actions
         return actions.edit_selection(lambda _sel: text)

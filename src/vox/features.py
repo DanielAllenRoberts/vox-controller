@@ -228,6 +228,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "An agent calls notify (e.g. 'notify me when the build finishes'): a bubble appears, nothing is spoken.", "code"),
     ("mcp-control", "Agents", "Agents can use your Mac through Vox",
      "In Claude Code: 'use vox-control to open Notes and make a note saying hello'. It works through Vox's tools.", "code"),
+    ("mcp-protected", "Agents", "Agents can't act in protected apps",
+     "With Terminal (or a blocked app) in front, ask Claude Code to use vox-control's press or type_text: it's refused and told to ask you. In other apps it works. (Restart Claude Code so it loads the new MCP.)", "code"),
     ("mcp-board", "Agents", "Agents can read and change the Board",
      "In Claude Code: 'add a card to my Vox board called test from Claude'. It shows on the Board page.", "code"),
     ("agent-screen", "Agents", "Screen agent for multi-step jobs (off by default)",

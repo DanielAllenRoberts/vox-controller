@@ -199,6 +199,14 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   overnight tidy (vox/dream.py) that keeps lasting facts from the last day's conversation. Next:
   topic folders / semantic recall (#28, #55).
 
+## Ideas-list pass (2026-11-07, user's "every outstanding achievable feature")
+- ☑ #60 reminders/routines wait until you're back (vox/presence.py).
+- ☑ #56 + O12 "no, the other one" → numbered choice among same-named controls.
+- ☑ #66 stage 2: MCP acting tools refused in protected apps (agent deny list + blocked apps).
+- ☑ #28 overnight memory tidy; contradicted facts updated.
+- ⏸ #36 site-scoped learning: builds on command learning, which CLAUDE.md says is in an active
+  trial (don't build on it yet). Waiting for the trial to end.
+
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
 - Sidebar status (which brain, paused).
