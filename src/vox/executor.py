@@ -48,6 +48,8 @@ _SYSTEM = (
     "  next window / previous window  ·  swipe left / swipe right    ·  profile <number>\n"
     "  <app> window  (switch to / cycle an app's windows, e.g. 'Cursor window')\n"
     "  show tabs / hide tabs\n"
+    "  pause music / play music / next song / previous song  (Spotify, Music or a video, in the\n"
+    "      background. 'pause', or a mis-heard 'pose my music' → pause music. NEVER press space for it)\n"
     "Two more things you can do with text at the cursor:\n"
     "  • Compose text and insert it (e.g. 'write me an email about X', 'write a function that "
     "sums a list'): output  TYPE: <the full finished text>. It ALWAYS inserts at the user's "

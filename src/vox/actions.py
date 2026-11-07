@@ -186,11 +186,15 @@ def _parse(text: str) -> tuple[str, str] | None:
     # Media: "pause spotify", "next song", "pause the music": straight to the player, in the
     # background, no brain (it used to go to the LLM, which opened Spotify and clicked Pause).
     m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*"
-                     r"(pause|stop|play|resume|unpause|continue|skip|next|previous|last|toggle)\s+"
+                     r"(pause|stop|play|resume|unpause|continue|skip|next|previous|last|toggle"
+                     # Whisper's mishearings of "pause" (seen live: "pose my music" went to the
+                     # brain, which pressed Space in the app in front). Safe: only before a music noun.
+                     r"|pose|posed|paws|pours|pores|porz)\s+"
                      r"(?:the\s+|this\s+|my\s+)?(music|song|track|spotify|apple music|playback|audio|podcast)"
                      r"(?:\s+on\s+(spotify|apple music|music))?(?:\s+please)?", t)
     if m:
         verb, noun, on = m.group(1), m.group(2), m.group(3)
+        verb = "pause" if verb in ("pose", "posed", "paws", "pours", "pores", "porz") else verb
         action = ({"pause": "pause", "stop": "pause", "play": "play", "resume": "play", "unpause": "play",
                    "continue": "play", "skip": "next", "next": "next", "previous": "previous",
                    "last": "previous", "toggle": "playpause"}[verb])
