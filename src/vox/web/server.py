@@ -1163,8 +1163,8 @@ def create_app() -> FastAPI:
         if err is not None:
             return err
         kind = body.get("kind")
-        if kind not in ("timer", "alarm", "reminder"):
-            return _bad_request("'kind' must be one of timer|alarm|reminder")
+        if kind not in ("timer", "alarm", "reminder", "routine"):
+            return _bad_request("'kind' must be one of timer|alarm|reminder|routine")
         fire_at = body.get("fireAt")
         if not isinstance(fire_at, str) or not fire_at.strip():
             return _bad_request("'fireAt' (ISO local datetime) is required")
@@ -1186,6 +1186,20 @@ def create_app() -> FastAPI:
         except Exception as exc:
             return _bad_request(f"could not create reminder: {exc}")
         return _job_to_api(job)
+
+    @app.post("/api/reminders/{the_id}/run")
+    async def run_routine(the_id: str, request: Request):
+        """Run a routine now (the Reminders page's Run Now). It speaks as if it had fired."""
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        mod = _try_import_scheduler()
+        job = next((j for j in (mod.list_jobs() if mod else []) if j.get("id") == the_id), None)
+        if job is None:
+            return _not_found("routine")
+        from vox import routines
+        routines.run_in_background(job)
+        return {"ok": True}
 
     @app.delete("/api/reminders/{the_id}")
     def remove_reminder(the_id: str):

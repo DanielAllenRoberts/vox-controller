@@ -40,6 +40,9 @@ REGISTRY: list[tuple[str, str, str, str, str]] = [
     ("click_vision", "Find it in a screenshot",
      "Last resort for clicking and pointing: finds the thing on a numbered screenshot. Keep the "
      "{target} and {n} placeholders.", "vox.executor", "_CLICK_VISION_PROMPT"),
+    ("routine", "Routines",
+     "Turns a scheduled routine (\"every weekday at 7, tell me what's on my calendar and the weather\") "
+     "plus the calendar, weather and board it gathered into a short spoken briefing.", "vox.routines", "_SYSTEM"),
     ("agent", "Screen agent",
      "Multi-step tasks done by looking at the screen and acting, step by step.", "vox.agent", "_SYSTEM"),
 ]

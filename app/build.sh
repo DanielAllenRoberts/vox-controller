@@ -52,6 +52,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSMicrophoneUsageDescription</key><string>Vox listens for your voice commands. Speech is recognised on this Mac.</string>
   <key>NSAppleEventsUsageDescription</key><string>Vox controls apps like Safari and Finder when you ask it to by voice.</string>
   <key>NSScreenCaptureUsageDescription</key><string>Vox looks at the screen only when you ask it about what's there.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>Vox reads your calendar for routines and when you ask what's on.</string>
+  <key>NSCalendarsUsageDescription</key><string>Vox reads your calendar for routines and when you ask what's on.</string>
 </dict>
 </plist>
 PLIST

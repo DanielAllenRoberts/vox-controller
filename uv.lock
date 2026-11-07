@@ -792,6 +792,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyobjc-framework-eventkit"
+version = "12.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fd/63/1acab761201e3ba2ddaa093470bb94373a11cee4f406587fb687e31062ab/pyobjc_framework_eventkit-12.2.tar.gz", hash = "sha256:c4e96235a1f0e43ea9699054c289369efb9d7645254a6169559c671b4ed21f86", size = 33759, upload-time = "2026-05-30T12:37:28.465Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/c0/257069ea9e34c3b0dc473f6ac9c03c95029e9b3c686875ae8f1c564eb0ac/pyobjc_framework_eventkit-12.2-py2.py3-none-any.whl", hash = "sha256:b56a736182365eff268b6a8c958a663d53432bac5befd3116570d3f1e4ec8b1a", size = 6924, upload-time = "2026-05-30T12:06:36.781Z" },
+]
+
+[[package]]
 name = "pyobjc-framework-quartz"
 version = "12.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1235,6 +1248,7 @@ dependencies = [
     { name = "psutil", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-eventkit", marker = "sys_platform == 'darwin'" },
     { name = "python-dotenv", marker = "sys_platform == 'darwin'" },
     { name = "sounddevice", marker = "sys_platform == 'darwin'" },
     { name = "uvicorn", extra = ["standard"], marker = "sys_platform == 'darwin'" },
@@ -1256,6 +1270,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=5.9" },
     { name = "pyobjc-framework-avfoundation", specifier = ">=12.2" },
     { name = "pyobjc-framework-cocoa", specifier = ">=12.2" },
+    { name = "pyobjc-framework-eventkit", specifier = ">=12.2" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.49.0" },

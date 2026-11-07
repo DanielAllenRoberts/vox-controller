@@ -59,7 +59,7 @@ struct RemindersView: View {
                 ContentUnavailableView {
                     Label("Nothing scheduled", systemImage: "alarm")
                 } description: {
-                    Text("Timers, alarms and reminders appear here. Try saying \u{201C}Remind me in 10 minutes to stretch.\u{201D}")
+                    Text("Timers, alarms, reminders and routines appear here. Try saying \u{201C}Remind me in 10 minutes to stretch\u{201D} or \u{201C}Every weekday at 7, tell me what's on my calendar and the weather.\u{201D}")
                 } actions: {
                     Button("New Reminder") { adding = true }
                 }
@@ -80,7 +80,9 @@ struct RemindersView: View {
             List(selection: $selection) {
                 ForEach(groups, id: \.0) { title, items in
                     Section {
-                        ForEach(items) { r in ReminderRow(reminder: r, now: tl.date).tag(r.id) }
+                        ForEach(items) { r in
+                            ReminderRow(reminder: r, now: tl.date) { Task { await run(r) } }.tag(r.id)
+                        }
                     } header: {
                         Text(title).pageSectionHeader()
                     }
@@ -88,6 +90,9 @@ struct RemindersView: View {
             }
             .listStyle(.inset)
             .contextMenu(forSelectionType: String.self) { ids in
+                if ids.count == 1, let r = all.first(where: { ids.contains($0.id) }), r.kind == "routine" {
+                    Button("Run Now") { Task { await run(r) } }
+                }
                 if !ids.isEmpty {
                     Button(ids.count == 1 ? "Cancel…" : "Cancel \(ids.count) Items…", role: .destructive) {
                         deleting = all.filter { ids.contains($0.id) }
@@ -102,11 +107,14 @@ struct RemindersView: View {
     static func group(_ all: [Reminder], now: Date) -> [(String, [Reminder])] {
         let sorted = all.sorted { ($0.fireDate ?? .distantFuture) < ($1.fireDate ?? .distantFuture) }
         let endOfToday = Calendar.current.startOfDay(for: now).addingTimeInterval(86_400)
-        let once = sorted.filter { !$0.isRepeating }
+        let routines = sorted.filter { $0.kind == "routine" }
+        let rest = sorted.filter { $0.kind != "routine" }
+        let once = rest.filter { !$0.isRepeating }
         let groups: [(String, [Reminder])] = [
+            ("Routines", routines),
             ("Today", once.filter { ($0.fireDate ?? .distantFuture) < endOfToday }),
             ("Later", once.filter { ($0.fireDate ?? .distantFuture) >= endOfToday }),
-            ("Repeating", sorted.filter(\.isRepeating)),
+            ("Repeating", rest.filter(\.isRepeating)),
         ]
         return groups.filter { !$0.1.isEmpty }
     }
@@ -125,6 +133,11 @@ struct RemindersView: View {
             loadedAt = now
             loadError = nil
         } catch { loadError = ErrorWords.reason(error) }
+    }
+
+    private func run(_ r: Reminder) async {
+        do { try await model.api.post("reminders/\(r.id)/run") }
+        catch { self.error = ErrorWords.message("Couldn't run that routine.", error) }
     }
 
     private func add(_ body: ReminderAddBody) async {
@@ -150,6 +163,7 @@ struct RemindersView: View {
 private struct ReminderRow: View {
     var reminder: Reminder
     var now: Date
+    var onRun: () -> Void = {}
 
     var body: some View {
         let kind = KindInfo(reminder.kind)
@@ -163,6 +177,11 @@ private struct ReminderRow: View {
                 Text(detail).font(.callout).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
+            if reminder.kind == "routine" {
+                Button("Run Now", systemImage: "play.fill", action: onRun)
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("Run this routine now")
+            }
             Text(relative)
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(isDue ? Color.orange : Color.secondary)
@@ -208,6 +227,7 @@ private struct KindInfo {
         switch kind {
         case "timer": (name, symbol, tint) = ("Timer", "timer", .orange)
         case "alarm": (name, symbol, tint) = ("Alarm", "alarm.fill", .red)
+        case "routine": (name, symbol, tint) = ("Routine", "sparkles", .purple)
         default: (name, symbol, tint) = ("Reminder", "bell.fill", .accentColor)
         }
     }
@@ -246,12 +266,14 @@ private struct ReminderEditor: View {
             Section {
                 Picker("Kind", selection: $kind) {
                     Text("Reminder").tag("reminder")
+                    Text("Routine").tag("routine")
                     Text("Alarm").tag("alarm")
                     Text("Timer").tag("timer")
                 }
                 .pickerStyle(.segmented)
-                TextField(kind == "reminder" ? "Remind me to" : "Label", text: $text,
-                          prompt: Text(kind == "reminder" ? "Stretch" : "Optional"))
+                TextField(kind == "reminder" ? "Remind me to" : kind == "routine" ? "Ask Vox to" : "Label", text: $text,
+                          prompt: Text(kind == "reminder" ? "Stretch" : kind == "routine"
+                                       ? "Tell me what's on my calendar and the weather" : "Optional"))
             }
             Section {
                 if kind == "timer" {
@@ -280,7 +302,7 @@ private struct ReminderEditor: View {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Add") { onAdd(makeBody()); dismiss() }
-                    .disabled(kind == "reminder" && text.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled((kind == "reminder" || kind == "routine") && text.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
     }
@@ -289,6 +311,7 @@ private struct ReminderEditor: View {
         switch kind {
         case "timer": "A chime plays \(minutes) \(minutes == 1 ? "minute" : "minutes") after you add it."
         case "alarm": "Vox plays an alarm sound and says it out loud."
+        case "routine": "At that time Vox does it: briefs you from your calendar, weather and board, or runs a command like \u{201C}open my email\u{201D}."
         default: "Vox says it out loud, with a soft sound."
         }
     }

@@ -106,8 +106,8 @@ _SYSTEM = (
     "type, send: never just CLICK the person's name in whatever app is in front). A single click, a "
     "single app switch, or anything with a visible label is NOT this — use CLICK: or a command, which "
     "are far faster.\n"
-    "To set a TIMER, ALARM, or REMINDER: output  SCHEDULE: <kind> | <when> | <text> | <repeat>\n"
-    "  <kind> = timer, alarm, or reminder.\n"
+    "To set a TIMER, ALARM, REMINDER or ROUTINE: output  SCHEDULE: <kind> | <when> | <text> | <repeat>\n"
+    "  <kind> = timer, alarm, reminder, or routine.\n"
     "  <when> = the ABSOLUTE local date-time as 24-hour ISO YYYY-MM-DDTHH:MM, which YOU compute from "
     "the 'Now:' time in the Mac state — turn 'in 10 minutes' / 'at 3:45 pm' / 'tomorrow at 7am' / "
     "'every day at 9' into the real clock date+time (pick the next future occurrence).\n"
@@ -122,6 +122,14 @@ _SYSTEM = (
     "stretch' → SCHEDULE: reminder | 2026-06-24T09:00 | stretch | daily  ·  'remind me every 30 "
     "minutes to check on the cat' → SCHEDULE: reminder | 2026-06-23T15:34 | check on the cat | "
     "every 30 minutes.\n"
+    "A ROUTINE is a scheduled REQUEST that Vox carries out at that time, rather than a line it reads "
+    "out: use kind routine whenever the user wants Vox to DO or TELL them something on a schedule "
+    "('every weekday at 7 tell me what's on my calendar and the weather' → SCHEDULE: routine | "
+    "<next weekday 07:00> | tell me what's on my calendar and the weather | weekdays  ·  'every day at "
+    "9 check my calendar and board and tell me what to work on' → SCHEDULE: routine | <next 09:00> | "
+    "check my calendar and board and tell me what to work on | daily  ·  'every morning at 8 open my "
+    "email' → SCHEDULE: routine | <next 08:00> | open my email | daily). <text> is the request in the "
+    "user's words. 'Remind me to X' stays a reminder.\n"
     "To START DICTATION — when the user wants to TYPE WITH THEIR VOICE, i.e. begin dictating text "
     "that Vox transcribes at the cursor ('start typing', 'start dictation', 'begin typing', "
     "'dictate', 'take dictation', or a mis-heard version like 'dot typing' / 'star typing' / 'start "
@@ -779,6 +787,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     recent = actions.recent_actions_block()
     if recent:
         prompt = f"{prompt}\n\n{recent}"
+    try:  # "what's on my calendar today?": the day's events, when the question is about them
+        from vox import routines
+        cal = routines.calendar_context(text)
+    except Exception:
+        cal = ""
+    if cal:
+        prompt = f"{prompt}\n\n{cal}"
     try:  # what was just said and done, in every mode (one-shots have no other history)
         from vox import working_memory
         short = working_memory.block()

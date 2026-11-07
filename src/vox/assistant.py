@@ -147,6 +147,15 @@ def _short_term_block() -> str:
         return ""
 
 
+def _calendar_block(text: str) -> str:
+    """Today's (and tomorrow's) events when the question is about the calendar. "" otherwise."""
+    try:
+        from vox import routines
+        return routines.calendar_context(text)
+    except Exception:
+        return ""
+
+
 def _focused_app() -> str | None:
     """The app in front, as the command cache tracks it (cheap: no AppleScript)."""
     try:
@@ -391,7 +400,7 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     # no-op if absent). The recent-actions block is what stops the chat brain denying or inventing
     # its own behaviour — it has no other way to know an action ran.
     for block in (_rules_block(_focused_app()), _memory_block(text), _recent_actions_block(),
-                  _short_term_block()):
+                  _short_term_block(), _calendar_block(text)):
         if block:
             system = f"{system}\n\n{block}"
     # The clock (ideas #47). The command brain had it; the chat brain didn't, so "hey vox, what time

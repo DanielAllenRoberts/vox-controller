@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import EventKit
 import Observation
 
 /// The macOS privacy permissions Vox needs. Checked without prompting; requested only on a button
@@ -11,7 +12,7 @@ import Observation
 @Observable
 final class Permissions {
     enum Kind: String, CaseIterable, Identifiable {
-        case microphone, accessibility, screenRecording
+        case microphone, accessibility, screenRecording, calendar
         var id: String { rawValue }
 
         var title: String {
@@ -19,6 +20,7 @@ final class Permissions {
             case .microphone: "Microphone"
             case .accessibility: "Accessibility"
             case .screenRecording: "Screen Recording"
+            case .calendar: "Calendar"
             }
         }
 
@@ -27,6 +29,7 @@ final class Permissions {
             case .microphone: "mic.fill"
             case .accessibility: "accessibility"
             case .screenRecording: "rectangle.dashed.badge.record"
+            case .calendar: "calendar"
             }
         }
 
@@ -35,16 +38,18 @@ final class Permissions {
             case .microphone: "So Vox can hear you. Audio is processed on this Mac."
             case .accessibility: "So Vox can click, type and read what's on screen when you ask it to."
             case .screenRecording: "Optional. Lets Vox look at the screen when you ask \"what's this?\""
+            case .calendar: "Lets routines and questions like \"what's on today?\" read your calendars."
             }
         }
 
-        var required: Bool { self != .screenRecording }
+        var required: Bool { self == .microphone || self == .accessibility }
 
         var settingsURL: URL {
             let anchor = switch self {
             case .microphone: "Privacy_Microphone"
             case .accessibility: "Privacy_Accessibility"
             case .screenRecording: "Privacy_ScreenCapture"
+            case .calendar: "Privacy_Calendars"
             }
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
         }
@@ -68,6 +73,11 @@ final class Permissions {
         }
         s[.accessibility] = AXIsProcessTrusted() ? .granted : .notAsked
         s[.screenRecording] = CGPreflightScreenCaptureAccess() ? .granted : .notAsked
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .fullAccess: s[.calendar] = .granted
+        case .notDetermined: s[.calendar] = .notAsked
+        default: s[.calendar] = .denied
+        }
         if s != statuses { statuses = s }
     }
 
@@ -103,6 +113,12 @@ final class Permissions {
                 _ = CGRequestScreenCaptureAccess()   // shows the system prompt the first time
             }
             watch()
+        case .calendar:
+            if status(.calendar) == .denied {
+                NSWorkspace.shared.open(k.settingsURL)   // macOS never re-prompts once denied
+            } else {
+                EKEventStore().requestFullAccessToEvents { _, _ in Task { @MainActor in self.refresh() } }
+            }
         }
     }
 

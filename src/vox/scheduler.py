@@ -59,7 +59,7 @@ _WEEKDAYS = {
     "friday": 4, "saturday": 5, "sunday": 6,
 }
 
-VALID_KINDS = ("timer", "alarm", "reminder")
+VALID_KINDS = ("timer", "alarm", "reminder", "routine")   # routine: a request Vox carries out (vox.routines)
 VALID_RECURRENCE = (None, "daily", "weekdays", "weekly")
 
 # Interval recurrence ("every 30 minutes") is stored as the string "every:<seconds>",
@@ -167,6 +167,13 @@ def _announce(job: dict, *, prefix: str = "") -> None:
     a one-shot that fired late on startup."""
     from vox import sounds, tts
     kind = job.get("kind")
+    if kind == "routine":  # a request to carry out, not a line to read out
+        try:
+            from vox import routines
+            routines.run_in_background(job)
+        except Exception:
+            pass
+        return
     text = (job.get("text") or "").strip()
     spoken = ""
     if kind == "reminder":
@@ -578,6 +585,8 @@ def _confirm(kind: str, body: str, fire: datetime, recurrence: str | None) -> st
     every = _recurrence_phrase(recurrence)
     label = kind if kind in VALID_KINDS else "reminder"
     tail = f" to {body}" if body else ""
+    if kind == "routine":
+        tail = f": {body}" if body else ""
     return f"{label.capitalize()} set for {when}{day}{every}{tail}."
 
 

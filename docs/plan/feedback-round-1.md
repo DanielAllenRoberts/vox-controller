@@ -184,7 +184,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☑ **Guide page**: every feature, how to use it, phrases (vox/guide.py).
 - ☑ **Multiple screens**: move a window/app to another display (left/right/other/main/iPad), maximise,
   snap left/right, centre (vox/windows.py). Visible moves left for the user to try.
-- ☐ **Routines**: scheduled requests that run through Vox or an agent, e.g. every weekday at 7:00 "tell
+- ☑ **Logged 75ee9efa: 'profile 1' did nothing in Zen.** Spaces now switch through the browser's own
+  Spaces menu (Zen: Uni ⌃1, GetPrice ⌃2), by number or by name.
+- ◐ **Routines** (built: vox/routines.py, kind 'routine', Reminders → Routines with Run Now, calendar via
+  EventKit + Settings → Permissions → Calendar; not yet: handing routines to background agents): scheduled requests that run through Vox or an agent, e.g. every weekday at 7:00 "tell
   me what's on my calendar and the weather"; every day "check my calendar and tell me what to work
   on". Later: hand them to background agents. Needs calendar access (todo.md §2: Google API vs Apple
   Calendar) for the calendar part.
