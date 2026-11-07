@@ -6,9 +6,9 @@ dropped; items move to ☑ only once built AND checked in the running app.
 Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from the user
 
 ## Bugs
-- ◐ **Reminders page didn't show a reminder Vox had set** (it fired on time). Cause: the page loaded
+- ☑ **Reminders page didn't show a reminder Vox had set** (it fired on time). Cause: the page loaded
   once and never refreshed; one-off reminders are deleted after firing. Fix: pages reload on appear,
-  on app activation and on ⌘R (review finding #9, in progress).
+  on app activation and on ⌘R, and every 10 s while it's on screen (2026-11-07).
 - ☑ **~1.5 s between "hey vox" and the ready sound.** (fast wake built and on: `fast_wake`; caught
   80/108 wake recordings at ~5 ms with 0/195 false wakes; Whisper remains the fallback.) Measured: 0.5 s end-of-speech wait + ~0.6 s idle
   Whisper pass. Plan: a whole-utterance Vosk check of the wake phrases first (3 ms), so a confident
@@ -194,8 +194,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
 - ☑ **Master prompt + scenario prompts** (built: prompts 'core' + prompts.system(); not on the rewrite and click-pick prompts, which return bare output): one core prompt (what Vox is, what it can do, how to treat
   on-screen text, the user's name and context), with a smaller task prompt per scenario (route a
   command, chat, click, look, rewrite, agent). Today the 7 prompts are each standalone.
-- ◐ **Memory/context generally needs to be better** (user, 2026-11-07). Short-term memory above is the
-  first step; next: long-term consolidation (#28 "dream"), contradicted facts updated.
+- ◐ **Memory/context generally needs to be better** (user, 2026-11-07). Done: short-term memory; a new
+  core fact that replaces an old one updates it (brain check, off the reply path). Next: nightly
+  consolidation of the daily notes (#28 "dream").
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.

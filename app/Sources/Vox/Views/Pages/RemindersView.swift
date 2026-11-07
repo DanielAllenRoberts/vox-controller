@@ -21,6 +21,14 @@ struct RemindersView: View {
                         Button("New Reminder", systemImage: "plus") { adding = true }.help("Set a timer, alarm or reminder")
                     }
                 }
+                .task {
+                    // Something set by voice while this page is already open: there's no push from the
+                    // engine, so look again every 10 s while the page is on screen (one cheap GET).
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(10))
+                        if !Task.isCancelled { await load() }
+                    }
+                }
                 .task(id: nextFire) {
                     // Re-read just after the next one goes off: the engine drops a finished timer
                     // and moves a repeating one on, so the list never says "Due now" for long.
@@ -129,7 +137,8 @@ struct RemindersView: View {
     private func load() async {
         do {
             let now = Date.now
-            reminders = try await model.api.get("reminders")
+            let fetched: [Reminder] = try await model.api.get("reminders")
+            if fetched != reminders { reminders = fetched }   // the 10 s poll mostly finds no change
             loadedAt = now
             loadError = nil
         } catch { loadError = ErrorWords.reason(error) }

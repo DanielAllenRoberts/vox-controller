@@ -46,7 +46,7 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
     ("app-conversation", "Vox.app", "Conversation page",
      "Oldest at the top, newest at the bottom, updates live while you talk.", "claude"),
     ("app-reminders-page", "Vox.app", "Reminders page shows what you set by voice",
-     "Say 'remind me in 5 minutes to stretch', open Reminders: it's there (refreshes when the page opens).", "code"),
+     "Open Reminders and leave it on screen. Say 'remind me in 5 minutes to stretch': it appears within about 10 seconds, without touching the page.", "code"),
     ("app-voicelab", "Vox.app", "Voice Lab",
      "Record a phrase: it's transcribed and named, Vox doesn't react while recording, play/delete work.", "code"),
     ("app-holdtotalk", "Vox.app", "Hold Right ⌥ to talk",
@@ -161,6 +161,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "'Start typing', say 'testing', 'stop typing'. It types 'Testing.' once (a second engine left over from a restart was typing everything twice).", "code"),
     ("short-term-memory", "Memory", "Vox remembers what was just said and done",
      "Ask 'add a card called buy ink', then separately 'move it to Doing': it moves THAT card. Or say a name, then later 'what was that name again?'. Works across one-shots, typed and spoken turns, and survives a restart (last 30 minutes).", "code"),
+    ("memory-updates", "Memory", "Changed facts are updated, not doubled",
+     "'Remember that my favourite band is Muse', later 'remember that my favourite band is Radiohead now'. The Memory page shows only Radiohead. A second, different fact ('I also love jazz') is kept alongside.", "code"),
     ("board-undo", "Organise", "Put deleted cards back",
      "Say 'delete the test cards' (or 'clear my board'), then 'put them all back': each comes back to its old column with its notes, tags, deadline and checklist.", "code"),
     # --- The basics (built before the app; never had a test entry) -----------------------------

@@ -5,6 +5,7 @@ Pick a provider in config (anthropic / openai-compatible / claude_cli). Keys com
 
 import os
 import re
+import threading
 import subprocess
 import time
 
@@ -269,12 +270,66 @@ def _mem_add(text: str, tier: str) -> None:
     if tier == "core" and not _core_ok(text):
         _dbg("[memory]", f"not long-term (a how-to note) → daily: {text!r}")
         tier = "daily"
+    if tier == "core":
+        # A new fact may REPLACE one we have ("my sister is called Alex" after "…Sam"): that needs a
+        # quick brain call, so do it off the reply path.
+        threading.Thread(target=_save_core, args=(text,), name="vox-memory", daemon=True).start()
+        return
     try:
         from vox import memory
         try:
             memory.add(text, tier=tier)
         except TypeError:
             memory.add(text)  # legacy flat store: no tiers
+    except Exception:
+        pass
+
+
+_REPLACE_SYSTEM = (
+    "You keep a list of facts about a person. Decide whether a NEW fact REPLACES one of the EXISTING "
+    "facts: the same thing about them, with a changed value (a new job, a different city, a renamed "
+    "pet, an updated preference, a corrected name). Facts that merely share words, or add something "
+    "alongside (a second sister, another hobby), do NOT replace anything. Reply with ONLY the number "
+    "of the fact it replaces, or NONE."
+)
+
+
+def _replaced_fact(text: str, entries: list[dict]) -> dict | None:
+    """The existing core fact ``text`` supersedes, or None. Only asks the brain when there are
+    candidates that talk about the same things (shared words)."""
+    from vox import memory
+    new = set(memory._tokens(text))
+    if not new:
+        return None
+    scored = []
+    for e in entries:
+        old = set(memory._tokens(e.get("text", "")))
+        if old and new & old:
+            scored.append((len(new & old) / len(new | old), e))
+    cands = [e for j, e in sorted(scored, key=lambda x: -x[0]) if 0.12 <= j < 0.75][:5]
+    if not cands:
+        return None
+    listing = "\n".join(f"{i}. {e['text']}" for i, e in enumerate(cands, 1))
+    try:
+        raw = complete(f"EXISTING:\n{listing}\n\nNEW: {text}", None, brain="small",
+                       system=_REPLACE_SYSTEM, kind="memory", prompt="memory_update").strip()
+    except Exception:
+        return None
+    m = re.match(r"\s*(\d+)", raw)
+    if not m or not (1 <= int(m.group(1)) <= len(cands)):
+        return None
+    return cands[int(m.group(1)) - 1]
+
+
+def _save_core(text: str) -> None:
+    try:
+        from vox import memory
+        old = _replaced_fact(text, memory.core())
+        if old is not None:
+            memory.update(old["id"], text=text)
+            _dbg("[memory]", f"updated {old['text']!r} → {text!r}")
+            return
+        memory.add(text, tier="core")
     except Exception:
         pass
 
