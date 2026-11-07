@@ -15,6 +15,11 @@ struct BoardView: View {
     @State private var selection: Set<Int> = []
     @State private var showArchived = false
     @State private var search = ""
+    @State private var boards: [BoardRef] = []
+    /// nil = the first (Workspace) board. The "Agents" board is filled by the agent team (vox/team.py).
+    @State private var boardName: String?
+
+    private var agentsBoard: Bool { boardName == "Agents" }
 
     var body: some View {
         RequiresEngine {
@@ -35,6 +40,17 @@ struct BoardView: View {
                 .reloadsOnChange("board", api: model.api, load)   // changed by voice or an agent → shows at once
                 .searchable(text: $search, prompt: "Search cards")
                 .toolbar {
+                    if boards.count > 1 {
+                        ToolbarItem(placement: .navigation) {
+                            Picker("Board", selection: $boardName) {
+                                ForEach(Array(boards.enumerated()), id: \.element.id) { i, b in
+                                    Text(b.name).tag(i == 0 ? String?.none : String?.some(b.name))
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .help("Your boards. Agents shows what each coding agent is working on.")
+                        }
+                    }
                     ToolbarItem {
                         Toggle(isOn: $showArchived) { Label("Archived", systemImage: "archivebox") }
                             .toggleStyle(.button)
@@ -43,10 +59,11 @@ struct BoardView: View {
                     ToolbarItem(placement: .primaryAction) {
                         Button("Add List", systemImage: "plus") { newListName = ""; addingList = true }
                             .help("Add a list")
-                            .disabled(showArchived)
+                            .disabled(showArchived || agentsBoard)
                     }
                 }
                 .onChange(of: showArchived) { _, _ in selection = []; Task { await load() } }
+                .onChange(of: boardName) { _, _ in selection = []; Task { await load() } }
                 .sheet(item: $editing) { card in
                     CardEditor(card: card) { draft in
                         Task { await save(card, draft) }
@@ -113,7 +130,7 @@ struct BoardView: View {
                             ForEach(board.lists) { list in
                                 ListColumn(list: list, cards: list.cards.filter(matches),
                                            others: board.lists.filter { $0.id != list.id },
-                                           archived: showArchived, selection: selection,
+                                           archived: showArchived, canAdd: !agentsBoard, selection: selection,
                                            onTap: tap,
                                            onSelect: toggle,
                                            onArchive: { c in Task { await bulk([BoardOp(op: "archive", card: c.id, archived: !c.isArchived)], "Couldn't archive that card.") } },
@@ -148,7 +165,10 @@ struct BoardView: View {
 
     private func load() async {
         do {
-            board = try await model.api.get(showArchived ? "board?archived=true" : "board")
+            boards = (try? await model.api.get("boards")) ?? boards
+            var q = showArchived ? ["archived=true"] : []
+            if let b = boardName, let enc = b.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { q.append("board=\(enc)") }
+            board = try await model.api.get(q.isEmpty ? "board" : "board?" + q.joined(separator: "&"))
             selection.formIntersection(Set((board?.lists ?? []).flatMap(\.cards).map(\.id)))
             loadError = nil
         } catch { loadError = ErrorWords.reason(error) }
@@ -308,6 +328,7 @@ private struct ListColumn: View {
     var cards: [BoardCard]
     var others: [BoardList]
     var archived: Bool
+    var canAdd = true
     var selection: Set<Int>
     var onTap: (BoardCard) -> Void
     var onSelect: (BoardCard) -> Void
@@ -338,7 +359,7 @@ private struct ListColumn: View {
                                  onMove: { listId in onMove(card.id, listId, nil) },
                                  onDrop: { dragged in onMove(dragged, list.id, card.id) })
                     }
-                    if !archived { AddCardRow(listName: list.name, onAdd: onAdd) }
+                    if !archived && canAdd { AddCardRow(listName: list.name, onAdd: onAdd) }
                 }
                 .padding(.horizontal, Metrics.tight).padding(.bottom, Metrics.tight)
             }
@@ -695,3 +716,5 @@ struct CardEditor: View {
         }
     }
 }
+
+struct BoardRef: Codable, Identifiable, Hashable { var id: Int; var name: String }

@@ -78,14 +78,18 @@ def _save(d: dict) -> None:
 
 
 def _update(name: str, **fields) -> dict | None:
+    hit = None
     with _LOCK:
         d = _load()
         for a in d["agents"]:
             if a["name"] == name:
                 a.update(fields, updated_at=time.time())
                 _save(d)
-                return a
-    return None
+                hit = dict(a)
+                break
+    if hit is not None and ("status" in fields):
+        _card_follow(hit)   # the Agents board shows it in Working / Needs you / Done
+    return hit
 
 
 def status() -> list[dict]:
@@ -122,6 +126,58 @@ def _log(name: str, kind: str, text: str) -> None:
         _LOGS.mkdir(parents=True, exist_ok=True)
         with open(_LOGS / f"{_key(name)}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "kind": kind, "text": text[:4000]}) + "\n")
+    except Exception:
+        pass
+
+
+# --- the Agents board: one card per task, moved as the agent works --------------------------------
+AGENTS_BOARD = "Agents"
+_COLUMN = {"working": "Working", "waiting": "Needs you", "error": "Needs you", "stopped": "Done", "idle": "Done"}
+
+
+def _board_conn():
+    from vox import board_store
+    conn = board_store.build()
+    if board_store.resolve_board(conn, AGENTS_BOARD) is None:
+        board_store.create_board(conn, AGENTS_BOARD, ["Working", "Needs you", "Done"])
+    return conn
+
+
+def _new_card(name: str, task: str, folder: Path) -> int | None:
+    try:
+        from vox import board_store
+        conn = _board_conn()
+        try:
+            title = task.strip().splitlines()[0][:90] or "Task"
+            card = board_store.add_card(conn, "Working", title, f"{name} · {folder.name}\n\n{task.strip()}",
+                                        [name], AGENTS_BOARD)
+            return card["id"]
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _card_follow(agent: dict) -> None:
+    """Keep the agent's current card in the column that matches its status, with its latest update."""
+    cid = agent.get("card_id")
+    if not cid:
+        return
+    try:
+        from vox import board_store
+        conn = _board_conn()
+        try:
+            card = board_store._card_row(conn, int(cid))
+            if card is None:
+                return
+            board_store.move_card(conn, int(cid), _COLUMN.get(agent.get("status", ""), "Working"),
+                                  board=AGENTS_BOARD)
+            upd = (agent.get("last_update") or "").strip()
+            if upd and agent.get("status") in ("idle", "error", "waiting", "stopped"):
+                head = card["body"].split("\n\nLatest:")[0]
+                board_store.update_card(conn, int(cid), body=f"{head}\n\nLatest: {upd[-500:]}")
+        finally:
+            conn.close()
     except Exception:
         pass
 
@@ -350,6 +406,7 @@ def start(folder: str, task: str, name: str | None = None) -> str:
     if busy(name):
         _inbox.setdefault(name, []).append(task)
         return f"{name} is busy; it'll pick this up next."
+    _update(name, card_id=_new_card(name, task, path))
     _spawn(name, task)
     return f"Started {name} in {path.name}."
 

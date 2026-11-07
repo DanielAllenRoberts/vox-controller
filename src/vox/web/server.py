@@ -1161,13 +1161,26 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     # --- Workspace board (Trello-like kanban + agent knowledge base; guarded; board_store, idea #51) ---
+    @app.get("/api/boards")
+    def get_boards() -> list:
+        """Every board's id and name (the Board page's switcher)."""
+        try:
+            from vox import board_store
+            conn = board_store.build()
+            try:
+                return [{"id": b["id"], "name": b["name"]} for b in board_store.list_boards(conn)]
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
     @app.get("/api/board")
-    def get_board(archived: bool = False) -> dict:
+    def get_board(archived: bool = False, board: str = "") -> dict:
         mod = _try_import("board")
         if mod is None:
             return {"id": None, "name": None, "lists": []}
         try:
-            return mod.snapshot(archived=archived)
+            return mod.snapshot(board or None, archived=archived)
         except Exception:  # never 500 a read — degrade to an empty board
             return {"id": None, "name": None, "lists": []}
 
