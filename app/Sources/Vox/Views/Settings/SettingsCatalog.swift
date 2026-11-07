@@ -155,6 +155,7 @@ enum SettingsCatalog {
             ]),
             .init(title: "Memory", footer: nil, items: [
                 s("memory_autocapture", "Remember things on its own", "Vox notes facts you mention (with your memory page to review them)."),
+                s("memory_dream", "Tidy memory overnight", "Once a day Vox keeps lasting facts about you it missed, and updates ones that changed."),
             ]),
         ],
         .advanced: [

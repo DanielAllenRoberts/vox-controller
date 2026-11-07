@@ -247,6 +247,16 @@ _SCHEMA_META: list[dict] = [
                 "command\" to run it instead. Never types into password fields. Applies live.",
     },
     {
+        "key": "memory_dream",
+        "label": "Tidy memory overnight",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "Once a day (after 3 a.m., or when the Mac next wakes) Vox reads what you said over "
+                "the last day and keeps any lasting facts about you it missed, updating ones that "
+                "changed. One quick brain call a day; stays on this Mac.",
+    },
+    {
         "key": "memory_autocapture",
         "label": "Auto-capture memories",
         "group": "Behavior",

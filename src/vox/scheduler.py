@@ -656,6 +656,11 @@ class _SchedulerThread(threading.Thread):
 
 def _tick() -> None:
     """Fire every due+enabled job; roll recurring ones, delete fired one-shots."""
+    try:  # once a day after 03:00: the overnight memory tidy (vox.dream), in its own thread
+        from vox import dream
+        dream.maybe_run()
+    except Exception:
+        pass
     now = _now()
     with _LOCK:
         jobs = _load()

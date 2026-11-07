@@ -26,8 +26,8 @@ from vox.paths import DATA_DIR
 
 _STORE = DATA_DIR / "working_memory.json"
 _LOCK = threading.Lock()
-_MAX_EVENTS = 80                 # kept on disk / in RAM
-_KEEP_SECONDS = 6 * 3600         # older events are dropped
+_MAX_EVENTS = 400                # kept on disk / in RAM (prompts only ever see the last 30 min)
+_KEEP_SECONDS = 26 * 3600        # a day, so the overnight memory tidy (vox.dream) can read it
 _events: deque | None = None
 
 

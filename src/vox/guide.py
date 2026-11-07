@@ -140,7 +140,7 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
         {"title": "Remember things about you", "what": "Keeps facts about you for later conversations.",
          "say": ["Remember that my sister is called Sam", "What's my sister called?", "My name is …"],
          "where": "Organise → Memory shows and deletes what it knows.",
-         "note": "Settings → Control → Memory → Remember things on its own lets it pick facts up from conversation."},
+         "note": "Settings → Control → Memory: Remember things on its own picks facts up as you talk, and Tidy memory overnight catches ones it missed and updates facts that changed."},
         {"title": "Rules", "what": "Standing instructions Vox always follows, everywhere or in one app.",
          "where": "Teach Vox → Rules.", "how": "e.g. \"Always answer in one sentence\", or set to Zen: \"refresh means press command R\"."},
     ]),

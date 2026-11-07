@@ -195,8 +195,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   on-screen text, the user's name and context), with a smaller task prompt per scenario (route a
   command, chat, click, look, rewrite, agent). Today the 7 prompts are each standalone.
 - ◐ **Memory/context generally needs to be better** (user, 2026-11-07). Done: short-term memory; a new
-  core fact that replaces an old one updates it (brain check, off the reply path). Next: nightly
-  consolidation of the daily notes (#28 "dream").
+  core fact that replaces an old one updates it (brain check, off the reply path). Also built: an
+  overnight tidy (vox/dream.py) that keeps lasting facts from the last day's conversation. Next:
+  topic folders / semantic recall (#28, #55).
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.
