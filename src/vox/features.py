@@ -151,6 +151,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "With Zen in full screen (green button): 'move Zen to the other screen'. It leaves full screen, moves, and goes full screen again on the other display.", "code"),
     ("multi-screen", "Control", "Move windows between screens",
      "With the iPad (Sidecar) or a second monitor connected: 'move Slack to the iPad', 'move this window to the other screen', 'send it to the main monitor'. Then 'maximise this window', 'snap this to the left half', 'center this window'.", "code"),
+    ("setup-connections", "Vox.app", "Setup: connect your apps",
+     "Settings → Advanced → Run Setup Again: after picking a voice there's 'Connect your apps' (Mac Calendar, MCP servers such as Composio, Spotify). Everything is optional; Skip works.", "code"),
     ("mcp-connections", "Vox.app", "Connections: add any MCP server",
      "Settings → Connections → Add Connection…: a URL (e.g. your Composio MCP server URL + its key header) or a command. It tests itself and shows the tool count. Then ask 'any new email from Sam?' or 'what's on my Trello?': Vox uses it, and asks 'Should I go ahead?' before sending or changing anything (say yes or no).", "code"),
     ("spotify-now", "Control", "What's playing?",

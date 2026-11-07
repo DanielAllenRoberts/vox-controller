@@ -6,7 +6,7 @@ import SwiftUI
 /// permissions, so by the time they reach the Engine step it's usually done. Screen Recording isn't
 /// asked for here; it's optional and Settings → Permissions offers it when wanted.
 struct OnboardingView: View {
-    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, brain, voice, aboutYou, tryIt, done }
+    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, brain, voice, connections, aboutYou, tryIt, done }
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismissWindow) private var dismissWindow
@@ -30,6 +30,7 @@ struct OnboardingView: View {
                 case .engine: EngineStep(installer: installer)
                 case .brain: BrainStep(setup: brain)
                 case .voice: VoiceStep()
+                case .connections: ConnectionsStep(perms: perms)
                 case .aboutYou: AboutYouStep(setup: aboutYou)
                 case .tryIt: TryItStep(perms: perms)
                 case .done: DoneStep(perms: perms)
@@ -98,6 +99,7 @@ struct OnboardingView: View {
         case .engine where !model.engine.isRunning: "Skip for Now"
         case .brain where !brain.passed: "Set Up Later"
         case .aboutYou: "Skip"
+        case .connections: "Skip"
         default: nil
         }
     }
@@ -391,6 +393,33 @@ final class BrainSetup {
         } catch {
             test = .failed(error.localizedDescription)
             return false
+        }
+    }
+}
+
+/// Optional: the apps Vox can use for you (any MCP server, e.g. Composio for Gmail/Calendar/Slack),
+/// Spotify, and the Mac's Calendar. The same controls as Settings → Connections.
+private struct ConnectionsStep: View {
+    var perms: Permissions
+
+    var body: some View {
+        StepLayout(symbol: "link", title: "Connect your apps",
+                   message: "Optional. Let Vox read your email, calendar and messages, and control Spotify. You can do this later in Settings → Connections.",
+                   compact: true) {
+            VStack(spacing: 10) {
+                HStack {
+                    Label("Mac Calendar", systemImage: "calendar")
+                    Spacer()
+                    if perms.status(.calendar) == .granted {
+                        Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Button("Allow…") { perms.request(.calendar) }
+                    }
+                }
+                .padding(.horizontal, 20)
+                ConnectionsPane()
+                    .frame(height: 300)
+            }
         }
     }
 }
