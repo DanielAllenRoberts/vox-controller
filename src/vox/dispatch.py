@@ -19,6 +19,7 @@ command) before falling through to conversational chat — so chat stays chat-fi
 from __future__ import annotations
 
 import re
+import time
 
 from vox import actions
 from vox.config import CONFIG
@@ -211,6 +212,35 @@ _CANCEL_PHRASES = ("cancel", "never mind", "nevermind", "hide", "escape", "forge
                    "clear", "dismiss", "go away")
 
 
+_OTHER_ONE = re.compile(r"^(?:no[, ]+|nope[, ]+|not that[, ]+)*(?:i meant |i mean )?(?:the )?(?:other|another|"
+                        r"different|wrong|not that) (?:one|button|link|\w+(?: \w+)?)$|^(?:no[, ]+)?not that one$|"
+                        r"^wrong one$")
+
+
+def _other_one(t: str) -> tuple[bool, str] | None:
+    """Vox clicked a control by name and it was the wrong one of several with that name ("click
+    Send" with two Sends). Number just the matching controls and let the user say which (the same
+    flow as "show clickable"). Only within 90 s of the click."""
+    last = getattr(actions, "LAST_CLICK", None)
+    if not last or time.time() - last[1] > 90 or not _OTHER_ONE.match(t):
+        return None
+    try:
+        from vox import overlay, targets
+        items = targets.matching(last[0])
+    except Exception:
+        return None
+    actions.LAST_CLICK = None
+    if not items:
+        return (False, f"I can't see any '{last[0]}' to choose from.")
+    if len(items) == 1:
+        return (False, f"That's the only '{items[0]['label']}' I can see.")
+    try:
+        overlay.show(items)
+    except Exception:
+        return (False, f"There are {len(items)} called '{last[0]}', but I couldn't number them.")
+    return (False, f"Which one? Say its number, 1 to {len(items)}.")
+
+
 def _overlay(text: str, t: str) -> tuple[bool, str] | None:
     """Numbered clickable-element overlay flow (idea #52). Returns (acted, msg), or None to fall
     through. Guarded — any AppKit/AX problem degrades gracefully."""
@@ -294,6 +324,10 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
         command_learn.check_negative(text, log=command_cache.log)
     except Exception:
         pass
+
+    other = _other_one(t)  # "no, the other one" straight after a click by name
+    if other is not None:
+        return other
 
     ov = _overlay(text, t)  # numbered clickable overlay (idea #52) — before the parser
     if ov is not None:

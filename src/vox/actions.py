@@ -9,6 +9,7 @@ import difflib
 import os
 import re
 import subprocess
+import time
 import urllib.parse
 
 from vox.config import CONFIG
@@ -900,7 +901,15 @@ def click_element(target: str) -> str:
     from vox import ax
     aim = None if ax.pinned() else focus_target()  # an outer pin already answered this
     with ax.pinned_to(*(aim or (0, ""))) as pin:
-        return _click_pinned(t, target, pin[1] if pin else "")
+        result = _click_pinned(t, target, pin[1] if pin else "")
+    if result.startswith("Clicked"):
+        global LAST_CLICK
+        LAST_CLICK = (t, time.time())   # for "no, the other one" (dispatch)
+    return result
+
+
+# (what was clicked by name, when): "no, the other one" re-offers the controls with that name.
+LAST_CLICK: tuple[str, float] | None = None
 
 
 def _click_pinned(t: str, target: str, want: str) -> str:

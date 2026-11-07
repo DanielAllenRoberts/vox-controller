@@ -179,6 +179,25 @@ def visible_targets(limit: int = 400):
     return items
 
 
+def matching(label: str, limit: int = 400):
+    """The visible targets whose label matches ``label`` (exact, else containing it), renumbered
+    from 0 so the overlay and ``click_index`` use the same numbers. None if unavailable. For "no,
+    the other one" after a click that hit the wrong one of several same-named controls."""
+    global _LAST
+    items = visible_targets(limit=limit)
+    if not items:
+        return None
+    want = (label or "").strip().lower()
+    if not want:
+        return []
+    owners = list(_LAST)
+    picked = [i for i, it in enumerate(items) if it["label"].strip().lower() == want]
+    if len(picked) < 2:
+        picked = [i for i, it in enumerate(items) if want in it["label"].strip().lower()]
+    _LAST = [owners[i] for i in picked]
+    return [{**items[i], "index": n} for n, i in enumerate(picked)]
+
+
 def click_label(target: str):
     """Click a page element by what it's called, when a browser is focused. ``("clicked", label)``,
     or None to let the caller fall back to the AX path (which still owns browser chrome).

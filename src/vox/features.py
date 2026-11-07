@@ -141,6 +141,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Settings → Brains → API keys: paste an OpenAI key. Then Quick replies → Provider → ChatGPT; the Model menu lists the models your key can use (read from OpenAI). Ask Vox something: it answers via ChatGPT (Activity shows 'chatgpt').", "code"),
     ("api-keys-settings", "Vox.app", "API keys in Settings",
      "Settings → Brains → API keys shows which keys are saved (never the key itself); paste to add, Remove… to delete. No restart needed.", "code"),
+    ("other-one", "Control", "'No, the other one' after a wrong click",
+     "Where there are two buttons with the same name (e.g. two 'Reply' links), say 'click Reply'. If it hit the wrong one, say 'no, the other one' within a minute: numbers appear on just the Reply buttons; say the number.", "code"),
     ("multi-screen", "Control", "Move windows between screens",
      "With the iPad (Sidecar) or a second monitor connected: 'move Slack to the iPad', 'move this window to the other screen', 'send it to the main monitor'. Then 'maximise this window', 'snap this to the left half', 'center this window'.", "code"),
     ("pause-mishear", "Control", "'Pose my music' still pauses",
