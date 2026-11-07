@@ -121,6 +121,11 @@ final class AppModel {
     }
 
     /// Typed input: heard by Vox exactly as if spoken. The reply arrives on the conversation feed.
+    /// The ⏹ button. nil if the engine couldn't be reached, else what was stopped (may be empty).
+    func stopNow() async -> [String]? {
+        try? await api.stop()
+    }
+
     func say(_ text: String) async -> String? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }

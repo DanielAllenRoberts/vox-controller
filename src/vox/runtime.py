@@ -105,3 +105,36 @@ def ptt_down() -> bool:
 def set_paused(value: bool) -> None:
     global paused
     paused = bool(value)
+
+
+# --- stop button --------------------------------------------------------------------------------
+# The ⏹ button in Vox.app (menu bar + Home). One press stops whatever Vox is doing right now: the
+# reply it's speaking, a brain call it's waiting on, an agent run. It's a timestamp, not a latch, so
+# work that started BEFORE the press sees it and work that starts after doesn't.
+_stopped_at = 0.0
+
+
+def request_stop() -> list[str]:
+    """Stop what's in flight. Returns what was actually stopped (for the log and the API reply)."""
+    global _stopped_at
+    _stopped_at = time.time()
+    stopped = []
+    try:
+        from vox import tts
+        if tts.is_speaking():
+            stopped.append("speech")
+        tts.stop_speaking()
+    except Exception:
+        pass
+    try:
+        from vox import agent
+        if agent.abort():
+            stopped.append("agent")
+    except Exception:
+        pass
+    return stopped
+
+
+def stopped_since(t: float) -> bool:
+    """True if the stop button was pressed after time ``t`` (when the caller's work began)."""
+    return _stopped_at >= t

@@ -63,6 +63,12 @@ struct APIClient {
     func setSetting(_ key: String, _ value: JSONValue) async throws { try await post("settings", ["key": .string(key), "value": value]) }
     func say(_ text: String) async throws { try await post("say", ["text": .string(text)]) }
     func setPaused(_ paused: Bool) async throws { try await post("listening", ["paused": .bool(paused)]) }
+    /// The stop button: halts speech, a pending brain call and any agent run. Returns what stopped.
+    func stop() async throws -> [String] {
+        struct R: Decodable { var stopped: [String] }
+        let r: R = try await send("stop", method: "POST", body: [String: JSONValue]())
+        return r.stopped
+    }
     func restart() async throws { try await post("restart") }
     func recentTurns(_ limit: Int = 200) async throws -> [Turn] { try await get("conversation/recent?limit=\(limit)") }
 

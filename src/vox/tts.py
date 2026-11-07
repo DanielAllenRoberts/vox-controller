@@ -169,6 +169,18 @@ def stop_speaking() -> None:
             player.stop()
         except Exception:
             pass
+    proc = _SAY_PROC  # the `say` engine too, so the stop button works whichever voice is in use
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def is_speaking() -> bool:
+    """True while a reply is playing (either engine)."""
+    proc = _SAY_PROC
+    return _ACTIVE_PLAYER is not None or (proc is not None and proc.poll() is None)
 
 
 def _speak_say(text: str, voice=None, rate=None) -> None:
@@ -185,10 +197,18 @@ def _speak_say(text: str, voice=None, rate=None) -> None:
     if rate:
         cmd += ["-r", str(rate)]
     cmd.append(text)
+    global _SAY_PROC
     try:
-        subprocess.run(cmd, capture_output=True, timeout=_say_timeout(text, rate))
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _SAY_PROC = proc
+        try:
+            proc.wait(timeout=_say_timeout(text, rate))
+        except subprocess.TimeoutExpired:
+            proc.kill()
     except Exception:
         pass  # never let a TTS hiccup (or hang) break the loop
+    finally:
+        _SAY_PROC = None
 
 
 def _say_timeout(text: str, rate=None) -> float:
@@ -311,6 +331,7 @@ def _speak_kokoro(text: str, voice=None, speed=None) -> bool:
 # sentence and stop() halts playback + drops the unplayed queue within a few hundred ms.
 
 _ACTIVE_PLAYER = None  # the _AfplayPlayer currently speaking (for stop_speaking()); None when idle
+_SAY_PROC: "subprocess.Popen | None" = None  # the `say` process currently speaking, if any
 
 # Sentence/clause boundary punctuation. Splitting on these lets the FIRST chunk start playing while
 # later chunks are still synthesizing (lower latency) and makes the reply killable between chunks.

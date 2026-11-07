@@ -271,6 +271,18 @@ def create_app() -> FastAPI:
         runtime.set_ptt(bool(body.get("held")))
         return {"ok": True}
 
+    @app.post("/api/stop")
+    async def post_stop(request: Request):
+        """The ⏹ button: stop whatever Vox is doing now (speech, a brain call, an agent run).
+        Listening carries on. Returns what was stopped, e.g. {"stopped": ["speech"]}."""
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime
+        stopped = runtime.request_stop()
+        print(f"⏹ Stop button{': ' + ', '.join(stopped) if stopped else ' (nothing was running)'}", flush=True)
+        return {"ok": True, "stopped": stopped}
+
     @app.post("/api/listening")
     async def post_listening(request: Request):
         """Pause / resume the mic ({"paused": true}). Typed input keeps working while paused."""

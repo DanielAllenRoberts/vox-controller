@@ -78,6 +78,12 @@ struct StatusOrb: View {
                     .fill(presence.color.opacity(0.35))
                     .scaleEffect(pulse ? 2.1 : 1)
                     .opacity(pulse ? 0 : 1)
+                    // Scoped to this circle. It was a withAnimation(.repeatForever) in onAppear, which
+                    // animates EVERYTHING that changes in that transaction, including the menu bar
+                    // panel's own size and position while it first lays out. The panel then slid
+                    // about forever ("glitches and constantly moves").
+                    .animation(pulse ? .easeOut(duration: presence.tone == .idle ? 2.4 : 1.4)
+                        .repeatForever(autoreverses: false) : nil, value: pulse)
             }
             Circle().fill(presence.color.gradient)
         }
@@ -90,9 +96,8 @@ struct StatusOrb: View {
     private func restart() {
         pulse = false
         guard animated else { return }
-        withAnimation(.easeOut(duration: presence.tone == .idle ? 2.4 : 1.4).repeatForever(autoreverses: false)) {
-            pulse = true
-        }
+        // Next run-loop turn: after the first layout pass, never inside it.
+        DispatchQueue.main.async { pulse = true }
     }
 }
 

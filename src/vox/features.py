@@ -141,6 +141,10 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Settings → Brains → API keys: paste an OpenAI key. Then Quick replies → Provider → ChatGPT; the Model menu lists the models your key can use (read from OpenAI). Ask Vox something: it answers via ChatGPT (Activity shows 'chatgpt').", "code"),
     ("api-keys-settings", "Vox.app", "API keys in Settings",
      "Settings → Brains → API keys shows which keys are saved (never the key itself); paste to add, Remove… to delete. No restart needed.", "code"),
+    ("stop-button", "Vox.app", "Stop button (⏹)",
+     "While Vox is speaking a long reply, or thinking about a request, press ⏹ next to the type box (menu bar panel or Home), or ⌘. there. It stops at once and keeps listening. Hover shows what it stopped.", "code"),
+    ("board-counts", "Organise", "Several board changes are summed up",
+     "Say 'delete the test cards' (or add several at once): Vox says 'Deleted 4 cards.' instead of reading every title.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),

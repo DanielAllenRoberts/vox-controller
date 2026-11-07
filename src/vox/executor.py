@@ -8,6 +8,7 @@ LLM — whatever the small brain is set to. See docs/plan/ideas.md #12-13.
 """
 
 import re
+import time
 
 from vox import actions, assistant, prompts
 from vox.config import CONFIG
@@ -481,15 +482,53 @@ def _spoken_due(due: str) -> str:
     return f"{day} at {when.strftime('%-I:%M %p').lower()}" if "T" in due else day
 
 
+# How each successful board result is counted when several land in one turn: (pattern, key, phrase
+# for a count of n). The phrase takes n and, for adds/moves into one list, that list's name.
+_BOARD_KINDS = [
+    (re.compile(r"Deleted '.*'\.$"), "deleted", lambda n, _l: f"Deleted {n} cards"),
+    (re.compile(r"Archived '.*'\.$"), "archived", lambda n, _l: f"Archived {n} cards"),
+    (re.compile(r"Added a note to '.*'\.$"), "noted", lambda n, _l: f"Added notes to {n} cards"),
+    (re.compile(r"Added '.*' to the checklist on '.*'\.$"), "checked", lambda n, _l: f"Added {n} checklist items"),
+    (re.compile(r"Added '.*' to '.*'\.$"), "tagged", lambda n, _l: f"Tagged {n} cards"),
+    (re.compile(r"Added '.*' to (.+)\.$"), "added",
+     lambda n, l: f"Added {n} cards to {l}" if l else f"Added {n} cards"),
+    (re.compile(r"Moved '.*' to (.+)\.$"), "moved",
+     lambda n, l: f"Moved {n} cards to {l}" if l else f"Moved {n} cards"),
+    (re.compile(r"Set '.*' due .*$"), "due", lambda n, _l: f"Set deadlines on {n} cards, with reminders"),
+    (re.compile(r"Cleared the deadline on '.*'\.$"), "cleared", lambda n, _l: f"Cleared {n} deadlines"),
+    (re.compile(r"Renamed it to '.*'\.$"), "renamed", lambda n, _l: f"Renamed {n} cards"),
+]
+
+
 def _board_summary(msgs: list[str]) -> str:
-    """One spoken sentence for several board changes: "Added 3 cards to Doing." when they're all
-    adds to one list, otherwise the individual results in order."""
+    """One short sentence for several board changes. Counts, not a list: "Deleted 5 cards." /
+    "Deleted 2 cards. Added 3 cards to Doing." Reading every title back was too much (user
+    feedback 2026-11-07). A kind that happened once keeps its own sentence ("Deleted 'Invoice'."),
+    and a failure that stopped the run is said at the end."""
     if len(msgs) == 1:
         return msgs[0]
-    adds = [re.match(r"Added '.*' to (.+)\.$", m) for m in msgs]
-    if all(adds) and len({a.group(1) for a in adds}) == 1:
-        return f"Added {len(msgs)} cards to {adds[0].group(1)}."
-    return " ".join(msgs)
+    groups: dict[str, dict] = {}   # key → {"n", "lists", "first", "phrase"}, in first-seen order
+    tail = []
+    for m in msgs:
+        for pat, key, phrase in _BOARD_KINDS:
+            hit = pat.match(m)
+            if hit:
+                g = groups.setdefault(key, {"n": 0, "lists": set(), "first": m, "phrase": phrase})
+                g["n"] += 1
+                if hit.groups():
+                    g["lists"].add(hit.group(1))
+                break
+        else:
+            tail.append(m)   # lists/boards created, or the failure that stopped the run
+    parts = []
+    for g in groups.values():
+        if g["n"] == 1:
+            parts.append(g["first"].rstrip("."))
+        else:
+            one_list = next(iter(g["lists"])) if len(g["lists"]) == 1 else None
+            parts.append(g["phrase"](g["n"], one_list))
+    parts += [t.rstrip(".") for t in tail]
+    return ". ".join(parts) + "."
 
 
 def _plainly_named(said: str, title: str) -> bool:
@@ -703,7 +742,14 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     board = actions.board_block()   # so it can answer about the board and name cards precisely
     if board:
         prompt = f"{prompt}\n\n{board}"
+    began = time.time()
     raw = assistant.complete(prompt, history, system=_router_system(), brain="small", prompt="router").strip()
+    from vox import runtime
+    if runtime.stopped_since(began):
+        # The stop button was pressed while the brain was thinking. The caller has already moved
+        # on; don't click or type anything now that nobody is waiting for it (issues.md O4).
+        assistant._dbg("[executor]", "stop button pressed during the call → not acting on it")
+        return False, ""
     if not raw:
         return False, assistant.respond(text, history)
     # The brain's raw output IS the "tool call" (Vox uses translate-to-command, not native function-

@@ -668,11 +668,11 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
     interrupt_slow_calls_only is on (default), barge-in is NOT armed for fast calls — those finish
     before the poll fires anyway, so arming there only wastes a capture window and risks a spurious
     cancel (loop 1, part of O8)."""
+    from vox import runtime
     arm = _setting("barge_in_enabled", cfg.barge_in_enabled)
     if arm and _setting("interrupt_slow_calls_only", cfg.interrupt_slow_calls_only) and not slow:
         arm = False
-    if not arm:
-        return work(), None
+    began = time.time()
     box: dict = {}
 
     def runner():
@@ -684,6 +684,14 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
     t = threading.Thread(target=runner, daemon=True)
     t.start()
     while t.is_alive():
+        # The stop button (runtime.request_stop) cancels a call whether or not barge-in is armed.
+        if runtime.stopped_since(began):
+            if out is not None:
+                out.emit("  ⏹ stop button — cancelling the request.")
+            return None, "cancel"
+        if not arm:
+            t.join(0.1)
+            continue
         audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
         if audio is None:
             continue  # silence — loop and re-check whether work() finished
@@ -715,6 +723,8 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
         if actions.parse(text) is not None or _is_assistant(text, cfg) or _is_dictate(text, cfg):
             return None, ("redirect", text)
         # anything else (chatter / fuzzy / background) → ignore and keep waiting for work()
+    if runtime.stopped_since(began):  # pressed in the moment between the last check and finishing
+        return None, "cancel"
     if "error" in box:
         raise box["error"]
     return box.get("result"), None

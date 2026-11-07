@@ -105,6 +105,7 @@ struct AskField: View {
                 .disabled(text.isEmpty || !model.engine.isRunning)
                 .help("Send (Return)")
                 .accessibilityLabel("Send to Vox")
+                StopButton(size: compact ? 20 : 24)
             }
             .padding(.horizontal, 14).padding(.vertical, compact ? 8 : 12)
             .background(.background.secondary, in: Capsule())
@@ -124,6 +125,39 @@ struct AskField: View {
         Task {
             error = await model.say(t)
             if error == nil, text == t { text = "" }
+        }
+    }
+}
+
+/// ⏹ Stops whatever Vox is doing right now: the reply it's speaking, a request it's thinking
+/// about, an agent task. Listening carries on. ⌘. does the same, as it does across the Mac.
+struct StopButton: View {
+    @Environment(AppModel.self) private var model
+    var size: CGFloat = 20
+    @State private var result: String?
+
+    var body: some View {
+        Button(action: stop) {
+            Image(systemName: "stop.circle.fill").font(.system(size: size))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(result == nil ? Color.secondary : Color.red)
+        .disabled(!model.engine.isRunning)
+        .keyboardShortcut(".", modifiers: .command)
+        .help(result ?? "Stop what Vox is doing: speaking, thinking or an agent task (⌘.)")
+        .accessibilityLabel("Stop Vox")
+    }
+
+    private func stop() {
+        Task {
+            let stopped = await model.stopNow()
+            result = switch stopped {
+            case nil: "Couldn't reach Vox"
+            case let s? where s.isEmpty: "Stopped (nothing was running)"
+            case let s?: "Stopped " + s.joined(separator: " and ")
+            }
+            try? await Task.sleep(for: .seconds(1.5))
+            result = nil
         }
     }
 }
