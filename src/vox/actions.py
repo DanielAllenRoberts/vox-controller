@@ -233,7 +233,8 @@ def _parse(text: str) -> tuple[str, str] | None:
         if verb in ("play", "resume") and noun in ("song", "track"):
             action = "play"
         app = on or (noun if noun in ("spotify", "apple music") else "")
-        return ("media", f"{action}:{app}")
+        # "play music" / "pause the song" mean the music apps, never a YouTube tab (see media()).
+        return ("media", f"{action}:{app or 'musicapp'}")
     # Bare "pause" / "play" / "press pause" / "pause the video": whatever is playing, YouTube included
     # (seen live: "pause" with YouTube playing got "I can't pause"). Not "stop": that one means abort.
     m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*(?:press\s+|hit\s+)?"
@@ -241,7 +242,9 @@ def _parse(text: str) -> tuple[str, str] | None:
                      r"(?:\s+(?:it|that|this|the video|video|youtube|the youtube video|playback|media))?(?:\s+please)?", t)
     if m:
         verb = m.group(1)
-        return ("media", f"{'pause' if verb == 'pause' else 'playpause' if verb == 'play pause' else 'play'}:")
+        on_video = bool(re.search(r"\b(?:video|youtube)\b", t))   # "play youtube", "pause the video"
+        return ("media", f"{'pause' if verb == 'pause' else 'playpause' if verb == 'play pause' else 'play'}:"
+                         f"{'browser' if on_video else ''}")
     if re.fullmatch(r"(?:skip|next)(?:\s+(?:this|the))?\s*(?:song|track)?|go to the next (?:song|track)", t) and \
             re.search(r"song|track|skip", t):
         return ("media", "next:")
@@ -2000,7 +2003,20 @@ def media(arg: str) -> str:
     Music take AppleScript in the background; anything else (YouTube, podcasts in a browser) gets the
     system media key, the same as the keyboard's ⏯ ⏭ ⏮ keys."""
     action, _, app = (arg or "playpause:").partition(":")
-    player = _PLAYERS.get(app.strip())
+    app = app.strip()
+    if action in ("play", "pause", "playpause") and app in ("", "browser"):
+        # YouTube's own button knows whether it's playing ("Pause (k)" while playing, "Play (k)" while
+        # paused). The media key is a TOGGLE: "play" on a playing video paused it (logged 7c4aafe2).
+        spotify_playing = app == "" and _music_app_playing() is not None
+        if not spotify_playing:
+            yt = _youtube(action)
+            if yt is not None:
+                return yt
+        if app == "browser":
+            app = ""
+    if app == "musicapp":   # "play music": Spotify/Music (or the media key), skipping the YouTube check
+        app = ""
+    player = _PLAYERS.get(app)
     if player is None and action in ("pause", "next", "previous"):
         # Not named: Spotify / Music only if it's actually PLAYING. Otherwise the system media key,
         # which macOS sends to whatever is playing (a YouTube tab included). Before, an idle Spotify
@@ -2022,6 +2038,44 @@ def media(arg: str) -> str:
     if _media_key(action):
         return {"next": "Next track.", "previous": "Previous track."}.get(action, "Play/pause.")
     return "Couldn't control the music." if player else "Nothing's playing that I can control."
+
+
+def _music_app_playing() -> str | None:
+    """Spotify or Music if one of them is playing right now, else None."""
+    for name in ("Spotify", "Music"):
+        ok, out = _osa(f'tell application "System Events" to (exists process "{name}")')
+        if ok and out.strip() == "true":
+            ok, state = _osa(f'tell application "{name}" to player state as string')
+            if ok and state.strip() == "playing":
+                return name
+    return None
+
+
+def _youtube(action: str) -> str | None:
+    """Play/pause the YouTube video in the browser by its own button, and only if that changes
+    something. None when no YouTube player is visible (then the media key is used)."""
+    try:
+        from vox import ax
+        from AppKit import NSWorkspace
+        name = browser()
+        pid = next((int(a.processIdentifier()) for a in NSWorkspace.sharedWorkspace().runningApplications()
+                    if (a.localizedName() or "").replace("\u200e", "").lower() == name.lower()), None)
+        if pid is None:
+            return None
+        with ax.pinned_to(pid, name):
+            labels = ax.targets(limit=400) or []
+            playing = any(l.startswith("Pause (k)") or l == "Pause keyboard shortcut k" for l in labels)
+            paused = any(l.startswith("Play (k)") or l == "Play keyboard shortcut k" for l in labels)
+            if not (playing or paused):
+                return None
+            if (action == "play" and playing) or (action == "pause" and paused):
+                return f"It's already {'playing' if playing else 'paused'}."
+            res = ax.click("Pause (k)" if playing else "Play (k)")
+        if res and res[0] == "clicked":
+            return "Paused the video." if playing else "Playing the video."
+        return None   # couldn't press it (e.g. the browser isn't in front) → media key
+    except Exception:
+        return None
 
 
 def _media_key(action: str) -> bool:

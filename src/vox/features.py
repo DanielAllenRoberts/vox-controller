@@ -157,6 +157,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "With Spotify (or Music) playing: 'what song is this?' / 'what's playing?' / 'who sings this?'. It says the title and artist.", "code"),
     ("spotify-link", "Control", "Spotify: playlists and adding songs",
      "Settings → General → Spotify: follow the steps (free developer app, paste Client ID, Connect). Then 'play my film score playlist', 'shuffle my focus playlist', 'add this song to my film score playlist', 'play Cataclysm by Tom Dabrowski'.", "code"),
+    ("youtube-play-pause", "Control", "Play/pause YouTube only when needed",
+     "With a YouTube video in your browser: 'play YouTube' while it's playing → 'It's already playing' (it used to pause it). 'Pause the video' / 'play the video' press YouTube's own button. 'Play music' still means Spotify/Music.", "code"),
     ("pause-mishear", "Control", "'Pose my music' still pauses",
      "With music playing: 'Vox, pause my music' (it's often heard as 'pose'). It pauses, and never presses Space in the app in front.", "code"),
     ("reminders-wait", "Organise", "Reminders wait until you're back",
