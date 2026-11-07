@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 OUT = ROOT / "docs" / "prompts.md"
 
-from vox import actions, assistant, executor, prompts, routines  # noqa: E402
+from vox import assistant, executor, prompts, routines  # noqa: E402
 
 
 def approx_tokens(s: str) -> int:
