@@ -155,7 +155,8 @@ def test(name: str) -> dict:
 
     async def go():
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-        opts = ClaudeAgentOptions(mcp_servers=cfg, setting_sources=[], allowed_tools=[], max_turns=1)
+        opts = ClaudeAgentOptions(mcp_servers=cfg, setting_sources=[], allowed_tools=[], max_turns=1,
+                                  strict_mcp_config=True)
         async with ClaudeSDKClient(options=opts) as client:
             last = None
             for _ in range(60):   # a server can take a while to start (npx downloads, OAuth…): wait
@@ -221,7 +222,7 @@ def run(request: str, *, approved: bool = False, timeout: float = 180) -> str:
         # No allowed_tools: anything listed there is pre-approved and would skip can_use_tool. tools=[]
         # drops Claude Code's own tools (shell, files…), so only the MCP servers' tools are on offer.
         opts = ClaudeAgentOptions(mcp_servers=cfg, system_prompt=system, setting_sources=[], max_turns=20,
-                                  tools=[], can_use_tool=can_use_tool)
+                                  tools=[], can_use_tool=can_use_tool, strict_mcp_config=True)
         said = []
         async with ClaudeSDKClient(options=opts) as client:
             await client.query(request)

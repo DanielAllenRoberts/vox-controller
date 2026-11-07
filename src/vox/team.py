@@ -536,7 +536,7 @@ def ceo(request: str) -> str:
         from vox import prompts
         system = prompts.system("chat").split("YOUR TASK NOW:")[0] + "YOUR TASK NOW:\n" + _CEO_SYSTEM
         opts = ClaudeAgentOptions(mcp_servers={"team": server}, system_prompt=system, setting_sources=[],
-                                  tools=[], max_turns=12,
+                                  tools=[], max_turns=12, strict_mcp_config=True,
                                   allowed_tools=["mcp__team__list_agents", "mcp__team__start_agent",
                                                  "mcp__team__message_agent", "mcp__team__stop_agent"])
         said = ""

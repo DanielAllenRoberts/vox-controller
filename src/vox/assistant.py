@@ -809,7 +809,11 @@ def _sdk_options(model, system, brain):
     definition from the prompt, and the small brain doesn't think unless asked
     (``small_brain_thinking``), the same trade-off as the DeepSeek small brain."""
     from claude_agent_sdk import ClaudeAgentOptions, ThinkingConfigDisabled
-    kw = dict(system_prompt=system, allowed_tools=[], tools=[], setting_sources=[], max_turns=6, model=model)
+    # strict_mcp_config: no MCP servers at all. Without it the CLI also loads the connectors on the
+    # user's claude.ai account (Drive, Notion…), and the router sometimes tried to use one ("I'll look
+    # up the file in Google Drive" for "reply silently from now on"), slow and wrong (router_eval).
+    kw = dict(system_prompt=system, allowed_tools=[], tools=[], setting_sources=[], max_turns=6, model=model,
+              strict_mcp_config=True)
     if brain == "small" and _setting("small_brain_thinking", CONFIG.small_brain_thinking) != "on":
         kw["thinking"] = ThinkingConfigDisabled(type="disabled")
     return ClaudeAgentOptions(**kw)
