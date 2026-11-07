@@ -48,6 +48,10 @@ struct PromptsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(p.title).font(.title2.weight(.semibold))
                             Text(p.description).foregroundStyle(.secondary)
+                            if p.usesCore == true {
+                                Label("Sent with \u{201C}Core: what Vox is\u{201D} above it.", systemImage: "square.stack")
+                                    .font(.callout).foregroundStyle(.secondary)
+                            }
                         }
                         Picker("", selection: $tab) {
                             ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
@@ -195,6 +199,7 @@ struct PromptInfo: Codable, Identifiable, Hashable {
     var text: String
     var `default`: String
     var edited: Bool
+    var usesCore: Bool?
     var id: String { name }
 }
 

@@ -230,7 +230,7 @@ def _look_axtree(question: str) -> str | None:
     # the brain replies '[BIG]'. Re-reading the SAME empty tree on the big brain doesn't add vision
     # (it just replies '[BIG]' again, which then got spoken aloud) — so instead we return None to
     # hand the caller off to REAL vision: the screenshot path, which already uses the big brain.
-    answer = assistant.complete(prompt, system=prompts.get("look"), brain="small", kind="vision_axtree", prompt="look")
+    answer = assistant.complete(prompt, system=prompts.system("look"), brain="small", kind="vision_axtree", prompt="look")
     if answer.strip().upper().startswith("[BIG]"):
         return None
     return answer
@@ -391,7 +391,7 @@ def _vision_prompt(target: str, n: int) -> str:
 def _router_system() -> str:
     """The router prompt plus the notes for the app in front (app-scoped notes: the user's idea,
     loaded per app like the command DB, so the main prompt doesn't carry every app's quirks)."""
-    system = prompts.get("router")
+    system = prompts.system("router")
     try:
         from vox import assistant as _a
         block = _a._rules_block(_a._focused_app())

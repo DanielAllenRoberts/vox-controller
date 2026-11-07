@@ -149,6 +149,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Say 'every weekday at 7, tell me what's on my calendar and the weather' (or Reminders → + → Routine). It shows under Reminders → Routines; press ▶ to run it now: a short spoken briefing. Also try 'every day at 9 check my calendar and board and tell me what to work on', and 'every morning at 8 open my email'.", "code"),
     ("calendar", "Organise", "Calendar access",
      "Settings → Permissions → Calendar → Allow. Then 'what's on my calendar today?' and routines read your calendars (every account added to the Mac's Calendar app).", "code"),
+    ("core-prompt", "Vox.app", "Master prompt (Core)",
+     "Teach Vox → Prompts → 'Core: what Vox is': one prompt about who Vox is, what it can do and how it behaves, sent above the router, chat, screen questions, routines and the agent (each says 'Sent with Core above it'). Ask 'Hey Vox, what can you do?': a real overview, using your name.", "code"),
     ("guide-page", "Vox.app", "Guide page",
      "Sidebar → Guide: every feature grouped by area, what it does, phrases to say (click one to copy), where it lives. Search for 'board' or 'pause'.", "code"),
     ("stop-button", "Vox.app", "Stop button (⏹)",

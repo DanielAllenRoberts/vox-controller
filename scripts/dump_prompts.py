@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 OUT = ROOT / "docs" / "prompts.md"
 
-from vox import actions, assistant, executor  # noqa: E402
+from vox import actions, assistant, executor, prompts, routines  # noqa: E402
 
 
 def approx_tokens(s: str) -> int:
@@ -32,6 +32,10 @@ def block(title: str, body: str, lang: str = "text") -> str:
 
 # (heading, when it fires, brain, system prompt, what's appended, expected output)
 CALLS = [
+    ("Core: what Vox is (master prompt)",
+     "Not a call of its own: prompts.system() puts it, plus the user's name, above the action layer, "
+     "conversation, LOOK, routines and the screen agent. Not above EDIT or the click pickers.",
+     "—", prompts._CORE, ["the user's name"], "—"),
     ("Action layer (the executor)",
      "Every utterance the deterministic layer couldn't handle, in any mode. The main one.",
      "small", executor._SYSTEM,
@@ -54,10 +58,38 @@ CALLS = [
      "`click X` when the exact label wasn't found — the brain picks from what's on screen.",
      "big", executor._CLICK_PICK_SYSTEM, ["the list of on-screen labels", "the user's target"],
      "A verbatim label, or ASK: <label>, or NONE"),
+    ("Routine briefing",
+     "A scheduled routine fires and isn't a plain command: calendar/weather/board/reminders are "
+     "gathered and turned into a short spoken briefing.",
+     "small", routines._SYSTEM, ["the request", "gathered context (calendar, weather, board, reminders, now)"],
+     "What Vox says, or WEB: <question> for one lookup"),
     ("Pick which element to click (set-of-marks vision)",
      "Last resort when labels fail: a screenshot with a numbered badge on every clickable element.",
      "big (vision)", executor._CLICK_VISION_PROMPT.format(target="<target>", n="<N>"),
      ["the annotated screenshot"], "A bare badge number, or NONE"),
+]
+
+
+# Illustrative context blocks. Deliberately NOT rendered from the machine (that once put the
+# user's real task titles into this public doc).
+SAMPLES = [
+    ("environment_context()",
+     "Focused app: Safari\n"
+     "Running apps: Finder, Safari, Notes, Music, Slack, Calendar, Vox\n"
+     "Active tab: Example Domain — https://example.com/\n"
+     "Displays, left to right: left screen (Studio Display, main); right screen (DELL U2720Q)\n"
+     "Now: Monday 2026-01-05 09:12 (GMT)"),
+    ("recent_actions_block()",
+     "[What Vox has just done — these ALREADY happened, you did them. Use this to answer questions "
+     "about recent actions and to understand corrections like \"that's not what I wanted\". Never "
+     "deny an action listed here.]\n"
+     "  3 min ago heard \"open notes\" → ran: navigate notes [built-in command]\n"
+     "  1 min ago heard \"next tab\" in Safari → ran: tab next [built-in command]"),
+    ("board_block()",
+     "[Workspace board \"Workspace\" — the user's task board. Today is Monday 2026-01-05. Use BOARD: to change it]\n"
+     "  To Do (2):\n    #1 Buy printer ink\n    #2 Book flights to Lisbon (due 2026-01-09)\n"
+     "  Doing (1):\n    #3 Write the quarterly report [work]\n"
+     "  Done (1):\n    #4 Renew passport"),
 ]
 
 
@@ -96,16 +128,11 @@ def render() -> str:
     # --- the context blocks, rendered live -------------------------------------------------
     parts.append("## Context blocks (attached per call)")
     parts.append("")
-    parts.append("Rendered against this machine right now, so the sizes are real.")
+    parts.append("Shown with made-up SAMPLE data, never this machine's: the real blocks carry the "
+                 "user's apps, tabs, actions and tasks, and this file is public. Sizes are typical.")
     parts.append("")
     live = []
-    for name, fn in (("environment_context()", actions.environment_context),
-                     ("recent_actions_block()", actions.recent_actions_block),
-                     ("board_block()", actions.board_block)):
-        try:
-            text = fn() or "(empty)"
-        except Exception as exc:
-            text = f"(unavailable: {exc})"
+    for name, text in SAMPLES:
         live.append((name, text))
         parts.append(block(f"{name} — ~{approx_tokens(text)} tokens", text))
         parts.append("")
@@ -124,7 +151,7 @@ def render() -> str:
     parts.append("**The context blocks scale with the MACHINE, not the code** — and they're sent on "
                  "*every* action-layer call, so they're the part worth watching.")
     parts.append("")
-    parts.append("Measured worst cases on this machine (2026-08-05):")
+    parts.append("Measured worst cases on the developer's machine (2026-08-05):")
     parts.append("")
     parts.append("| Block | Now | Worst seen / capped |")
     parts.append("|---|---:|---|")

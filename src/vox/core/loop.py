@@ -1434,7 +1434,7 @@ def main() -> None:
         pass
 
     try:  # Claude-subscription brain: connect a client now so the first command skips the cold start
-        assistant.prewarm_sdk(executor._SYSTEM, "small")
+        assistant.prewarm_sdk(executor._router_system(), "small")  # the exact prompt the router sends (core + router + app notes)
     except Exception:
         pass
     _start_volume_watch(out)    # diagnostics for "Vox turns my music down" (logged issue 620b806d)

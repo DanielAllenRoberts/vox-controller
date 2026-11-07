@@ -155,7 +155,7 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
          "say": ["Reply silently from now on", "Speak replies again", "Use a deeper voice", "Stop learning commands"]},
         {"title": "Personalities", "what": "Pick a character and voice for Vox, edit one, or write your own.",
          "where": "Teach Vox → Personality."},
-        {"title": "Prompts", "what": "Read and edit the instructions each part of Vox's brain gets, and see exactly what was sent last time.",
+        {"title": "Prompts", "what": "Read and edit the instructions each part of Vox's brain gets, and see exactly what was sent last time. 'Core: what Vox is' is the master prompt that goes above the others.",
          "where": "Teach Vox → Prompts."},
     ]),
     ("Brains and voice", "cpu", [

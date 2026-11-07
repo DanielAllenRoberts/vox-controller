@@ -392,7 +392,7 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     brain. Falls back to a '?' heuristic if the model omits the tag.
     """
     from vox import prompts
-    base = prompts.get("chat")
+    base = prompts.system("chat")
     persona = _active_persona()
     system = base if not persona else \
         f"{base}\n\nYour personality (stay in character while staying helpful): {persona}"
@@ -446,7 +446,7 @@ def complete(text: str, history=None, *, brain: str = "small", system: str | Non
     `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record."""
     if system is None:
         from vox import prompts
-        system = prompts.get("chat")
+        system = prompts.system("chat")
     provider, model = _brain(brain)
     # Debug: dump the COMPLETE outgoing prompt — system + full messages (history + user
     # text) — for every LLM call (covers chat AND the executor, which calls complete()

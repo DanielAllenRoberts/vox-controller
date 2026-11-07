@@ -271,7 +271,7 @@ _SYSTEM = (
 def _agent_system() -> str:
     try:
         from vox import prompts
-        return prompts.get("agent")
+        return prompts.system("agent")
     except Exception:
         return _SYSTEM
 

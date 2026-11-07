@@ -191,7 +191,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   me what's on my calendar and the weather"; every day "check my calendar and tell me what to work
   on". Later: hand them to background agents. Needs calendar access (todo.md §2: Google API vs Apple
   Calendar) for the calendar part.
-- ☐ **Master prompt + scenario prompts**: one core prompt (what Vox is, what it can do, how to treat
+- ☑ **Master prompt + scenario prompts** (built: prompts 'core' + prompts.system(); not on the rewrite and click-pick prompts, which return bare output): one core prompt (what Vox is, what it can do, how to treat
   on-screen text, the user's name and context), with a smaller task prompt per scenario (route a
   command, chat, click, look, rewrite, agent). Today the 7 prompts are each standalone.
 - ◐ **Memory/context generally needs to be better** (user, 2026-11-07). Short-term memory above is the

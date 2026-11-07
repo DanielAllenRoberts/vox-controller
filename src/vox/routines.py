@@ -19,7 +19,7 @@ import threading
 
 # Editable on the Prompts page (vox.prompts REGISTRY "routine").
 _SYSTEM = (
-    "You are Vox, a voice assistant on the user's Mac, delivering a ROUTINE the user scheduled earlier. "
+    "Deliver a ROUTINE the user scheduled earlier. "
     "Below is the request and fresh information gathered for it just now (calendar, weather, board, "
     "reminders, the time). Write exactly what Vox will SAY out loud: a short, natural spoken briefing, "
     "usually 2 to 5 sentences. No lists, bullets, markdown or emoji. Say times naturally ('at nine', "
@@ -106,13 +106,7 @@ def _briefing(request: str) -> str:
     from vox import assistant, prompts
     context = gather(request)
     message = f"Routine request: {request}\n\n{context}"
-    system = prompts.get("routine")
-    try:
-        name = __import__("vox.scheduler", fromlist=["_user_name"])._user_name()
-        if name:
-            system += f"\n\nThe user's name is {name}."
-    except Exception:
-        pass
+    system = prompts.system("routine")   # the core prompt adds the user's name
     reply = assistant.complete(message, None, brain="small", system=system, prompt="routine").strip()
     if reply.upper().startswith("WEB:"):
         try:
