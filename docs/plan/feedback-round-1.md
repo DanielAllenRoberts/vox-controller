@@ -176,6 +176,14 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   and deletions, and both brains get it. Deleted cards go to a trash; `BOARD: restore`. The user's 10
   deleted cards were restored from the log (titles, columns, tags, due; any notes were not in the log).
 - ☑ **Every feature on the Testing page**: 30 older built features added (Basics, pages, MCP, agent).
+- ☑ **Logged 877dcaec: "pause my music" did nothing.** Heard as "pose my music"; the brain didn't know
+  the music commands and pressed Space in Claude. Parser catches the mishearings; router lists them.
+- ☑ **Dictation typed every word twice.** A second engine (left from a restart race) was running; one
+  engine is now enforced with an exclusive lock.
+- ☑ **Agent step cap too low** (8 live, 15 default) → 50 steps / 10 minutes.
+- ☑ **Guide page**: every feature, how to use it, phrases (vox/guide.py).
+- ☑ **Multiple screens**: move a window/app to another display (left/right/other/main/iPad), maximise,
+  snap left/right, centre (vox/windows.py). Visible moves left for the user to try.
 - ☐ **Routines**: scheduled requests that run through Vox or an agent, e.g. every weekday at 7:00 "tell
   me what's on my calendar and the weather"; every day "check my calendar and tell me what to work
   on". Later: hand them to background agents. Needs calendar access (todo.md §2: Google API vs Apple
