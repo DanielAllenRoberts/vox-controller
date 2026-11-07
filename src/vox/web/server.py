@@ -271,6 +271,50 @@ def create_app() -> FastAPI:
         runtime.set_ptt(bool(body.get("held")))
         return {"ok": True}
 
+    # --- MCP connections (vox.mcp_servers; Settings → Connections) ---
+    @app.get("/api/mcp")
+    def mcp_list() -> dict:
+        from vox import mcp_servers
+        return {"servers": mcp_servers.servers()}
+
+    @app.post("/api/mcp")
+    async def mcp_add(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import mcp_servers
+        try:
+            args = body.get("args") or []
+            if isinstance(args, str):
+                import shlex
+                args = shlex.split(args)
+            return mcp_servers.add(str(body.get("name", "")), kind=str(body.get("kind", "http")),
+                                   url=str(body.get("url", "")), headers=body.get("headers") or None,
+                                   command=str(body.get("command", "")), args=args, env=body.get("env") or None)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+
+    @app.post("/api/mcp/{name}/test")
+    def mcp_test(name: str) -> dict:
+        """Connect and list the server's tools (can take a few seconds)."""
+        from vox import mcp_servers
+        return mcp_servers.test(name)
+
+    @app.patch("/api/mcp/{name}")
+    async def mcp_patch(name: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import mcp_servers
+        if not mcp_servers.set_enabled(name, bool(body.get("enabled", True))):
+            return _not_found("connection")
+        return {"ok": True}
+
+    @app.delete("/api/mcp/{name}")
+    def mcp_delete(name: str):
+        from vox import mcp_servers
+        return {"ok": True} if mcp_servers.remove(name) else _not_found("connection")
+
     # --- Spotify account link (vox.spotify) ---
     @app.get("/api/spotify")
     def spotify_status() -> dict:

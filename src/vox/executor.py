@@ -124,6 +124,12 @@ _SYSTEM = (
     "stretch' → SCHEDULE: reminder | 2026-06-24T09:00 | stretch | daily  ·  'remind me every 30 "
     "minutes to check on the cat' → SCHEDULE: reminder | 2026-06-23T15:34 | check on the cat | "
     "every 30 minutes.\n"
+    "To use the user's CONNECTED APPS (their email/Gmail, Google Calendar events, Slack, Notion, Trello, "
+    "GitHub, Drive… whatever the Mac state lists under 'Connections'): output  APPS: <the request in the "
+    "user's words, with any detail they gave>. Use it for reading ('any new email from Sam?', 'what's in "
+    "my inbox', 'what did Alex say on Slack') and for doing ('reply to Sam saying thanks'); Vox asks the "
+    "user before anything is sent or changed. Prefer APPS over opening the app on screen whenever a "
+    "matching connection is listed. Never open a connection's website instead.\n"
     "A ROUTINE is a scheduled REQUEST that Vox carries out at that time, rather than a line it reads "
     "out: use kind routine whenever the user wants Vox to DO or TELL them something on a schedule "
     "('every weekday at 7 tell me what's on my calendar and the weather' → SCHEDULE: routine | "
@@ -261,6 +267,41 @@ _AFFIRMATIVE = re.compile(
     r"that'?s?\s+(?:right|it|him|her|the\s+one)|do\s+it|go\s+ahead|ok(?:ay)?|please|uh[\s-]*huh)\b",
     re.I)
 _DID_YOU_MEAN = re.compile(r"did you mean\s+(.+?)\s*\?\s*$", re.I)
+
+
+# A connections request that wanted to change something, waiting for the user's yes:
+# (request, asked_at). See vox.mcp_servers.run.
+_HELD_APPS: tuple[str, float] | None = None
+_NEGATIVE_REPLY = re.compile(r"^\s*(?:no|nope|nah|don'?t|do not|cancel|stop|never ?mind|leave it)\b", re.I)
+
+
+def _apps(request: str, *, approved: bool = False) -> str:
+    """Run a request against the user's MCP connections; hold it for a yes if it changes something."""
+    global _HELD_APPS
+    from vox import mcp_servers
+    out = mcp_servers.run(request, approved=approved)
+    if out.upper().startswith("CONFIRM:"):
+        _HELD_APPS = (request, time.time())
+        what = out.split(":", 1)[1].strip().rstrip(".")
+        return f"I'm about to {what[:1].lower() + what[1:]}. Should I go ahead?"
+    _HELD_APPS = None
+    return out
+
+
+def _held_apps_reply(text: str):
+    global _HELD_APPS
+    if _HELD_APPS is None or time.time() - _HELD_APPS[1] > 180:
+        return None
+    if _AFFIRMATIVE.match(text or ""):
+        req, _ = _HELD_APPS
+        _HELD_APPS = None
+        msg = _apps(req, approved=True)
+        assistant._dbg("[executor]", f"decision=APPS (approved {req!r}) → {msg!r}")
+        return False, msg
+    if _NEGATIVE_REPLY.match(text or ""):
+        _HELD_APPS = None
+        return False, "Okay, I won't."
+    return None
 
 
 def _confirmed_click_target(text: str, history) -> str | None:
@@ -776,6 +817,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
 
     # A 'yes' to our earlier 'Did you mean <X>?' click prompt → just click <X> (deterministic, no
     # second LLM round-trip). Anything other than an affirmation falls through to the brain below.
+    # A 'yes' (or 'no') to "Send Sam an email…? Say yes to go ahead": the held connections request.
+    held = _held_apps_reply(text)
+    if held is not None:
+        return held
+
     cand = _confirmed_click_target(text, history)
     if cand:
         result = actions.click_element(cand)
@@ -945,6 +991,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         phrase, _, action = body.partition("|")
         msg = _teach(phrase.strip(), action.strip())
         assistant._dbg("[executor]", f"decision=TEACH {phrase.strip()!r} → {action.strip()!r} :: {msg!r}")
+        return False, msg
+    if upper.startswith("APPS:"):
+        req = raw.split(":", 1)[1].strip() or text
+        msg = _apps(req)
+        assistant._dbg("[executor]", f"decision=APPS {req!r} → {msg!r}")
         return False, msg
     if upper.startswith("AGENT:"):
         task = raw.split(":", 1)[1].strip()

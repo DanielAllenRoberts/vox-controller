@@ -5,7 +5,7 @@ import Foundation
 /// fallback (help also shows as a tooltip). A setting the catalog doesn't know about still appears,
 /// under Advanced → Other, so nothing added to the engine can go missing.
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, listening, voice, brains, control, permissions, advanced
+    case general, listening, voice, brains, connections, control, permissions, advanced
     var id: String { rawValue }
 
     var title: String {
@@ -14,6 +14,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .listening: "Listening"
         case .voice: "Voice"
         case .brains: "Brains"
+        case .connections: "Connections"
         case .control: "Control"
         case .permissions: "Permissions"
         case .advanced: "Advanced"
@@ -26,6 +27,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .listening: "ear"
         case .voice: "speaker.wave.2"
         case .brains: "brain"
+        case .connections: "link"
         case .control: "hand.tap"
         case .permissions: "hand.raised"
         case .advanced: "wrench.and.screwdriver"

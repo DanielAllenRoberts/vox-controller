@@ -132,6 +132,12 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
         {"title": "Undo a delete", "what": "Deleted cards can be brought back with their notes, tags and deadlines.",
          "say": ["Put them all back", "Bring back the invoice card"]},
     ]),
+    ("Your apps (connections)", "link", [
+        {"title": "Use your connected apps", "what": "Email, calendar, Slack, Notion, Trello and more, through any MCP server you add (Composio covers hundreds of apps with one link).",
+         "say": ["Any new email from Sam?", "What's in my inbox today?", "What did Alex say on Slack?", "Reply to Sam saying thanks"],
+         "where": "Settings → Connections → Add Connection…",
+         "how": "Reading happens straight away. Before sending or changing anything Vox asks \"Should I go ahead?\": say yes or no."},
+    ]),
     ("Answers and the web", "globe", [
         {"title": "Look things up", "what": "Searches the web for anything current or that Vox isn't sure of, and answers in a sentence.",
          "say": ["How do I quantize MIDI in Logic Pro?", "Who won the last F1 race?"]},

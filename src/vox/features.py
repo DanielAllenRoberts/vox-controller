@@ -145,6 +145,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Where there are two buttons with the same name (e.g. two 'Reply' links), say 'click Reply'. If it hit the wrong one, say 'no, the other one' within a minute: numbers appear on just the Reply buttons; say the number.", "code"),
     ("multi-screen", "Control", "Move windows between screens",
      "With the iPad (Sidecar) or a second monitor connected: 'move Slack to the iPad', 'move this window to the other screen', 'send it to the main monitor'. Then 'maximise this window', 'snap this to the left half', 'center this window'.", "code"),
+    ("mcp-connections", "Vox.app", "Connections: add any MCP server",
+     "Settings → Connections → Add Connection…: a URL (e.g. your Composio MCP server URL + its key header) or a command. It tests itself and shows the tool count. Then ask 'any new email from Sam?' or 'what's on my Trello?': Vox uses it, and asks 'Should I go ahead?' before sending or changing anything (say yes or no).", "code"),
     ("spotify-now", "Control", "What's playing?",
      "With Spotify (or Music) playing: 'what song is this?' / 'what's playing?' / 'who sings this?'. It says the title and artist.", "code"),
     ("spotify-link", "Control", "Spotify: playlists and adding songs",

@@ -720,6 +720,13 @@ def environment_context() -> str:
                 dom = _domain(urls[i]) if i < len(urls) else ""
                 entries.append(f"{t[:60]} ({dom})" if dom else t[:60])
             parts.append(f"Open {browser()} tabs: " + " | ".join(entries))
+    try:  # the user's MCP connections (Settings → Connections), so the brain knows APPS: can reach them
+        from vox import mcp_servers
+        names = mcp_servers.enabled_names()
+        if names:
+            parts.append("Connections (use APPS:): " + ", ".join(names))
+    except Exception:
+        pass
     try:  # with two or more screens, which is which (for "move this to the left screen")
         from vox import windows
         disp = windows.describe()

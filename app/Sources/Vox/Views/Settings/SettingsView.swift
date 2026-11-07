@@ -23,7 +23,8 @@ struct SettingsView: View {
         switch t {
         case .permissions: PermissionsPane()
         case .advanced: AdvancedPane()
-        case .general: CatalogPane(tab: t) { AppBehaviourSection(); SpotifySection() }
+        case .general: CatalogPane(tab: t) { AppBehaviourSection() }
+        case .connections: ConnectionsPane()
         case .listening: CatalogPane(tab: t) { HoldToTalkSection() }
         case .brains: CatalogPane(tab: t) { APIKeysSection() }
         default: CatalogPane(tab: t) { EmptyView() }
@@ -387,7 +388,7 @@ private struct AdvancedPane: View {
 /// the values never come back from the engine, only whether each is set.
 /// Spotify: link the user's account so Vox can find their playlists, search, and add songs.
 /// Playback itself goes through the Spotify app and needs no link.
-private struct SpotifySection: View {
+struct SpotifySection: View {
     @Environment(AppModel.self) private var model
     struct Status: Decodable { var clientId: Bool; var connected: Bool; var user: String; var redirectUri: String }
     @State private var status: Status?
