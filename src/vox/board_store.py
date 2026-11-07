@@ -68,6 +68,15 @@ CREATE TABLE IF NOT EXISTS card (
     updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_card_list ON card(list_id);
+-- Recently deleted cards, so a delete can be undone ("put them back"). The whole card as JSON plus
+-- where it was. Pruned to the newest TRASH_KEEP.
+CREATE TABLE IF NOT EXISTS card_trash (
+    id          INTEGER PRIMARY KEY,
+    card_json   TEXT    NOT NULL,
+    list_id     INTEGER,
+    list_name   TEXT    NOT NULL DEFAULT '',
+    deleted_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -176,6 +185,8 @@ def find_card(conn: sqlite3.Connection, needle: str | int,
     then a substring, then the closest fuzzy match (mis-hears are the norm here, same reason the
     click matcher is fuzzy). Ambiguity resolves to the shortest matching title, which is the most
     specific one. Returns the card dict, or None."""
+    if isinstance(needle, str) and needle.strip().startswith("#") and needle.strip()[1:].isdigit():
+        needle = needle.strip()[1:]   # "#14", the way the board block and short-term memory name cards
     if isinstance(needle, int) or (isinstance(needle, str) and needle.strip().isdigit()):
         return _card_row(conn, int(needle))
     text = _strip_noise(needle)
@@ -362,13 +373,65 @@ def move_card(conn: sqlite3.Connection, card_id: int, to_list: str | int,
     return _card_row(conn, card_id)
 
 
+TRASH_KEEP = 200
+
+
 def delete_card(conn: sqlite3.Connection, card_id: int) -> bool:
-    row = conn.execute("SELECT reminder_id FROM card WHERE id = ?", (card_id,)).fetchone()
+    """Delete a card. It goes to ``card_trash`` first, so ``restore_card`` can bring it back."""
+    row = conn.execute("SELECT * FROM card WHERE id = ?", (card_id,)).fetchone()
     if row is not None:
-        _cancel_reminder(row["reminder_id"])
+        _cancel_reminder(row["reminder_id"] if "reminder_id" in row.keys() else None)
+        lst = _list_row(conn, row["list_id"]) or {}
+        conn.execute("INSERT INTO card_trash (card_json, list_id, list_name) VALUES (?,?,?)",
+                     (json.dumps(_card_dict(row)), row["list_id"], lst.get("name", "")))
+        conn.execute("DELETE FROM card_trash WHERE id NOT IN "
+                     "(SELECT id FROM card_trash ORDER BY id DESC LIMIT ?)", (TRASH_KEEP,))
     cur = conn.execute("DELETE FROM card WHERE id = ?", (card_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def trash(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Recently deleted cards, newest first: {"trashId", "title", "list", "deletedAt", "card"}."""
+    out = []
+    for r in conn.execute("SELECT * FROM card_trash ORDER BY id DESC LIMIT ?", (int(limit),)):
+        card = json.loads(r["card_json"])
+        out.append({"trashId": r["id"], "title": card.get("title", ""), "list": r["list_name"],
+                    "deletedAt": r["deleted_at"], "card": card})
+    return out
+
+
+def restore_card(conn: sqlite3.Connection, needle: str | int) -> dict | None:
+    """Bring back a deleted card: the most recently deleted one whose title matches ``needle``
+    (exact, then contains), or by trash id. Back into its old column (or the board's first column
+    if that's gone) with its notes, tags, deadline and checklist. None if nothing matches."""
+    rows = trash(conn, TRASH_KEEP)
+    want = str(needle).strip().lower().lstrip("#")
+    hit = None
+    if isinstance(needle, int) or want.isdigit():
+        hit = next((r for r in rows if r["trashId"] == int(want)), None)
+    hit = hit or next((r for r in rows if r["title"].strip().lower() == want), None)
+    hit = hit or next((r for r in rows if want and want in r["title"].lower()), None)
+    if hit is None:
+        return None
+    card = hit["card"]
+    list_id = hit["card"].get("listId")
+    if conn.execute("SELECT 1 FROM board_list WHERE id = ?", (list_id,)).fetchone() is None:
+        first = conn.execute("SELECT id FROM board_list ORDER BY board_id, position LIMIT 1").fetchone()
+        if first is None:
+            return None
+        list_id = first["id"]
+    pos = _next_position(conn, "card", "list_id", list_id)
+    cur = conn.execute(
+        "INSERT INTO card (list_id, title, body, tags, position, checklist) VALUES (?,?,?,?,?,?)",
+        (list_id, card.get("title", ""), card.get("body", ""), _norm_tags(card.get("tags")), pos,
+         json.dumps(card.get("checklist") or [])))
+    conn.execute("DELETE FROM card_trash WHERE id = ?", (hit["trashId"],))
+    _touch_board(conn, _board_id_of_list(conn, list_id))
+    conn.commit()
+    if card.get("due"):
+        return update_card(conn, cur.lastrowid, due=card["due"])   # also re-arms its reminder
+    return _card_row(conn, cur.lastrowid)
 
 
 # --- read API ------------------------------------------------------------------------------------

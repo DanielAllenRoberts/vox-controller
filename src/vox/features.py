@@ -145,6 +145,10 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "While Vox is speaking a long reply, or thinking about a request, press ⏹ next to the type box (menu bar panel or Home), or ⌘. there. It stops at once and keeps listening. Hover shows what it stopped.", "code"),
     ("board-counts", "Organise", "Several board changes are summed up",
      "Say 'delete the test cards' (or add several at once): Vox says 'Deleted 4 cards.' instead of reading every title.", "code"),
+    ("short-term-memory", "Memory", "Vox remembers what was just said and done",
+     "Ask 'add a card called buy ink', then separately 'move it to Doing': it moves THAT card. Or say a name, then later 'what was that name again?'. Works across one-shots, typed and spoken turns, and survives a restart (last 30 minutes).", "code"),
+    ("board-undo", "Organise", "Put deleted cards back",
+     "Say 'delete the test cards' (or 'clear my board'), then 'put them all back': each comes back to its old column with its notes, tags, deadline and checklist.", "code"),
     # --- Agents -------------------------------------------------------------------------------
     ("agent-alerts", "Agents", "'David needs you' alerts",
      "Add the hook from mcp/README.md; a registered agent waiting on a permission shows a bubble naming it.", "code"),

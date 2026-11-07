@@ -32,6 +32,11 @@ def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
     NEVER break the voice daemon. Ephemeral by design — record_turn writes nothing to disk."""
     if not text or not str(text).strip():
         return
+    try:  # short-term memory: what the brains see as "just said / just done" (vox.working_memory)
+        from vox import working_memory
+        working_memory.note("user" if role == "user" else "vox", text)
+    except Exception:
+        pass
     try:
         from vox.web import conversation
         conversation.record_turn(role, text, brain=brain, kind=kind)

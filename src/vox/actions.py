@@ -569,11 +569,28 @@ def recent_actions_block(limit: int = 6) -> str:
             conn.close()
     except Exception:
         return ""
+    # Only the last half hour. command_log stamps are UTC with no date shown, so yesterday's
+    # "16:52 open claude" used to read as something that had just happened.
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+    def _fresh(r) -> bool:
+        try:
+            return datetime.fromisoformat(str(r.get("ts")).replace(" ", "T")).replace(tzinfo=timezone.utc) >= cutoff
+        except Exception:
+            return False
+
+    rows = [r for r in rows if _fresh(r)]
     if not rows:
         return ""
     lines = []
     for r in reversed(rows):  # oldest first — reads as a timeline
-        ts = (r.get("ts") or "")[-8:-3]  # HH:MM
+        try:  # "4 min ago": the stored HH:MM is UTC, which read as the wrong time of day
+            mins = int((datetime.now(timezone.utc) - datetime.fromisoformat(
+                str(r.get("ts")).replace(" ", "T")).replace(tzinfo=timezone.utc)).total_seconds() // 60)
+            ts = "just now" if mins < 1 else f"{mins} min ago"
+        except Exception:
+            ts = ""
         did = r.get("resolved_intent") or "?"
         if r.get("resolved_arg"):
             did += f" {r['resolved_arg']}"

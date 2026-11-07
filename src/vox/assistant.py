@@ -138,6 +138,15 @@ def _recent_actions_block() -> str:
         return ""
 
 
+def _short_term_block() -> str:
+    """What was just said and done across every mode (``working_memory``). "" if unavailable."""
+    try:
+        from vox import working_memory
+        return working_memory.block()
+    except Exception:
+        return ""
+
+
 def _focused_app() -> str | None:
     """The app in front, as the command cache tracks it (cheap: no AppleScript)."""
     try:
@@ -381,7 +390,8 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     # Layer the user's dashboard rules + relevant memories + what Vox just did (all guarded →
     # no-op if absent). The recent-actions block is what stops the chat brain denying or inventing
     # its own behaviour — it has no other way to know an action ran.
-    for block in (_rules_block(_focused_app()), _memory_block(text), _recent_actions_block()):
+    for block in (_rules_block(_focused_app()), _memory_block(text), _recent_actions_block(),
+                  _short_term_block()):
         if block:
             system = f"{system}\n\n{block}"
     # The clock (ideas #47). The command brain had it; the chat brain didn't, so "hey vox, what time

@@ -134,12 +134,16 @@ _SYSTEM = (
     "  BOARD: delete_card | <card>               ·  BOARD: add_list | <name>\n"
     "  BOARD: add_board | <name>                 ·  BOARD: due | <card> | <date: friday, tomorrow, 2026-11-20 15:00, or none>\n"
     "  BOARD: tag | <card> | <tag, tag>          ·  BOARD: archive | <card>\n"
-    "  BOARD: checklist | <card> | <item to add>\n"
+    "  BOARD: checklist | <card> | <item to add>  ·  BOARD: restore | <deleted card>  (bring back a "
+    "card deleted earlier; 'put them back' after deleting several → one restore line per card, "
+    "titles from your short-term memory)\n"
     "Refer to a card by its TITLE as the user said it (close is fine, it's matched fuzzily), or by "
     "the #id shown. Examples: 'add a card to doing called fix the scraper' → "
     "BOARD: add_card | Doing | fix the scraper  ·  'move the AC direct card to done' → "
     "BOARD: move_card | AC direct | Done  ·  'put a note on the scraper card that it needs "
-    "proxies' → BOARD: note | scraper | needs proxies.\n"
+    "proxies' → BOARD: note | scraper | needs proxies. When you know a card's #id (from the board "
+    "below or your short-term memory) use it: 'move it to doing' right after adding card #14 → "
+    "BOARD: move_card | #14 | Doing.\n"
     "To TEACH A NEW COMMAND — when the user asks for a phrase to mean something FROM NOW ON "
     "('whenever I say refresh, refresh the page', 'make \"reload\" reload this tab', 'from now on X "
     "should Y', 'save that as a command called X'): output  TEACH: <the trigger phrase> | <the Vox "
@@ -469,7 +473,7 @@ def _click_by_vision(target: str, items) -> str | None:
         return None
 
 
-_BOARD_OK = ("Added", "Moved", "Renamed", "Deleted", "Created", "Set", "Cleared", "Archived")
+_BOARD_OK = ("Added", "Moved", "Renamed", "Deleted", "Created", "Set", "Cleared", "Archived", "Restored")
 
 
 def _spoken_due(due: str) -> str:
@@ -484,19 +488,21 @@ def _spoken_due(due: str) -> str:
 
 # How each successful board result is counted when several land in one turn: (pattern, key, phrase
 # for a count of n). The phrase takes n and, for adds/moves into one list, that list's name.
+_Q = r"""(?:'.*'|".*")"""   # a quoted title: repr() uses double quotes when it contains an apostrophe
 _BOARD_KINDS = [
-    (re.compile(r"Deleted '.*'\.$"), "deleted", lambda n, _l: f"Deleted {n} cards"),
-    (re.compile(r"Archived '.*'\.$"), "archived", lambda n, _l: f"Archived {n} cards"),
-    (re.compile(r"Added a note to '.*'\.$"), "noted", lambda n, _l: f"Added notes to {n} cards"),
-    (re.compile(r"Added '.*' to the checklist on '.*'\.$"), "checked", lambda n, _l: f"Added {n} checklist items"),
-    (re.compile(r"Added '.*' to '.*'\.$"), "tagged", lambda n, _l: f"Tagged {n} cards"),
-    (re.compile(r"Added '.*' to (.+)\.$"), "added",
+    (re.compile(rf"Deleted {_Q}\.$"), "deleted", lambda n, _l: f"Deleted {n} cards"),
+    (re.compile(rf"Archived {_Q}\.$"), "archived", lambda n, _l: f"Archived {n} cards"),
+    (re.compile(rf"Restored {_Q}\.$"), "restored", lambda n, _l: f"Restored {n} cards"),
+    (re.compile(rf"Added a note to {_Q}\.$"), "noted", lambda n, _l: f"Added notes to {n} cards"),
+    (re.compile(rf"Added {_Q} to the checklist on {_Q}\.$"), "checked", lambda n, _l: f"Added {n} checklist items"),
+    (re.compile(rf"Added {_Q} to {_Q}\.$"), "tagged", lambda n, _l: f"Tagged {n} cards"),
+    (re.compile(rf"Added {_Q} to (.+)\.$"), "added",
      lambda n, l: f"Added {n} cards to {l}" if l else f"Added {n} cards"),
-    (re.compile(r"Moved '.*' to (.+)\.$"), "moved",
+    (re.compile(rf"Moved {_Q} to (.+)\.$"), "moved",
      lambda n, l: f"Moved {n} cards to {l}" if l else f"Moved {n} cards"),
-    (re.compile(r"Set '.*' due .*$"), "due", lambda n, _l: f"Set deadlines on {n} cards, with reminders"),
-    (re.compile(r"Cleared the deadline on '.*'\.$"), "cleared", lambda n, _l: f"Cleared {n} deadlines"),
-    (re.compile(r"Renamed it to '.*'\.$"), "renamed", lambda n, _l: f"Renamed {n} cards"),
+    (re.compile(rf"Set {_Q} due .*$"), "due", lambda n, _l: f"Set deadlines on {n} cards, with reminders"),
+    (re.compile(rf"Cleared the deadline on {_Q}\.$"), "cleared", lambda n, _l: f"Cleared {n} deadlines"),
+    (re.compile(rf"Renamed it to {_Q}\.$"), "renamed", lambda n, _l: f"Renamed {n} cards"),
 ]
 
 
@@ -538,6 +544,23 @@ def _plainly_named(said: str, title: str) -> bool:
     return bool(s) and (s in t or t in s)
 
 
+def _did(text: str) -> None:
+    """Record a board change in short-term memory, in more detail than what's spoken."""
+    try:
+        from vox import working_memory
+        working_memory.note_did(text)
+    except Exception:
+        pass
+
+
+def _list_name(conn, card: dict) -> str:
+    try:
+        r = conn.execute("SELECT name FROM board_list WHERE id = ?", (card["listId"],)).fetchone()
+        return r["name"] if r else "?"
+    except Exception:
+        return "?"
+
+
 def _board(body: str) -> str:
     """Change the workspace board (idea #51). ``<verb> | <arg> | <arg>``, mirroring SCHEDULE's shape.
 
@@ -559,18 +582,21 @@ def _board(body: str) -> str:
             if not a1 or not a2:
                 return "Which list, and what should the card say?"
             card = board_store.add_card(conn, a1, a2)
+            _did(f"added card #{card['id']} {card['title']!r} to {a1}")
             return f"Added {card['title']!r} to {a1}."
         if verb in ("move_card", "move"):
             card = board_store.find_card(conn, a1)
             if card is None:
                 return f"I couldn't find a card called {a1!r}."
             board_store.move_card(conn, card["id"], a2)
+            _did(f"moved card #{card['id']} {card['title']!r} from {_list_name(conn, card)} to {a2}")
             return f"Moved {card['title']!r} to {a2}."
         if verb in ("update_card", "edit", "rename_card"):
             card = board_store.find_card(conn, a1)
             if card is None:
                 return f"I couldn't find a card called {a1!r}."
             board_store.update_card(conn, card["id"], title=a2 or None)
+            _did(f"renamed card #{card['id']} from {card['title']!r} to {a2!r}")
             return f"Renamed it to {a2!r}."
         if verb in ("note", "append"):  # add detail to a card without losing what's there
             card = board_store.find_card(conn, a1)
@@ -585,7 +611,9 @@ def _board(body: str) -> str:
                 return f"I couldn't find a card called {a1!r}."
             if not (a1.strip().lstrip("#").isdigit() or _plainly_named(a1, card["title"])):
                 return f"Did you mean {card['title']!r}? Say its name to delete it."
+            where = _list_name(conn, card)
             board_store.delete_card(conn, card["id"])
+            _did(f"deleted card {card['title']!r} from {where} (restorable: BOARD: restore | {card['title']})")
             return f"Deleted {card['title']!r}."
         if verb in ("due", "deadline", "set_due"):
             card = board_store.find_card(conn, a1)
@@ -607,6 +635,7 @@ def _board(body: str) -> str:
             if card is None:
                 return f"I couldn't find a card called {a1!r}."
             board_store.update_card(conn, card["id"], archived=True)
+            _did(f"archived card #{card['id']} {card['title']!r}")
             return f"Archived {card['title']!r}."
         if verb in ("checklist", "check_item", "add_item"):
             card = board_store.find_card(conn, a1)
@@ -615,6 +644,12 @@ def _board(body: str) -> str:
             items = card["checklist"] + [{"text": a2, "done": False}]
             board_store.update_card(conn, card["id"], checklist=items)
             return f"Added {a2!r} to the checklist on {card['title']!r}."
+        if verb in ("restore", "undelete", "restore_card", "undo_delete"):
+            card = board_store.restore_card(conn, a1)
+            if card is None:
+                return f"I couldn't find a deleted card called {a1!r}."
+            _did(f"restored card #{card['id']} {card['title']!r} to {_list_name(conn, card)}")
+            return f"Restored {card['title']!r}."
         if verb in ("add_list", "new_list"):
             return f"Added a {board_store.add_list(conn, a1)['name']!r} list."
         if verb in ("add_board", "new_board", "create_board"):
@@ -739,6 +774,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     recent = actions.recent_actions_block()
     if recent:
         prompt = f"{prompt}\n\n{recent}"
+    try:  # what was just said and done, in every mode (one-shots have no other history)
+        from vox import working_memory
+        short = working_memory.block()
+    except Exception:
+        short = ""
+    if short:
+        prompt = f"{prompt}\n\n{short}"
     board = actions.board_block()   # so it can answer about the board and name cards precisely
     if board:
         prompt = f"{prompt}\n\n{board}"
@@ -868,7 +910,7 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         # lines. Board edits are visible and easy to undo, so run them all, in order, stopping at
         # the first failure. Everything else stays first-directive-wins (todo.md §1b).
         bodies = [ln.split(":", 1)[1].strip() for ln in raw.splitlines()
-                  if ln.strip().upper().startswith("BOARD:")][:10]
+                  if ln.strip().upper().startswith("BOARD:")][:40]   # 'clear my board' can be dozens
         msgs = []
         for body in bodies:
             msgs.append(_board(body))
