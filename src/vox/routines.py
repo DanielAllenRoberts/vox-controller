@@ -36,6 +36,7 @@ _CALENDAR = re.compile(r"\b(calendar|meetings?|schedule|agenda|events?|appointme
 _BOARD = re.compile(r"\b(board|tasks?|to ?dos?|work on|priorit\w*|should i|doing|deadlines?)\b")
 _REMINDERS = re.compile(r"\breminders?\b")
 _TOMORROW = re.compile(r"\btomorrow\b")
+_AGENTS = re.compile(r"\b(?:my agents|coding agents?|the \w+ agent|agents? (?:for|to) |ask (?:the|my) .*agent)")
 _ACTION = re.compile(r"^(?:please\s+)?(open|go to|launch|start|play|pause|resume|close|quit|switch|move|"
                      r"turn|set|mute|unmute|show|hide|click|press|type|search)\b")
 
@@ -145,7 +146,11 @@ def run(job: dict, *, speak: bool = True) -> str:
     if not request:
         return ""
     try:
-        said = _do(request) if is_action(request) else _briefing(request)
+        if _AGENTS.search(request.lower()):   # "ask my agents for an update", "have the getprice agent run the tests"
+            from vox import team
+            said = team.ceo(request)
+        else:
+            said = _do(request) if is_action(request) else _briefing(request)
     except Exception as exc:
         said = f"Your routine '{request}' didn't work: {exc}"
     said = (said or "").strip()

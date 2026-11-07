@@ -255,6 +255,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Say 'start an agent in the getprice folder to <task>' (or Organise → Agents → +). It runs Claude Code in ~/Repos/GetPrice, reading its CLAUDE.md, and the Agents page shows it Working, with every step in its transcript. When done it says what it did.", "code"),
     ("team-board", "Agents", "Agents board",
      "Board page → the Workspace / Agents switcher at the top. Each agent task is a card: Working while it runs, Needs you when it's waiting, Done with its final update when it finishes.", "code"),
+    ("team-routine", "Agents", "Routines that check on your agents",
+     "'Every weekday at 9, ask my agents for an update' → a routine that, when it fires, asks the CEO and reads you the update. Try ▶ Run Now on Reminders.", "code"),
     ("team-ask", "Agents", "Ask an agent / get an update",
      "'What's the update on the GetPrice agent?', 'ask the getprice agent if it's done', 'what are my agents doing?'. A busy agent's latest update is read out and your message queued; an idle one answers in its own words.", "code"),
     ("team-approve", "Agents", "Agents ask before risky actions",
