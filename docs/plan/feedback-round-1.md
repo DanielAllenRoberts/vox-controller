@@ -155,13 +155,36 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   video" weren't parsed (went to the LLM, which said it can't), and an unnamed pause went to Spotify if it
   was merely open. Now parsed, and routed to Spotify/Music only when they're actually playing, else the
   system media key (which reaches YouTube).
-- ☑ **"Open Slack and send a message to Byron saying Testing" → "Did you mean Speak replies?"** The router
+- ☑ **"Open Slack and send a message to Sam saying Testing" → "Did you mean Speak replies?"** The router
   made it a single CLICK in the app in front (Vox); vision found nothing and offered an unrelated label.
   Chained cross-app requests now go to AGENT; a vision miss says "I couldn't find X. Did you mean Y?"
   (a "yes" still clicks Y).
 - 💬 **Setup's "about you" could do more** (user note): use the answers to set Vox up, not only to store
   memories. Proposal for the user: suggest app-scoped notes/commands for the apps they named, pick the
   brain/voice style from how they work, and greet by name.
+
+## Round 1h (2026-11-07)
+- ☑ **Menu bar panel still glitched** (retest verdict). Real cause: the status dot's pulse was a
+  `withAnimation(.repeatForever)` in `onAppear`, which also animated the panel's own frame while it laid
+  out, so the panel slid about forever. The pulse is now scoped to the dot.
+- ☑ **Stop button** like Claude's ⏹: beside the type box in the menu bar panel and on Home (and ⌘.).
+  Cuts speech (both voices), cancels a pending brain call, aborts an agent run; a reply that lands after
+  the stop isn't acted on. `POST /api/stop`.
+- ☑ **Several board changes read every title back.** Now counted: "Deleted 5 cards."
+- ☑ **Short-term memory** ("move it to doing" moved the wrong card; "put them all back" → "which
+  ones?"). `vox.working_memory` keeps what was said and done across every mode, including card ids
+  and deletions, and both brains get it. Deleted cards go to a trash; `BOARD: restore`. The user's 10
+  deleted cards were restored from the log (titles, columns, tags, due; any notes were not in the log).
+- ☑ **Every feature on the Testing page**: 30 older built features added (Basics, pages, MCP, agent).
+- ☐ **Routines**: scheduled requests that run through Vox or an agent, e.g. every weekday at 7:00 "tell
+  me what's on my calendar and the weather"; every day "check my calendar and tell me what to work
+  on". Later: hand them to background agents. Needs calendar access (todo.md §2: Google API vs Apple
+  Calendar) for the calendar part.
+- ☐ **Master prompt + scenario prompts**: one core prompt (what Vox is, what it can do, how to treat
+  on-screen text, the user's name and context), with a smaller task prompt per scenario (route a
+  command, chat, click, look, rewrite, agent). Today the 7 prompts are each standalone.
+- ◐ **Memory/context generally needs to be better** (user, 2026-11-07). Short-term memory above is the
+  first step; next: long-term consolidation (#28 "dream"), contradicted facts updated.
 
 ## Liked (keep)
 - Hold Right ⌥ to talk: fast, will use it constantly.

@@ -461,7 +461,7 @@ def _click_by_vision(target: str, items) -> str | None:
             # When the request was a plain label, a pick whose label plainly isn't it is a misread,
             # so ask instead. A 'yes' next turn clicks it via _confirmed_click_target.
             assistant._dbg("[executor]", f"click-by-vision: picked {picked!r} for {target!r}, labels disagree → confirm")
-            # Say it wasn't found first: "Did you mean Speak replies?" alone, for "Bryon", sounded like
+            # Say it wasn't found first: "Did you mean Speak replies?" alone, for a misheard name, sounded like
             # nonsense (seen live). The question stays last so a 'yes' still clicks it.
             return f"I couldn't find {target}. Did you mean {picked}?"
         from vox import targets
