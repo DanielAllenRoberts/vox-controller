@@ -25,14 +25,47 @@ def status() -> str:
 
 
 def why_not() -> str:
-    return {"not_asked": "I don't have access to your calendar yet. Allow it in Vox → Settings → Permissions → Calendar.",
+    if _last_error:
+        return f"I couldn't read your Google Calendar through Composio: {_last_error}"
+    return {"not_asked": "I don't have access to your calendar yet. Add your Composio API key (Settings → Brains → API keys) for Google Calendar, or allow the Mac's Calendar in Settings → Permissions.",
             "denied": "Calendar access is turned off for Vox. Turn it on in System Settings → Privacy & Security → Calendars.",
             "unavailable": "I can't read calendars on this Mac."}.get(status(), "")
 
 
+_last_error = ""
+
+
 def events(start: datetime, end: datetime) -> list[dict] | None:
-    """Events overlapping [start, end), soonest first: {"title", "start", "end", "all_day", "location",
-    "calendar"}. None without access."""
+    """Events overlapping [start, end) from every source Vox can read (the Mac's Calendar app and,
+    with a Composio key, Google Calendar through Composio), soonest first. None if no source could be
+    read."""
+    global _last_error
+    _last_error = ""
+    found, any_ok = [], False
+    mac = _mac_events(start, end)
+    if mac is not None:
+        found += mac
+        any_ok = True
+    try:
+        from vox import composio
+        if composio.configured():
+            found += composio.calendar_events(start, end)
+            any_ok = True
+    except Exception as exc:
+        _last_error = str(exc)
+    if not any_ok:
+        return None
+    seen, out = set(), []
+    for e in sorted(found, key=lambda x: (not x["all_day"], x["start"])):
+        key = (e["title"].strip().lower(), e["start"].strftime("%Y-%m-%d %H:%M"))
+        if key not in seen:   # the same Google event seen through both sources
+            seen.add(key)
+            out.append(e)
+    return out
+
+
+def _mac_events(start: datetime, end: datetime) -> list[dict] | None:
+    """Events from the Mac's Calendar app (EventKit). None without access."""
     global _STORE
     if status() != "granted":
         return None

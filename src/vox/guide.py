@@ -115,7 +115,7 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
          "note": "Calendar parts need Settings → Permissions → Calendar."},
         {"title": "Your calendar", "what": "Answers questions about your day from every calendar on your Mac.",
          "say": ["What's on my calendar today?", "Am I busy tomorrow afternoon?"],
-         "where": "Settings → Permissions → Calendar."},
+         "where": "Settings → Brains → API keys → Composio (Google Calendar), and/or Settings → Permissions → Calendar."},
         {"title": "Board", "what": "A Trello-style task board you can change by voice or by hand.",
          "say": ["Add buy milk, call the plumber and book flights to my to do list", "Move the invoice card to Doing",
                  "Put a note on the scraper card that it needs proxies", "What's on my board?"],

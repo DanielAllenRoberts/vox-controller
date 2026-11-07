@@ -488,6 +488,7 @@ private struct APIKeysSection: View {
         ("OPENAI_API_KEY", "OpenAI (ChatGPT)", "platform.openai.com → API keys"),
         ("ANTHROPIC_API_KEY", "Anthropic (Claude API)", "console.anthropic.com → API keys"),
         ("DEEPSEEK_API_KEY", "DeepSeek", "platform.deepseek.com → API keys"),
+        ("COMPOSIO_API_KEY", "Composio (your apps: Google Calendar…)", "dashboard.composio.dev → Settings → API keys"),
     ]
 
     var body: some View {

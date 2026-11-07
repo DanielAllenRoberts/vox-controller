@@ -215,7 +215,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done · 💬 needs a decision from th
   plans, transcripts); the CEO manages it. Replaces the "coding brain" (#38). 💬 Open: what agents may
   do without asking (proposed: edit in own folder + safe commands; ask for the rest; no screen), and the
   projects root folder.
-- ☐ **Composio in Vox** (the user's calendar is Google via Composio; Mac Calendar is empty): Composio
+- ◐ **Composio in Vox** (built: vox/composio.py, Google Calendar merged into vox.calendars; needs the user's
+  COMPOSIO_API_KEY to test live) (the user's calendar is Google via Composio; Mac Calendar is empty): Composio
   API key in Settings → API keys; calendars fall back to Composio Google Calendar; later Gmail/Slack/etc.
 - ◐ **Routines → agentic**: built as scheduled briefings/commands; next: a routine becomes a task for the
   CEO agent.
