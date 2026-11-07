@@ -75,11 +75,13 @@ struct AgentsView: View {
                         Text(a.folderShort).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     Spacer()
-                    if a.status == "working" || a.status == "waiting" {
+                    if !a.external && (a.status == "working" || a.status == "waiting") {
                         Button("Stop", systemImage: "stop.circle") { Task { await post("team/\(a.name)/stop") } }
                     }
-                    Button("Remove", systemImage: "trash") { Task { await remove(a) } }
-                        .labelStyle(.iconOnly).buttonStyle(.borderless).help("Remove this agent")
+                    if !a.external {
+                        Button("Remove", systemImage: "trash") { Task { await remove(a) } }
+                            .labelStyle(.iconOnly).buttonStyle(.borderless).help("Remove this agent")
+                    }
                 }
                 if !a.task.isEmpty {
                     LabeledContent("Task") { Text(a.task).textSelection(.enabled) }.font(.callout)
@@ -95,10 +97,15 @@ struct AgentsView: View {
                     .background(.background.secondary, in: RoundedRectangle(cornerRadius: Metrics.radius))
                     .onChange(of: log.count) { _, n in if n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) } }
                 }
+                if a.external {
+                    Label("This is one of your own Claude Code sessions. It reports to Vox, but Vox can't message it yet.", systemImage: "terminal")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
                 HStack {
                     TextField("Message \(a.name)…", text: $draft).textFieldStyle(.roundedBorder)
                         .onSubmit { Task { await send(a) } }
                     Button("Send") { Task { await send(a) } }.disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
                 }
                 if let error { Text(error).foregroundStyle(.red).font(.callout) }
             }
@@ -184,6 +191,7 @@ private struct StatusPill: View {
         case "waiting": ("Needs you", .orange)
         case "error": ("Error", .red)
         case "stopped": ("Stopped", .secondary)
+        case "terminal": ("Terminal", .teal)
         default: ("Idle", .green)
         }
         HStack(spacing: 4) {
@@ -264,10 +272,11 @@ struct TeamAgent: Codable, Identifiable, Hashable {
     var status: String
     var task: String
     var lastUpdate: String
+    var external = false
     var id: String { name }
     var folderShort: String { folder.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
 
-    enum CodingKeys: String, CodingKey { case name, folder, status, task, lastUpdate = "last_update" }
+    enum CodingKeys: String, CodingKey { case name, folder, status, task, external, lastUpdate = "last_update" }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
@@ -275,6 +284,7 @@ struct TeamAgent: Codable, Identifiable, Hashable {
         status = (try? c.decode(String.self, forKey: .status)) ?? "idle"
         task = (try? c.decode(String.self, forKey: .task)) ?? ""
         lastUpdate = (try? c.decode(String.self, forKey: .lastUpdate)) ?? ""
+        external = (try? c.decode(Bool.self, forKey: .external)) ?? false
     }
 }
 

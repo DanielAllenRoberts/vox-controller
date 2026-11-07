@@ -93,13 +93,35 @@ def _update(name: str, **fields) -> dict | None:
 
 
 def status() -> list[dict]:
-    """Every agent: name, folder, status (idle/working/waiting/stopped/error), task, last update."""
+    """Every agent: name, folder, status (idle/working/waiting/stopped/error/terminal), task, last update.
+    Includes the user's own Claude Code sessions that registered with Vox (``vox.agents``) as
+    status "terminal": shown, but Vox can't message them yet."""
     with _LOCK:
         out = _load()["agents"]
     pend = {p["agent"]: p["what"] for p in _approvals}
     for a in out:
         a["waitingFor"] = pend.get(a["name"], "")
-    return out
+    return out + _terminal_agents({_key(a["name"]) for a in out})
+
+
+def _terminal_agents(skip: set) -> list[dict]:
+    try:
+        from vox import agents as registry
+        rows = []
+        for e in registry.all_agents():
+            pid = int(e.get("pid") or 0)
+            try:
+                os.kill(pid, 0)          # still running?
+            except Exception:
+                continue
+            if _key(e.get("name", "")) in skip:
+                continue
+            rows.append({"name": e.get("name", "?"), "folder": e.get("cwd", ""), "status": "terminal",
+                         "task": "", "external": True, "waitingFor": "",
+                         "last_update": f"Running in your terminal since {e.get('registered_at', '?')}."})
+        return rows
+    except Exception:
+        return []
 
 
 def get(name: str) -> dict | None:
@@ -417,6 +439,9 @@ def message(name: str, text: str, wait: float = 90) -> str:
     a = get(name)
     if a is None:
         return f"There's no agent called {name!r}."
+    if a.get("external"):
+        return (f"{a['name']} runs in your terminal ({a.get('folder', '')}), so I can't message it yet. "
+                f"I can start a Vox agent in that folder instead.")
     if busy(a["name"]):
         _inbox.setdefault(a["name"], []).append(text)
         upd = a.get("last_update") or "no update yet"
