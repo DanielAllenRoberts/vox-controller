@@ -112,6 +112,35 @@ def handle(text: str) -> str:
     return _run(text)
 
 
+def _window_subject(words: str) -> str | None:
+    """"this window" / "it" → "" (the window in front); "slack" / "the slack window" → "slack".
+    None when it doesn't read as a window or app (keeps "center the text" away from windows)."""
+    w = re.sub(r"^(?:the|my)\s+", "", (words or "").strip())
+    if w in ("", "this", "it", "that", "this window", "the window", "that window", "window", "this app",
+             "the app", "everything here", "this one"):
+        return ""
+    w = re.sub(r"\s+(?:window|app)$", "", w)
+    if not w or len(w.split()) > 3 or w in ("text", "image", "picture", "line", "title", "paragraph"):
+        return None
+    return w
+
+
+def _window_display(arg: str) -> str:
+    which, _, app = arg.partition("|")
+    if app:
+        hit = _blocked(app, resolve_app_name(app))
+        if hit:
+            return f"{hit} is blocked, so I won't touch it."
+    from vox import windows
+    return windows.move_to_display(which, resolve_app_name(app) if app else "")
+
+
+def _window_layout(arg: str) -> str:
+    layout, _, app = arg.partition("|")
+    from vox import windows
+    return windows.place(layout, resolve_app_name(app) if app else "")
+
+
 def run_intent(name: str, arg: str, _text: str | None = None) -> str:
     """Execute a known ``(intent, arg)`` action directly via the dispatch map. Used by the command
     DB resolver, which already has the intent+arg and must NOT re-parse. Unknown intent → handoff."""
@@ -132,6 +161,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "set_setting": set_setting,
         "media": media,
         "quit_app": quit_app,
+        "window_display": _window_display, "window_layout": _window_layout,
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -377,6 +407,31 @@ def _parse(text: str) -> tuple[str, str] | None:
     m = re.search(r"\b(?:go to|switch to|open)\s+(?:my\s+)?(.+?)\s+window\b", t)
     if m:
         return ("window", m.group(1).strip())
+
+    # Windows across displays (vox.windows): "move Slack to the left screen", "send this to the
+    # iPad", "maximise this window", "snap this to the right half". BEFORE desktop switching, whose
+    # "next screen" would otherwise swallow "move this to the next screen".
+    _pol = r"(?:(?:please|vox|can you|could you|ok|okay|and)[,]?\s+)*"
+    _where = (r"(other|next|another|previous|left|right|main|primary|external|big|laptop|built in|ipad|sidecar|"
+              r"first|second|third|one|two|three|1|2|3|[a-z0-9]+)")
+    m = (re.fullmatch(_pol + r"(?:move|send|put|throw|shift|take)\s+(.+?)\s+(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?"
+                      + _where + r"\s+(?:screen|display|monitor)(?:\s+please)?", t)
+         or re.fullmatch(_pol + r"(?:move|send|put|throw|shift|take)\s+(.+?)\s+(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?"
+                         r"(ipad|sidecar|laptop|other screen|other monitor|other display)(?:\s+please)?", t))
+    if m:
+        which = m.group(2).replace(" screen", "").replace(" monitor", "").replace(" display", "")
+        return ("window_display", f"{which}|{_window_subject(m.group(1))}")
+    m = (re.fullmatch(_pol + r"(?:maximi[sz]e|fill the screen with|make full size)\s*(.*?)(?:\s+please)?", t)
+         or re.fullmatch(_pol + r"make\s+(.+?)\s+(?:fill the screen|full size|full screen size)(?:\s+please)?", t))
+    if m and (m.group(1) == "" or _window_subject(m.group(1)) is not None):
+        return ("window_layout", f"fill|{_window_subject(m.group(1)) or ''}")
+    m = re.fullmatch(_pol + r"(?:snap|move|put|tile|dock)\s+(.+?)\s+(?:to|on|onto)\s+(?:the\s+)?(left|right)"
+                     r"(?:\s+(?:half|side))(?:\s+of\s+the\s+screen)?(?:\s+please)?", t)
+    if m and _window_subject(m.group(1)) is not None:
+        return ("window_layout", f"{m.group(2)}|{_window_subject(m.group(1))}")
+    m = re.fullmatch(_pol + r"(?:center|centre)\s+(.+?)(?:\s+on the screen)?(?:\s+please)?", t)
+    if m and _window_subject(m.group(1)) is not None:
+        return ("window_layout", f"center|{_window_subject(m.group(1))}")
 
     # Desktop / Space switching (macOS Mission Control). Synonyms: desktop / space / screen,
     # plus "swipe left/right" (easier to say than "next desktop").
@@ -641,6 +696,13 @@ def environment_context() -> str:
                 dom = _domain(urls[i]) if i < len(urls) else ""
                 entries.append(f"{t[:60]} ({dom})" if dom else t[:60])
             parts.append(f"Open {browser()} tabs: " + " | ".join(entries))
+    try:  # with two or more screens, which is which (for "move this to the left screen")
+        from vox import windows
+        disp = windows.describe()
+        if disp:
+            parts.append(disp)
+    except Exception:
+        pass
     parts.append(_now_line())
     return "\n".join(parts)
 
