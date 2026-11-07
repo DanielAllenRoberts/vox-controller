@@ -163,6 +163,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "media": media,
         "quit_app": quit_app,
         "window_display": _window_display, "window_layout": _window_layout,
+        "spotify": lambda a: __import__("vox.spotify", fromlist=["run"]).run(a),
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -246,6 +247,23 @@ def _parse(text: str) -> tuple[str, str] | None:
         return ("media", "next:")
     if re.fullmatch(r"(?:previous|last|go back a|go back one)\s+(?:song|track)", t):
         return ("media", "previous:")
+
+    # Spotify (vox.spotify): what's playing, a playlist by name, add this song to a playlist, a song.
+    _pp = r"(?:(?:please|vox|can you|could you|ok|okay|hey)[,]?\s+)*"
+    if re.fullmatch(_pp + r"(?:what'?s|what is) (?:this|that) (?:song|track|tune)|what (?:song|track) is (?:this|that|playing)"
+                    r"|what'?s playing|what is playing|what am i listening to|who (?:sings|is singing) (?:this|that)"
+                    r"|(?:what'?s|what is) the name of (?:this|that) (?:song|track)|name (?:this|that) (?:song|tune)", t):
+        return ("spotify", "now")
+    m = re.fullmatch(_pp + r"(shuffle|play|put on|start) (?:my |the )?(.+?) play ?list(?: on spotify)?(?: please)?", t)
+    if m:
+        return ("spotify", f"{'shuffle' if m.group(1) == 'shuffle' else 'playlist'}|{m.group(2)}")
+    m = re.fullmatch(_pp + r"(?:add|save|put) (this song|this track|the song|the track|this tune|the current song|"
+                     r"what'?s playing|this|it|that|that song) (?:to|into|on|onto) (?:my |the )?(.+?)( play ?list)?(?: please)?", t)
+    if m and (m.group(3) or m.group(1) not in ("this", "it", "that")):
+        return ("spotify", f"add|{m.group(2)}")
+    m = re.fullmatch(_pp + r"play (.+? by .+?)(?: on spotify)?(?: please)?|" + _pp + r"play (.+?) on spotify(?: please)?", t)
+    if m:
+        return ("spotify", f"play|{m.group(1) or m.group(2)}")
 
     # Vox's own everyday settings by voice ("reply silently from now on"). Allow-listed in
     # VOICE_SETTINGS; anything else stays in the app.

@@ -23,7 +23,7 @@ struct SettingsView: View {
         switch t {
         case .permissions: PermissionsPane()
         case .advanced: AdvancedPane()
-        case .general: CatalogPane(tab: t) { AppBehaviourSection() }
+        case .general: CatalogPane(tab: t) { AppBehaviourSection(); SpotifySection() }
         case .listening: CatalogPane(tab: t) { HoldToTalkSection() }
         case .brains: CatalogPane(tab: t) { APIKeysSection() }
         default: CatalogPane(tab: t) { EmptyView() }
@@ -385,6 +385,98 @@ private struct AdvancedPane: View {
 
 /// API keys for the brains that need one. Saved to Vox's own .env (owner-only) and used at once;
 /// the values never come back from the engine, only whether each is set.
+/// Spotify: link the user's account so Vox can find their playlists, search, and add songs.
+/// Playback itself goes through the Spotify app and needs no link.
+private struct SpotifySection: View {
+    @Environment(AppModel.self) private var model
+    struct Status: Decodable { var clientId: Bool; var connected: Bool; var user: String; var redirectUri: String }
+    @State private var status: Status?
+    @State private var draft = ""
+    @State private var error: String?
+    @State private var waiting = false
+
+    var body: some View {
+        if model.engine.isRunning {
+            Section {
+                if let s = status, s.connected {
+                    LabeledContent("Account") {
+                        HStack(spacing: 8) {
+                            Label(s.user.isEmpty ? "Linked" : s.user, systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Button("Unlink") { Task { await disconnect() } }
+                        }
+                    }
+                } else {
+                    LabeledContent("Client ID") {
+                        HStack(spacing: 8) {
+                            TextField("", text: $draft, prompt: Text("Paste Client ID")).frame(width: 220)
+                                .onSubmit { Task { await saveID() } }
+                            Button("Save") { Task { await saveID() } }
+                                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
+                    }
+                    LabeledContent("Account") {
+                        Button(waiting ? "Waiting for Spotify…" : "Connect Spotify…") { Task { await connect() } }
+                            .disabled(!(status?.clientId ?? false) || waiting)
+                    }
+                    if let uri = status?.redirectUri {
+                        LabeledContent("Redirect URI") {
+                            HStack(spacing: 6) {
+                                Text(uri).font(.callout.monospaced()).textSelection(.enabled)
+                                Button("Copy", systemImage: "doc.on.doc") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(uri, forType: .string)
+                                }.labelStyle(.iconOnly).buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+                if let error { Text(error).foregroundStyle(.red).font(.callout) }
+            } header: {
+                Text("Spotify")
+            } footer: {
+                Text(status?.connected == true
+                     ? "Try \u{201C}play my film score playlist\u{201D} or \u{201C}add this song to my film score playlist\u{201D}."
+                     : "\u{201C}What's playing?\u{201D} works already. To play playlists by name and add songs to them: at developer.spotify.com/dashboard create an app (any name), add the Redirect URI above, tick Web API, then paste its Client ID here and press Connect.")
+                    .foregroundStyle(.secondary)
+            }
+            .task { await load() }
+        }
+    }
+
+    private func load() async {
+        status = try? await model.api.get("spotify")
+        if draft.isEmpty, case .string(let v)? = model.setting("spotify_client_id")?.value { draft = v }
+    }
+
+    private func saveID() async {
+        do { try await model.api.setSetting("spotify_client_id", .string(draft.trimmingCharacters(in: .whitespaces))); error = nil }
+        catch { self.error = ErrorWords.message("Couldn't save the Client ID.", error) }
+        await load()
+    }
+
+    private func connect() async {
+        struct R: Decodable { var url: String }
+        do {
+            let r: R = try await model.api.send("spotify/connect", method: "POST", body: [String: JSONValue]())
+            if let url = URL(string: r.url) { NSWorkspace.shared.open(url) }
+            waiting = true
+            error = nil
+            for _ in 0..<90 {   // the login finishes in the browser; look for it for 3 minutes
+                try? await Task.sleep(for: .seconds(2))
+                await load()
+                if status?.connected == true { break }
+            }
+            waiting = false
+        } catch { self.error = ErrorWords.message("Couldn't start the Spotify login.", error) }
+    }
+
+    private func disconnect() async {
+        try? await model.api.post("spotify/disconnect")
+        await load()
+    }
+}
+
 private struct APIKeysSection: View {
     @Environment(AppModel.self) private var model
     @State private var keys: [String: Bool] = [:]

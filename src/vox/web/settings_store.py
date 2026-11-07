@@ -465,6 +465,13 @@ _SCHEMA_META: list[dict] = [
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
     },
     {
+        "key": "spotify_client_id",
+        "label": "Spotify Client ID",
+        "group": "Behavior",
+        "type": "text",
+        "help": "From your free app at developer.spotify.com (Settings → General → Spotify explains it).",
+    },
+    {
         "key": "blocked_apps",
         "label": "Apps Vox won't open",
         "group": "Behavior",

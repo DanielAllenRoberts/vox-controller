@@ -271,6 +271,51 @@ def create_app() -> FastAPI:
         runtime.set_ptt(bool(body.get("held")))
         return {"ok": True}
 
+    # --- Spotify account link (vox.spotify) ---
+    @app.get("/api/spotify")
+    def spotify_status() -> dict:
+        from vox import spotify
+        return spotify.status()
+
+    @app.post("/api/spotify/connect")
+    async def spotify_connect(request: Request):
+        """The Spotify login URL for the app to open in the browser."""
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import spotify
+        try:
+            return {"url": spotify.auth_url()}
+        except ValueError as exc:
+            return _bad_request(str(exc))
+
+    @app.get("/api/spotify/callback")
+    def spotify_callback(code: str = "", state: str = "", error: str = ""):
+        """Where Spotify sends the browser after login. A plain page the user can close."""
+        from fastapi.responses import HTMLResponse
+        from vox import spotify
+        if error or not code:
+            msg = f"Spotify didn't link ({error or 'no code'}). Close this tab and press Connect again."
+        else:
+            try:
+                who = spotify.finish_login(code, state)
+                msg = f"Spotify is linked{' as ' + who if who else ''}. You can close this tab."
+            except Exception as exc:
+                msg = f"Spotify didn't link: {exc}. Close this tab and try again."
+        import html
+        return HTMLResponse(f"<!doctype html><meta charset=utf-8><title>Vox</title>"
+                            f"<body style='font:16px -apple-system;padding:48px'><h2>Vox</h2>"
+                            f"<p>{html.escape(msg)}</p></body>")
+
+    @app.post("/api/spotify/disconnect")
+    async def spotify_disconnect(request: Request):
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import spotify
+        spotify.disconnect()
+        return {"ok": True}
+
     @app.post("/api/stop")
     async def post_stop(request: Request):
         """The ⏹ button: stop whatever Vox is doing now (speech, a brain call, an agent run).

@@ -55,7 +55,7 @@ How Vox behaves:
 ## Action layer (the executor)
 
 **Fires:** Every utterance the deterministic layer couldn't handle, in any mode. The main one.  
-**Brain:** `small` · **~3214 tokens**  
+**Brain:** `small` · **~3286 tokens**  
 **Expects back:** ONE command line, or TYPE:/EDIT:/LOOK:/CLICK:/SCHEDULE:/BOARD:/TEACH:/CHAT:/DICTATE/IGNORE
 
 ### System prompt
@@ -76,6 +76,9 @@ Commands (output the command line verbatim, nothing else):
   show tabs / hide tabs
   pause music / play music / next song / previous song  (Spotify, Music or a video, in the
       background. 'pause', or a mis-heard 'pose my music' → pause music. NEVER press space for it)
+  what's playing  ·  play my <name> playlist  ·  shuffle my <name> playlist  ·  add this song to my
+      <name> playlist  ·  play <song> by <artist>   (Spotify; 'put my film score list on' → play my
+      film score playlist; 'save this tune to chill' → add this song to my chill playlist)
   move <app or 'this window'> to the <left/right/other/main/ipad> screen  ·  maximize <app or window>
       ·  snap this window to the left half / right half  ·  center this window  (multiple displays:
       the Mac state lists them left to right. 'screen 2' / 'next screen' on their own = desktops)
@@ -270,7 +273,7 @@ Now: Monday 2026-01-05 09:12 (GMT)
 | Piece | ~tokens | Sent on |
 |---|---:|---|
 | Core: what Vox is (master prompt) (system) | 350 | that call |
-| Action layer (the executor) (system) | 3214 | that call |
+| Action layer (the executor) (system) | 3286 | that call |
 | Conversation (assistant mode) (system) | 965 | that call |
 | Rewrite the selection (EDIT) (system) | 46 | that call |
 | Read the screen from the AX tree (LOOK, cheap path) (system) | 134 | that call |
@@ -280,7 +283,7 @@ Now: Monday 2026-01-05 09:12 (GMT)
 | environment_context() | 64 | every action-layer call |
 | recent_actions_block() | 89 | every action-layer call |
 | board_block() | 69 | every action-layer call |
-| **Typical action-layer turn** | **3436** | — |
+| **Typical action-layer turn** | **3508** | — |
 
 **The context blocks scale with the MACHINE, not the code** — and they're sent on *every* action-layer call, so they're the part worth watching.
 

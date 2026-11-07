@@ -94,6 +94,11 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
         {"title": "Control music and video", "what": "Play, pause and skip in Spotify, Music or a video in your browser, without bringing them to the front.",
          "say": ["Pause", "Play music", "Next song", "Previous track", "Pause the video"],
          "how": "An unnamed \"pause\" goes to whatever is actually playing."},
+        {"title": "Spotify", "what": "Ask what's playing, play your playlists by name, add the current song to a playlist, or play a song.",
+         "say": ["What song is this?", "Play my film score playlist", "Shuffle my focus playlist",
+                 "Add this song to my film score playlist", "Play Cataclysm by Tom Dabrowski"],
+         "where": "Settings → General → Spotify links your account (needed for playlists, search and adding songs).",
+         "note": "\"What's playing?\" works without linking."},
     ]),
     ("Timers, reminders and the board", "checklist", [
         {"title": "Timers and alarms", "what": "Countdowns that chime, and alarms at a time of day.",
