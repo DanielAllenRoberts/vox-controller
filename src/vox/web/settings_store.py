@@ -434,7 +434,7 @@ _SCHEMA_META: list[dict] = [
         "type": "select",
         "options_source": "input_devices",
         "options": [{"value": "", "label": "System default"}],
-        "help": "Which microphone Vox listens to. The list is read live from your Mac, so plugging in a new device and reloading this page shows it. Devices are saved by NAME, not index, so it survives unplugging something else. Restart the daemon to apply — the mic stream is opened once at startup.",
+        "help": "Which microphone Vox listens to. The list is read live from your Mac, so plugging in a new device and reloading this page shows it. Devices are saved by NAME, not index, so it survives unplugging something else. Applies straight away; if the chosen mic won't open, Vox keeps the one it had.",
     },
     # --- Notifications (the silent sibling of the speak MCP) ---
     {
@@ -796,6 +796,12 @@ def set(key: str, value) -> dict:  # noqa: A001 - matches the contract's API nam
         overrides = _load_overrides()
         overrides[key] = coerced
         _save_overrides(overrides)
+    if key == "input_device":   # switch the mic now (menu bar picker), not at the next restart
+        try:
+            from ..audio import apply_input_device
+            apply_input_device(coerced)
+        except Exception:
+            pass
     return {"ok": True, "value": coerced}
 
 

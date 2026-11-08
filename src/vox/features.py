@@ -159,6 +159,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Settings → Brains → API keys: paste a key (e.g. Composio) and Save. It's kept in Vox's own private key store on this Mac and works straight away; Remove… deletes it. Keys from an old .env were moved in automatically the first time Vox started.", "code"),
     ("no-app-list-noise", "Control", "No more phantom app lists when you're quiet",
      "Leave Vox listening in a quiet room or with soft background noise. It no longer 'hears' a string of app names ('amazon netflix calculator terminal finder…'); in Activity those lines stop appearing. 'Open Slack' / 'open Terminal' still work as normal.", "code"),
+    ("menubar-mic", "Vox.app", "Switch microphone from the menu bar",
+     "Click the Vox icon in the menu bar → Microphone: pick another mic (e.g. put AirPods in, open the menu, choose them). It switches straight away, no restart; say 'Hey Vox, can you hear me?' to check. Pick your usual mic to switch back. A mic that won't open is ignored and Vox keeps the one it had.", "code"),
     ("spotify-now", "Control", "What's playing?",
      "With Spotify (or Music) playing: 'what song is this?' / 'what's playing?' / 'who sings this?'. It says the title and artist.", "code"),
     ("spotify-link", "Control", "Spotify: playlists and adding songs",

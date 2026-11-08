@@ -148,6 +148,51 @@ class MicStream:
         finally:
             self._recovering = False
 
+    def switch_device(self, device) -> None:
+        """Listen to another microphone from now on (the menu bar's mic picker), without restarting.
+        Runs off the main loop like ``_recover``. If the new mic won't open, it goes back to the
+        one that was working and says so."""
+        threading.Thread(target=self._switch, args=(device,), daemon=True).start()
+
+    def _switch(self, device) -> None:
+        while self._recovering:          # let an in-flight re-open finish first
+            time.sleep(0.05)
+        self._recovering = True
+        try:
+            previous = self._device
+            old, self._stream = self._stream, None
+            try:
+                if old is not None:
+                    old.abort()
+                    old.close()
+            except Exception:
+                pass
+            try:
+                sd._terminate(); sd._initialize()  # pick up AirPods etc. connected since start-up
+            except Exception:
+                pass
+            for dev in ([device, previous] if device != previous else [device]):
+                try:
+                    self._device = dev
+                    stream = self._make_stream()
+                    stream.start()
+                    self._stream = stream
+                    self._stall_since = None
+                    try:
+                        name = sd.query_devices(dev, kind="input")["name"]
+                    except Exception:
+                        name = str(dev)
+                    if dev == device:
+                        self._log(f"🎙️  mic switched to {name!r}"
+                                  + (" (system default)" if dev is None else ""))
+                    else:
+                        self._log(f"🎙️  kept {name!r}")
+                    return
+                except Exception as exc:
+                    self._log(f"⚠️  couldn't open mic {dev!r} ({exc})")
+        finally:
+            self._recovering = False
+
     def flush(self) -> None:
         """Drop buffered frames (e.g. audio captured while Vox was speaking) so the next read
         starts fresh — stops Vox from hearing and re-processing its own TTS."""
@@ -379,6 +424,20 @@ def resolve_device(value):
     return int(text) if text.lstrip("-").isdigit() else text
 
 
+_ACTIVE = None   # the mic stream the daemon is listening on (for switching mics live)
+
+
+def apply_input_device(value) -> bool:
+    """Switch the running daemon to the microphone in ``value`` (a name, or "" for the system
+    default) straight away. False when it can't be done live (no stream yet, or the echo-cancelling
+    backend), in which case the setting still applies at the next start."""
+    stream = _ACTIVE
+    if stream is None or not hasattr(stream, "switch_device"):
+        return False
+    stream.switch_device(resolve_device(value))
+    return True
+
+
 def open_mic_stream(cfg, out=None):
     """Open the mic backend chosen by config, with a hard fallback to the sounddevice MicStream.
 
@@ -411,6 +470,8 @@ def open_mic_stream(cfg, out=None):
                 say(f"⚠️  configured mic {device!r} unavailable ({exc}) — using the system default "
                     f"instead. Pick another in the dashboard → Settings → Voice → Microphone.")
             continue
+        global _ACTIVE
+        _ACTIVE = stream
         return stream
     raise NoInputDevice(f"no microphone could be opened ({last_exc})")
 

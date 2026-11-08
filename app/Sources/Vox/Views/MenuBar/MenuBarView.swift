@@ -37,6 +37,7 @@ struct MenuBarView: View {
                 VStack(spacing: 6) {
                     SwitchRow("Listening", isOn: Binding(get: { !model.isPaused }, set: { _ in model.togglePaused() }))
                     SwitchRow("Speak replies", isOn: model.binding(bool: "tts_enabled"))
+                    MicPicker()
                 }
                 .toggleStyle(.vox)
             } else {
@@ -63,6 +64,33 @@ struct MenuBarView: View {
     private func show(_ id: String) {
         openWindow(id: id)
         NSApp.activate()
+    }
+}
+
+/// Which microphone Vox listens to, switchable on the spot (e.g. after putting AirPods in). The list
+/// is re-read from the Mac each time the panel opens, so a device connected since is there.
+struct MicPicker: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let mic = model.setting("input_device"), let options = mic.options, !options.isEmpty {
+            HStack {
+                Text("Microphone").lineLimit(1).fixedSize()
+                Spacer(minLength: 12)
+                Picker("Microphone", selection: model.binding(string: "input_device")) {
+                    ForEach(options, id: \.value) { Text(Self.short($0.label)).tag($0.value) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 190)
+            }
+            .onAppear { Task { await model.reloadSettings() } }
+        }
+    }
+
+    /// "AIR 192 4 (2 ch)" → "AIR 192 4": the channel count means nothing here.
+    static func short(_ label: String) -> String {
+        label.replacingOccurrences(of: #" \(\d+ ch\)$"#, with: "", options: .regularExpression)
     }
 }
 
