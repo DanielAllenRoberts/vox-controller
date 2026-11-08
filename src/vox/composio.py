@@ -1,7 +1,7 @@
 """Composio: Vox's link to the user's apps (Google Calendar first; Gmail, Slack, Notion… later).
 
 The user's apps are connected in their own Composio account (composio.dev). Vox needs only the
-project API key (``COMPOSIO_API_KEY``, Settings → Brains → API keys); it finds the ACTIVE connected
+project API key (saved in Vox: Settings → Brains → API keys); it finds the ACTIVE connected
 account for a toolkit itself and runs tools through Composio's REST API. Read-only uses for now.
 """
 
@@ -18,11 +18,12 @@ _accounts: dict[str, tuple[float, list[str]]] = {}
 
 
 def api_key() -> str:
+    """The key saved in Vox (Settings → Brains → API keys), else the process environment."""
     try:
-        from dotenv import load_dotenv
-        from vox.paths import ENV_FILE
-        load_dotenv(ENV_FILE)
-        load_dotenv()
+        from vox import secrets_store
+        key = secrets_store.get("COMPOSIO_API_KEY")
+        if key:
+            return key
     except Exception:
         pass
     return os.environ.get("COMPOSIO_API_KEY", "").strip()

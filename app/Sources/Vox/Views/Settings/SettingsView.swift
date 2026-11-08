@@ -384,7 +384,7 @@ private struct AdvancedPane: View {
     }
 }
 
-/// API keys for the brains that need one. Saved to Vox's own .env (owner-only) and used at once;
+/// API keys for the brains that need one. Saved in Vox's key store (data/secrets.db, owner-only) and used at once;
 /// the values never come back from the engine, only whether each is set.
 /// Spotify: link the user's account so Vox can find their playlists, search, and add songs.
 /// Playback itself goes through the Spotify app and needs no link.

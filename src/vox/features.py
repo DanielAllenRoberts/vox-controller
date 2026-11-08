@@ -155,6 +155,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Settings → Advanced → Run Setup Again: after picking a voice there's 'Connect your apps' (Mac Calendar, MCP servers such as Composio, Spotify). Everything is optional; Skip works.", "code"),
     ("mcp-connections", "Vox.app", "Connections: add any MCP server",
      "Settings → Connections → Add Connection…: a URL (e.g. your Composio MCP server URL + its key header) or a command. It tests itself and shows the tool count. Then ask 'any new email from Sam?' or 'what's on my Trello?': Vox uses it, and asks 'Should I go ahead?' before sending or changing anything (say yes or no).", "code"),
+    ("keys-in-vox", "Vox.app", "API keys are saved in Vox, not a .env file",
+     "Settings → Brains → API keys: paste a key (e.g. Composio) and Save. It's kept in Vox's own private key store on this Mac and works straight away; Remove… deletes it. Keys from an old .env were moved in automatically the first time Vox started.", "code"),
     ("spotify-now", "Control", "What's playing?",
      "With Spotify (or Music) playing: 'what song is this?' / 'what's playing?' / 'who sings this?'. It says the title and artist.", "code"),
     ("spotify-link", "Control", "Spotify: playlists and adding songs",

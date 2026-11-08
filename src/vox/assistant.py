@@ -1,6 +1,6 @@
 """Assistant (LLM) brain — provider-agnostic. Powers ASSISTANT mode (and later, escalation).
 
-Pick a provider in config (anthropic / openai-compatible / claude_cli). Keys come from .env.
+Pick a provider in config (anthropic / openai-compatible / claude_cli). Keys come from Vox's key store (vox.secrets_store), set in the app.
 """
 
 import os
@@ -574,7 +574,7 @@ def _anthropic(text, history, model, system, brain="small", kind="chat"):
     key_env = getattr(CONFIG, "anthropic_key_env", "ANTHROPIC_API_KEY")
     key = os.environ.get(key_env)
     if not key:
-        return f"I need {key_env} in your .env — add it and restart Vox."
+        return f"I need your {key_env} key. Add it in Vox → Settings → Brains → API keys."
     global _anthropic_client
     if _anthropic_client is None:
         from anthropic import Anthropic
@@ -659,7 +659,7 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
 def _openai(text, history, model, system, brain="small", kind="chat"):
     key = os.environ.get(CONFIG.llm_api_key_env)
     if not key:
-        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
+        return f"I need your {CONFIG.llm_api_key_env} key. Add it in Vox → Settings → Brains → API keys."
     return _openai_call(text, history, model, system, brain, kind, CONFIG.llm_base_url, key)
 
 

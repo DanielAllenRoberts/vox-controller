@@ -15,7 +15,6 @@ import threading
 import time
 import webbrowser
 
-from dotenv import load_dotenv
 
 from vox import actions, assistant, auto_dictation, dispatch, executor, sounds, tts
 from vox.audio import MicStreamDead, NoInputDevice, capture_utterance, open_mic_stream
@@ -1373,9 +1372,15 @@ def main() -> None:
             out.emit(f"No running {cfg.assistant_name} found.")
         return
 
-    load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
-    from vox.paths import ENV_FILE
-    load_dotenv(ENV_FILE)  # installed app: keys saved during setup live beside the data
+    # API keys come from Vox's own key store (<data>/secrets.db), set in the app; an old .env is
+    # imported into it once and not read after that.
+    from vox import secrets_store
+    try:
+        imported = secrets_store.load()
+        if imported:
+            out.emit(f"🔑 Moved {len(imported)} API key(s) from .env into Vox's key store: {', '.join(imported)}")
+    except Exception as exc:
+        out.emit(f"⚠️  Couldn't read the API key store: {exc}")
 
     # Single-instance guard: a second daemon fights the first over the mic + ducks the audio (and
     # leaves the dashboard served by a stale process). Refuse to start a second copy — EXCEPT on a

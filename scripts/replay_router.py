@@ -22,7 +22,6 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
 from vox import executor
@@ -85,7 +84,8 @@ def main() -> None:
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
-    load_dotenv(".env")
+    from vox import secrets_store
+    secrets_store.load()
     client = OpenAI(base_url=CONFIG.llm_base_url, api_key=os.environ.get(CONFIG.llm_api_key_env, ""))
     calls = extract(args.log, args.last)
     if not calls:

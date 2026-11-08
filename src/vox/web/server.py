@@ -483,24 +483,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/secrets")
     async def post_secret(request: Request):
-        """Save one API key to the .env file (owner-only) and apply it now, no restart needed."""
+        """Save one API key in Vox's key store (owner-only) and apply it now, no restart needed."""
         body, err = await _json_body(request)
         if err is not None:
             return err
         name, value = str(body.get("name", "")), str(body.get("value", "")).strip()
         if name not in _secret_names():
             raise HTTPException(status_code=400, detail=f"unknown key name; expected one of {_secret_names()}")
-        from dotenv import set_key, unset_key
-        from ..paths import ENV_FILE
-        ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ENV_FILE.touch(mode=0o600, exist_ok=True)
-        if value:
-            set_key(str(ENV_FILE), name, value)
-            os.environ[name] = value
-        else:
-            unset_key(str(ENV_FILE), name)
-            os.environ.pop(name, None)
-        os.chmod(ENV_FILE, 0o600)
+        from .. import secrets_store
+        secrets_store.put(name, value)
         return {"ok": True, "set": bool(value)}
 
     @app.post("/api/brain/test")
