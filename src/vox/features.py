@@ -161,6 +161,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Leave Vox listening in a quiet room or with soft background noise. It no longer 'hears' a string of app names ('amazon netflix calculator terminal finder…'); in Activity those lines stop appearing. 'Open Slack' / 'open Terminal' still work as normal.", "code"),
     ("menubar-mic", "Vox.app", "Switch microphone from the menu bar",
      "Click the Vox icon in the menu bar → Microphone: pick another mic (e.g. put AirPods in, open the menu, choose them). It switches straight away, no restart; say 'Hey Vox, can you hear me?' to check. Pick your usual mic to switch back. A mic that won't open is ignored and Vox keeps the one it had.", "code"),
+    ("two-schedules", "Control", "A reminder and a follow-up in one sentence",
+     "'Vox, remind me at 8:30 pm to write my reflection, and if I don't get back to you by 9 open my browser on my university profile.' Vox sets BOTH: a reminder at 8:30 and a routine at 9 (it says both back; check Reminders in Vox.app).", "code"),
     ("spotify-now", "Control", "What's playing?",
      "With Spotify (or Music) playing: 'what song is this?' / 'what's playing?' / 'who sings this?'. It says the title and artist.", "code"),
     ("spotify-link", "Control", "Spotify: playlists and adding songs",

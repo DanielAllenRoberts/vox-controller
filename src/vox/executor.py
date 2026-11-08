@@ -448,6 +448,47 @@ def _vision_prompt(target: str, n: int) -> str:
         return _CLICK_VISION_PROMPT.format(target=target, n=n)
 
 
+def _schedule(body: str) -> str | None:
+    """One SCHEDULE: line → the reminder/alarm/routine made (its confirmation), or None."""
+    try:
+        from vox import scheduler
+        # Preferred: the brain emits a structured "kind | ISO-when | text | repeat" (it computed
+        # the absolute time from 'Now:'), so we create it directly — no fragile English re-parse.
+        msg = None
+        if "|" in body:
+            parts = [p.strip() for p in body.split("|")]
+            parts += [""] * (4 - len(parts))  # pad so missing trailing fields are just empty
+            msg = scheduler.create_structured(parts[0], parts[1], parts[2], parts[3])
+        # Fallback: a plain-English restatement (model ignored the format) → the deterministic
+        # parser (now connector-tolerant: "to"/"that"/"about"/"saying").
+        if msg is None:
+            msg = scheduler.parse_and_create(body)
+        return msg
+    except Exception:
+        return None
+
+
+# The directive prefixes the router answers with. A model sometimes opens with a sentence ("I'll set
+# both the reminder and the follow-up for you.") before them; that sentence isn't a command, and
+# reading it as one lost the whole request (issue dc62c863).
+_DIRECTIVE = re.compile(r"^(?:IGNORE\b|DICTATE\b|(?:CHAT|WEB|MENU|ISSUE|NOTE|SET|LOOK|POINT|CLICK|AGENTS?|"
+                        r"APPS|SCHEDULE|BOARD|TEACH|TYPE|EDIT)\s*:)", re.I)
+
+
+def _drop_preamble(raw: str) -> str:
+    """Drop chatty lines BEFORE the first directive line, if there is one. Untouched otherwise."""
+    lines = raw.splitlines()
+    for i, ln in enumerate(lines):
+        if _DIRECTIVE.match(ln.strip()):
+            lead = [x.strip() for x in lines[:i] if x.strip()]
+            # Only drop sentences ("I'll do both for you."), never a bare command line like
+            # "close tab", which the old first-line-wins rule would have run.
+            if i and all(x[-1] in ".!?:" or len(x.split()) >= 6 for x in lead):
+                return "\n".join(lines[i:]).strip()
+            return raw
+    return raw
+
+
 def _router_system() -> str:
     """The router prompt plus the notes for the app in front (app-scoped notes: the user's idea,
     loaded per app like the command DB, so the main prompt doesn't carry every app's quirks)."""
@@ -884,6 +925,10 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         return False, ""
     if not raw:
         return False, assistant.respond(text, history)
+    trimmed = _drop_preamble(raw)
+    if trimmed != raw:
+        assistant._dbg("[executor]", f"dropped a preamble before the directive: {raw[:len(raw) - len(trimmed)].strip()!r}")
+        raw = trimmed
     # The brain's raw output IS the "tool call" (Vox uses translate-to-command, not native function-
     # calling). complete() already logged the full prompt + raw response; these _dbg lines complete
     # the picture by logging which action ran and what it returned — the tool interaction.
@@ -977,24 +1022,16 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         assistant._dbg("[executor]", f"decision=LOOK (screenshot) q={question!r} → {answer!r}")
         return False, answer
     if upper.startswith("SCHEDULE:"):
-        body = raw.split(":", 1)[1].strip()
-        msg = None
-        try:
-            from vox import scheduler
-            # Preferred: the brain emits a structured "kind | ISO-when | text | repeat" (it computed
-            # the absolute time from 'Now:'), so we create it directly — no fragile English re-parse.
-            if "|" in body:
-                parts = [p.strip() for p in body.split("|")]
-                parts += [""] * (4 - len(parts))  # pad so missing trailing fields are just empty
-                msg = scheduler.create_structured(parts[0], parts[1], parts[2], parts[3])
-            # Fallback: a plain-English restatement (model ignored the format) → the deterministic
-            # parser (now connector-tolerant: "to"/"that"/"about"/"saying").
-            if msg is None:
-                msg = scheduler.parse_and_create(body)
-        except Exception:
-            msg = None
-        assistant._dbg("[executor]", f"decision=SCHEDULE {body!r} → {msg!r}")
-        return False, (msg or "I couldn't work out a time for that — try saying it with a clear time.")
+        # "Remind me at 8:30, and if I haven't got back to you by 9 open my uni profile" is two
+        # things: a reminder and a routine, as two SCHEDULE: lines. Make every one of them.
+        bodies = [ln.split(":", 1)[1].strip() for ln in raw.splitlines()
+                  if ln.strip().upper().startswith("SCHEDULE:")][:10]
+        msgs = []
+        for body in bodies:
+            msg = _schedule(body)
+            assistant._dbg("[executor]", f"decision=SCHEDULE {body!r} → {msg!r}")
+            msgs.append(msg or "I couldn't work out a time for that — try saying it with a clear time.")
+        return False, " ".join(msgs)
     if upper.startswith("BOARD:"):
         # Several changes in one sentence ("add cards for X, Y and Z") arrive as several BOARD:
         # lines. Board edits are visible and easy to undo, so run them all, in order, stopping at
