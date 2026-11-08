@@ -1,7 +1,26 @@
 """faster-whisper transcriber. Runs locally (CTranslate2 on the CPU; float32 on Apple Silicon)."""
 
+import re
+
 import numpy as np
 from faster_whisper import WhisperModel
+
+
+def _regurgitated(text: str, hotwords: str, run: int = 3) -> bool:
+    """True when the transcript contains ``run``+ words that follow each other IN THE SAME ORDER as
+    the hotword list ("amazon netflix calculator terminal…"). That's Whisper reading back its own
+    biasing prompt on near-silence, not something anyone says, so the whole transcript is dropped."""
+    order = (hotwords or "").lower().split()
+    if len(order) < run:
+        return False
+    pos = {w: i for i, w in enumerate(order)}
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    streak = 1
+    for a, b in zip(words, words[1:]):
+        streak = streak + 1 if (a in pos and b in pos and pos[b] == pos[a] + 1) else 1
+        if streak >= run:
+            return True
+    return False
 
 
 class WhisperTranscriber:
@@ -29,6 +48,8 @@ class WhisperTranscriber:
                                              vad_filter=True, beam_size=self._beam_size,
                                              temperature=0.0, condition_on_previous_text=False)
         text = " ".join(seg.text.strip() for seg in segments).strip()
+        if hotwords and _regurgitated(text, hotwords):
+            return ""
         # "Learn a word" (idea #54): apply the user's speech-correction dictionary to Whisper's output
         # — fix homophones/proper nouns (clawed→Claude) that a frozen model can't be taught directly.
         # Guarded + lazy: any problem (missing store/module) returns the raw transcript unchanged.
