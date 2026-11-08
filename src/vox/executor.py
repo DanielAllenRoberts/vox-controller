@@ -211,9 +211,19 @@ _EDIT_SYSTEM = (
 
 
 def _rewrite(selected: str, instruction: str) -> str:
-    """Apply a rewrite instruction to selected text (used by the EDIT / 'make this pretty' flow)."""
-    return assistant.complete(f"Instruction: {instruction}\n\nText to rewrite:\n{selected}",
-                              system=prompts.get("edit"), brain="small", prompt="edit")
+    """Apply a rewrite instruction to selected text (used by the EDIT / 'make this pretty' flow).
+    Raises RuntimeError when the brain fails, so the caller leaves the user's text alone.
+
+    A long selection gets room to finish: the output is about as long as the input (~4 characters
+    a token, so chars/2 tokens is double headroom), and writing ~2,000 words takes longer than the
+    usual 45 s limit (a 1,700-word essay timed out there, issue f0ff52bd)."""
+    n = len(selected)
+    out = assistant.complete(f"Instruction: {instruction}\n\nText to rewrite:\n{selected}",
+                             system=prompts.get("edit"), brain="small", prompt="edit",
+                             timeout=min(300.0, 45.0 + n / 100), max_tokens=min(32000, max(800, n // 2 + 500)))
+    if assistant.failed(out):
+        raise RuntimeError(out.strip().strip("()"))
+    return out
 
 
 _LOOK_AXTREE_SYSTEM = (

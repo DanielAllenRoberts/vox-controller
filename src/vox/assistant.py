@@ -495,10 +495,41 @@ def _brain(name: str) -> tuple[str, str]:
             _setting("small_brain_model", CONFIG.small_brain_model))
 
 
+# Per-call limits for complete() (seconds to wait, tokens to write), read by the providers. Kept
+# per thread so a long rewrite on one thread can't loosen a quick router call on another.
+_LIMITS = threading.local()
+
+
+def _lim(name: str, default):
+    return getattr(_LIMITS, name, None) or default
+
+
+# What complete() returns when the brain failed rather than answered (the providers return these
+# strings instead of raising, so chat can read them out). Text-producing callers must check this:
+# pasting "(the brain timed out — try again)" over the user's essay is the failure (issue f0ff52bd).
+_FAILED = re.compile(r"^\s*(?:\((?:LLM error|claude SDK error|claude CLI error|the brain timed out|no response)\b"
+                     r"|API Error:|I need (?:your|an) .*key|Claude CLI not found)")
+
+
+def failed(reply: str) -> bool:
+    """True when ``reply`` is one of complete()'s error strings, not an answer."""
+    return bool(_FAILED.match(reply or ""))
+
+
 def complete(text: str, history=None, *, brain: str = "small", system: str | None = None,
-             kind: str = "chat", prompt: str = "") -> str:
+             kind: str = "chat", prompt: str = "", timeout: float | None = None,
+             max_tokens: int | None = None) -> str:
     """One raw completion from the named brain with the given system prompt. Provider-agnostic.
-    `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record."""
+    `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record. `timeout` and
+    `max_tokens` raise the usual 45 s / llm_max_tokens limits for one long job (a big rewrite)."""
+    _LIMITS.timeout, _LIMITS.max_tokens = timeout, max_tokens
+    try:
+        return _complete(text, history, brain, system, kind, prompt)
+    finally:
+        _LIMITS.timeout = _LIMITS.max_tokens = None
+
+
+def _complete(text, history, brain, system, kind, prompt) -> str:
     if system is None:
         from vox import prompts
         system = prompts.system("chat")
@@ -584,8 +615,8 @@ def _anthropic(text, history, model, system, brain="small", kind="chat"):
     try:
         # 45s cap (matches the SDK path) so a stalled request can't freeze the voice loop — the
         # client otherwise defaults to ~10 min. On timeout the SDK raises and we fall through below.
-        resp = _anthropic_client.with_options(timeout=45.0).messages.create(
-            model=model, max_tokens=CONFIG.llm_max_tokens, system=system, messages=msgs)
+        resp = _anthropic_client.with_options(timeout=_lim("timeout", 45.0)).messages.create(
+            model=model, max_tokens=_lim("max_tokens", CONFIG.llm_max_tokens), system=system, messages=msgs)
         _record_usage("anthropic", model, brain, kind,
                       (resp.usage.input_tokens, resp.usage.output_tokens),
                       (time.monotonic() - t0) * 1000)
@@ -628,14 +659,15 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
     try:
         # 45s cap (matches the SDK/anthropic paths) so a stalled remote/local call can't freeze the
         # voice loop — the client otherwise defaults to ~10 min.
-        create = client.with_options(timeout=45.0).chat.completions.create
+        create = client.with_options(timeout=_lim("timeout", 45.0)).chat.completions.create
+        max_tokens = _lim("max_tokens", CONFIG.llm_max_tokens)
         thinking_off = _deepseek_thinking_off(model, brain)
         if label == "chatgpt":
             # OpenAI's current models take max_completion_tokens (not max_tokens), and reasoning
             # models count their hidden thinking against it, so give them room to still answer.
-            resp = create(model=model, max_completion_tokens=max(CONFIG.llm_max_tokens, 4000), messages=msgs)
+            resp = create(model=model, max_completion_tokens=max(max_tokens, 4000), messages=msgs)
         else:
-            resp = create(model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs,
+            resp = create(model=model, max_tokens=max_tokens, messages=msgs,
                           extra_body={"thinking": {"type": "disabled"}} if thinking_off else None)
         out = (resp.choices[0].message.content or "").strip()
         if not out and not thinking_off and resp.choices[0].finish_reason == "length" \
@@ -644,7 +676,7 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
             # usage.jsonl, median 8.3s). Retry once without thinking: ~1s, instead of handing an
             # empty reply to the caller's slower fallback.
             _dbg("[thinking]", f"{model}: reasoning hit max_tokens with no answer — retrying with thinking off")
-            resp = create(model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs,
+            resp = create(model=model, max_tokens=max_tokens, messages=msgs,
                           extra_body={"thinking": {"type": "disabled"}})
             out = (resp.choices[0].message.content or "").strip()
         u = getattr(resp, "usage", None)
@@ -864,7 +896,8 @@ def _claude_sdk(text, history, model, system, brain="big", kind="chat"):
         client = _sdk_pool.take(key, opts)
         if _sdk_pool.recurs(key):
             _sdk_pool.warm(key, opts)  # the next utterance's client starts warming now
-        reply = _sdk_pool.run(asyncio.wait_for(_ask(client), timeout=45), timeout=50) or "(no response)"
+        wait = _lim("timeout", 45.0)
+        reply = _sdk_pool.run(asyncio.wait_for(_ask(client), timeout=wait), timeout=wait + 5) or "(no response)"
         _record_usage("claude_sdk", model, brain, kind, captured.get("usage"),
                       (time.monotonic() - t0) * 1000)
         return reply
@@ -884,7 +917,7 @@ def _claude_cli(text, history, model, system, brain="small", kind="chat"):
     cmd = ["claude", "-p", prompt] + (["--model", model] if model else [])
     t0 = time.monotonic()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=max(90, _lim("timeout", 90)))
         if r.returncode == 0:
             # Subscription CLI doesn't surface tokens here → record with usage None (cost 0).
             _record_usage("claude_cli", model, brain, kind, None, (time.monotonic() - t0) * 1000)

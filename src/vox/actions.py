@@ -1875,7 +1875,10 @@ def edit_selection(transform) -> str:
     selected = selected_text()
     if selected is None:
         return "Highlight some text first, then say it again."
-    new_text = (transform(selected) or "").strip()
+    try:
+        new_text = (transform(selected) or "").strip()
+    except Exception as exc:  # never paste an error over the user's text
+        return f"Couldn't rewrite it ({str(exc)[:120]}). Your text is untouched."
     if not new_text:
         return "The brain returned nothing — left your text as is."
     original = _get_clipboard()
