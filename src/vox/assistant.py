@@ -508,7 +508,16 @@ def _lim(name: str, default):
 # strings instead of raising, so chat can read them out). Text-producing callers must check this:
 # pasting "(the brain timed out — try again)" over the user's essay is the failure (issue f0ff52bd).
 _FAILED = re.compile(r"^\s*(?:\((?:LLM error|claude SDK error|claude CLI error|the brain timed out|no response)\b"
-                     r"|API Error:|I need (?:your|an) .*key|Claude CLI not found)")
+                     r"|API Error:|I need (?:your|an) .*key|Claude CLI not found"
+                     r"|Credit balance is too low|Invalid API key|Not logged in|Please run /login)")
+
+
+# The Claude subscription paths (Agent SDK, `claude -p`) start Claude Code as a child process, which
+# inherits Vox's environment. Since API keys moved into Vox's key store they're in os.environ, and
+# Claude Code prefers ANTHROPIC_API_KEY over the claude.ai login: every "subscription" call was billed
+# to the API account, and when that ran dry the brain answered "Credit balance is too low" (seen
+# live 9 Nov). Hide the key from those children so they use the subscription, as intended.
+SUBSCRIPTION_ENV = {"ANTHROPIC_API_KEY": ""}
 
 
 def failed(reply: str) -> bool:
@@ -845,7 +854,7 @@ def _sdk_options(model, system, brain):
     # user's claude.ai account (Drive, Notion…), and the router sometimes tried to use one ("I'll look
     # up the file in Google Drive" for "reply silently from now on"), slow and wrong (router_eval).
     kw = dict(system_prompt=system, allowed_tools=[], tools=[], setting_sources=[], max_turns=6, model=model,
-              strict_mcp_config=True)
+              strict_mcp_config=True, env=SUBSCRIPTION_ENV)
     if brain == "small" and _setting("small_brain_thinking", CONFIG.small_brain_thinking) != "on":
         kw["thinking"] = ThinkingConfigDisabled(type="disabled")
     return ClaudeAgentOptions(**kw)
@@ -917,7 +926,8 @@ def _claude_cli(text, history, model, system, brain="small", kind="chat"):
     cmd = ["claude", "-p", prompt] + (["--model", model] if model else [])
     t0 = time.monotonic()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=max(90, _lim("timeout", 90)))
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=max(90, _lim("timeout", 90)),
+                           env={**os.environ, **SUBSCRIPTION_ENV})
         if r.returncode == 0:
             # Subscription CLI doesn't surface tokens here → record with usage None (cost 0).
             _record_usage("claude_cli", model, brain, kind, None, (time.monotonic() - t0) * 1000)
@@ -961,7 +971,7 @@ def _sdk_look(question, image_path, model, brain="small"):
     prompt = (f"Read the image file {image_path} — it's a screenshot of the user's Mac. "
               f"Read it once, then answer concisely for text-to-speech (1-2 sentences): {question}")
     opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=12,
-                              permission_mode="bypassPermissions", model=model)
+                              permission_mode="bypassPermissions", model=model, env=SUBSCRIPTION_ENV)
 
     captured = {}
 

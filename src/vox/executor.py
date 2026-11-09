@@ -935,6 +935,11 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         return False, ""
     if not raw:
         return False, assistant.respond(text, history)
+    if assistant.failed(raw):
+        # The brain errored ("Credit balance is too low", a timeout…). Running that text through the
+        # command parser gave "I couldn't map that to something I can do", which hid the real problem.
+        assistant._dbg("[executor]", f"decision=BRAIN FAILED {raw[:80]!r}")
+        return False, f"My brain didn't answer: {raw.strip().strip('()')[:120]}"
     trimmed = _drop_preamble(raw)
     if trimmed != raw:
         assistant._dbg("[executor]", f"dropped a preamble before the directive: {raw[:len(raw) - len(trimmed)].strip()!r}")

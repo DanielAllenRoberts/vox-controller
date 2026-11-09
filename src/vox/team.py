@@ -28,6 +28,7 @@ import threading
 import time
 from pathlib import Path
 
+from vox.assistant import SUBSCRIPTION_ENV
 from vox.paths import DATA_DIR
 
 _STATE = DATA_DIR / "team.json"
@@ -343,7 +344,7 @@ async def _turn(name: str, folder: Path, prompt: str, session_id: str | None) ->
         system_prompt={"type": "preset", "preset": "claude_code",
                        "append": _WORKER_SYSTEM.format(name=name, folder=folder)},
         can_use_tool=_policy(name, folder),
-        max_turns=int(_setting("team_max_turns", 200) or 200))
+        max_turns=int(_setting("team_max_turns", 200) or 200), env=SUBSCRIPTION_ENV)
     last_text, new_session = "", session_id
     async with ClaudeSDKClient(options=opts) as client:
         _clients[name] = client
@@ -536,7 +537,7 @@ def ceo(request: str) -> str:
         from vox import prompts
         system = prompts.system("chat").split("YOUR TASK NOW:")[0] + "YOUR TASK NOW:\n" + _CEO_SYSTEM
         opts = ClaudeAgentOptions(mcp_servers={"team": server}, system_prompt=system, setting_sources=[],
-                                  tools=[], max_turns=12, strict_mcp_config=True,
+                                  tools=[], max_turns=12, strict_mcp_config=True, env=SUBSCRIPTION_ENV,
                                   allowed_tools=["mcp__team__list_agents", "mcp__team__start_agent",
                                                  "mcp__team__message_agent", "mcp__team__stop_agent"])
         said = ""

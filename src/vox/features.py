@@ -161,6 +161,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "Leave Vox listening in a quiet room or with soft background noise. It no longer 'hears' a string of app names ('amazon netflix calculator terminal finder…'); in Activity those lines stop appearing. 'Open Slack' / 'open Terminal' still work as normal.", "code"),
     ("menubar-mic", "Vox.app", "Switch microphone from the menu bar",
      "Click the Vox icon in the menu bar → Microphone: pick another mic (e.g. put AirPods in, open the menu, choose them). It switches straight away, no restart; say 'Hey Vox, can you hear me?' to check. Pick your usual mic to switch back. A mic that won't open is ignored and Vox keeps the one it had.", "code"),
+    ("subscription-brain", "Control", "Commands work on your Claude subscription, and a brain error is said plainly",
+     "With a Claude brain chosen (Settings → Brains), say 'click on the home button' or 'what is two plus two'. It works even if your Anthropic API account has no credit, because the Claude brains run on your Claude subscription, not your API key. If the brain ever fails, Vox says 'My brain didn't answer: …' with the reason, instead of 'I couldn't map that to something I can do'.", "code"),
     ("long-edit-safe", "Control", "Long rewrites finish, and a failure never touches your text",
      "Highlight a long piece of writing (1,500+ words) and say 'fix the punctuation in this, don't change the wording'. It takes longer but finishes and replaces the text. If the brain does fail, Vox says 'Couldn't rewrite it … Your text is untouched' and the highlighted text stays exactly as it was (it used to be replaced by the error).", "code"),
     ("two-schedules", "Control", "A reminder and a follow-up in one sentence",
