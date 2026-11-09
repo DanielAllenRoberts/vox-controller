@@ -380,6 +380,8 @@ def _click_fuzzy(target: str) -> str:
     except Exception:
         items = []
     labels = actions._dedupe([i["label"] for i in items]) or actions.clickable_targets()
+    from vox import mishear
+    mishear.note_labels(labels)
     if not labels:
         return f"I couldn't find a '{target}' to click."
     listing = "\n".join(f"  - {label}" for label in labels)

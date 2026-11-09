@@ -109,7 +109,7 @@ struct Personalities: Codable { var active: String; var presets: [Personality]; 
 
 struct Rule: Codable, Identifiable, Hashable { var id: String; var text: String; var enabled: Bool; var app: String? }
 
-struct VocabEntry: Codable, Identifiable, Hashable { var id: String; var heard: String; var write: String; var enabled: Bool }
+struct VocabEntry: Codable, Identifiable, Hashable { var id: String; var heard: String; var write: String; var enabled: Bool; var learned: Bool? }
 
 struct CommandPhrase: Codable, Identifiable, Hashable { var id: Int; var text: String; var isPrimary: Bool; var matchType: String }
 

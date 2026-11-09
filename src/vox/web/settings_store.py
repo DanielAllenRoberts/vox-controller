@@ -583,6 +583,17 @@ _SCHEMA_META: list[dict] = [
                 "Off = built-in commands only. Applies live — no restart.",
     },
     {
+        "key": "mishear_learning",
+        "default": True,
+        "label": "Learn mis-heard words",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "When two requests fail within a few minutes, Vox looks in the background for a word "
+                "it keeps mishearing (a name on screen written as a sound-alike) and adds the fix to "
+                "Vocabulary, with a bubble saying what it learned. Never changes ordinary English "
+                "words. Applies live.",
+    },
+    {
         "key": "learning_mode",
         "default": "auto",  # matches the code's _setting() fallback
         "label": "Command learning",

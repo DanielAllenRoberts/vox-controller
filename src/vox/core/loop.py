@@ -36,6 +36,11 @@ def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
         working_memory.note("user" if role == "user" else "vox", text)
     except Exception:
         pass
+    try:  # repeated failures → look for a mis-heard word in the background (vox.mishear)
+        from vox import mishear
+        mishear.note_turn(role, text)
+    except Exception:
+        pass
     try:
         from vox.web import conversation
         conversation.record_turn(role, text, brain=brain, kind=kind)

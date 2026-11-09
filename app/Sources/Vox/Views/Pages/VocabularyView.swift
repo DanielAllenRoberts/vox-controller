@@ -178,6 +178,10 @@ private struct VocabRow: View {
                 .labelsHidden().textFieldStyle(.plain)
                 .fontWeight(.medium)
                 .focused($focus, equals: .write)
+            if entry.learned == true {
+                TagChip(tag: "Learned")
+                    .help("Vox learned this on its own after mishearing it more than once. Delete it if it's wrong.")
+            }
             HoverDeleteButton(visible: hovering, help: "Delete Correction", action: onDelete)
             Toggle("Use this correction", isOn: Binding(get: { entry.enabled }, set: onToggle))
                 .labelsHidden().toggleStyle(.vox)
