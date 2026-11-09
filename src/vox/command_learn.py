@@ -358,6 +358,11 @@ def observe(heard: str, intent: str, arg: str | None, *, app: str | None = None,
 
             cmd_id = command_store.promote(conn, cand["id"], reason="threshold")
             _last["command_id"] = cmd_id
+            if _pending is not None and _pending.get("candidate_id") == cand["id"]:
+                # So a "no, that's not what I meant" right after it retires the new command too.
+                # Without this the correction only walked the candidate back and the wrong command
+                # stayed live (seen 9 Nov: 'open cloud' → iCloud Drive, learned and kept).
+                _pending["command_id"] = cmd_id
             _refresh_cache()
             if log:
                 uses = int(_setting("learning_probation_uses", 2))
@@ -474,7 +479,11 @@ def remap_last(intent: str, arg: str | None, log=None) -> str | None:
 
 
 _NEGATIVE = ("no", "nope", "not that", "wrong", "that's wrong", "thats wrong", "undo", "cancel",
-             "stop", "never mind", "nevermind", "not what i meant", "go back")
+             "stop", "never mind", "nevermind", "not what i meant", "not what i wanted",
+             "not what i said", "not it", "go back")
+# Lead-ins people put before a correction: "that's not what I meant", "no, it's not that",
+# "oh no wrong one". Stripped before matching _NEGATIVE, which only matched at the very start.
+_NEG_LEAD = re.compile(r"^(?:(?:oh|uh|um|sorry|no|nope|vox)\s+)*(?:that ?s|that is|it ?s|it is)?\s*")
 
 
 def check_negative(text: str, log=None) -> bool:
@@ -487,7 +496,8 @@ def check_negative(text: str, log=None) -> bool:
         return False
     t = command_store.normalize(text)
     repeated = bool(t) and t == pend["phrase"]
-    if not (repeated or any(t == n or t.startswith(n + " ") for n in _NEGATIVE)):
+    bare = _NEG_LEAD.sub("", t)
+    if not (repeated or any(x == n or x.startswith(n + " ") for x in (t, bare) if x for n in _NEGATIVE)):
         return False
     try:
         conn = command_store.connect()

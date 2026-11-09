@@ -11,6 +11,8 @@ NSScreen uses the BOTTOM-left. Everything here is converted to AX space.
 
 from __future__ import annotations
 
+import re
+
 import time
 
 _AXVALUE_CGPOINT = 1   # kAXValueCGPointType
@@ -107,6 +109,21 @@ def _pick(which: str, ds: list[dict], current: int) -> int | None:
     return next((i for i, d in enumerate(ds) if w and w in d["name"].lower()), None)
 
 
+def _skeleton(word: str) -> str:
+    """Rough sound key: first letter + the consonants after it, doubles collapsed ("cloud" and
+    "Claude" → "cld", "zen" → "zn")."""
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if not w:
+        return ""
+    out = w[0] + re.sub(r"[aeiouyhw]", "", w[1:])
+    return re.sub(r"(.)\1+", r"\1", out)
+
+
+def _sounds_like(heard: str, app: str) -> bool:
+    a, b = _skeleton(heard), _skeleton(app)
+    return len(a) >= 2 and a == b
+
+
 # --- the window ----------------------------------------------------------------------------------
 
 def _window(app: str = ""):
@@ -125,6 +142,14 @@ def _window(app: str = ""):
             if nm.lower().replace("‎", "") == want or (want and want in nm.lower() and ra.activationPolicy() == 0):
                 pid, name = int(ra.processIdentifier()), nm.replace("‎", "")
                 break
+        if pid is None:
+            # A mis-heard app name ("move cloud to my other monitor" with Claude running, 9 Nov):
+            # take the ONE open app that sounds the same rather than giving up.
+            near = [(int(ra.processIdentifier()), str(ra.localizedName() or "").replace("‎", ""))
+                    for ra in NSWorkspace.sharedWorkspace().runningApplications()
+                    if ra.activationPolicy() == 0 and _sounds_like(want, str(ra.localizedName() or ""))]
+            if len(near) == 1:
+                pid, name = near[0]
         if pid is None:
             raise ValueError(f"{app} isn't open.")
     else:
