@@ -269,6 +269,10 @@ _CLICK_PICK_SYSTEM = (
     "is OFTEN MIS-TRANSCRIBED — match by how it SOUNDS, not exact spelling. A word that sounds like a "
     "label is almost certainly that label, even if spelled differently (e.g. 'alec' or 'ellis' → "
     "'Alex Fairbairn', 'get up' → 'github', 'daily report' → 'daily-report').\n"
+    "'My account', 'my email', 'my profile' or 'me' means the USER'S OWN entry: on a sign-in or "
+    "'pick an account' screen that's the account shown by an email address or name. It is never "
+    "'Use another account', 'Add account' or 'Sign out'. If several accounts are listed and nothing "
+    "says which is theirs, reply ASK: <the first one>.\n"
     "Reply with EXACTLY ONE of:\n"
     "• the single best-matching label, copied VERBATIM from the list — when you're reasonably "
     "confident (a clear sound-alike with no rival counts as confident).\n"
@@ -868,6 +872,33 @@ def _observe(heard: str, intent: str, arg: str, *, success: bool) -> None:
         pass
 
 
+def _start_agent(task: str) -> tuple[bool, str]:
+    """Hand ``task`` to the agent tier (it sees the screen and acts, step by step)."""
+    from vox import agent
+    if not _setting("agent_enabled", CONFIG.agent_enabled):
+        assistant._dbg("[executor]", f"decision=AGENT {task!r} → tier disabled")
+        return False, "That needs the agent tier, which is switched off in Vox's settings."
+    if agent.is_running():
+        return False, "I'm already doing something on screen — say stop to cancel it."
+
+    # Runs on a worker thread and speaks its own result when it finishes: a run can take a
+    # minute, and blocking the voice loop here would wedge listening exactly like a dead mic
+    # does. Keeping the loop alive is also what lets "stop" reach agent.abort().
+    def _finished(acted, message):
+        try:
+            from vox import sounds, tts
+            if message == agent.SILENT_DONE:  # a plain action you can see happened → chime, no voice
+                sounds.play(_setting("sound_oneshot", CONFIG.sound_oneshot))
+            elif message:
+                tts.speak(message)
+        except Exception:
+            pass
+
+    agent.run_async(task, on_done=_finished)
+    assistant._dbg("[executor]", f"decision=AGENT {task!r} → started (async)")
+    return True, "On it — say stop or press escape to cancel."
+
+
 def execute(text: str, history=None) -> tuple[bool, str]:
     """Try to fulfil an uncertain command with the small brain.
 
@@ -1078,30 +1109,7 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         assistant._dbg("[executor]", f"decision=APPS {req!r} → {msg!r}")
         return False, msg
     if upper.startswith("AGENT:"):
-        task = raw.split(":", 1)[1].strip()
-        from vox import agent
-        if not _setting("agent_enabled", CONFIG.agent_enabled):
-            assistant._dbg("[executor]", f"decision=AGENT {task!r} → tier disabled")
-            return False, "That needs the agent tier, which is switched off in Vox's settings."
-        if agent.is_running():
-            return False, "I'm already doing something on screen — say stop to cancel it."
-
-        # Runs on a worker thread and speaks its own result when it finishes: a run can take a
-        # minute, and blocking the voice loop here would wedge listening exactly like a dead mic
-        # does. Keeping the loop alive is also what lets "stop" reach agent.abort().
-        def _finished(acted, message):
-            try:
-                from vox import sounds, tts
-                if message == agent.SILENT_DONE:  # a plain action you can see happened → chime, no voice
-                    sounds.play(_setting("sound_oneshot", CONFIG.sound_oneshot))
-                elif message:
-                    tts.speak(message)
-            except Exception:
-                pass
-
-        agent.run_async(task, on_done=_finished)
-        assistant._dbg("[executor]", f"decision=AGENT {task!r} → started (async)")
-        return True, "On it — say stop or press escape to cancel."
+        return _start_agent(raw.split(":", 1)[1].strip())
     if upper.startswith("CLICK:"):
         target = raw.split(":", 1)[1].strip()
         # Everything from here on talks to the app captured BEFORE the round-trip above — the
@@ -1136,8 +1144,15 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         return False, command
     parsed = actions.parse(command)
     if parsed is None:
-        assistant._dbg("[executor]", f"decision=COMMAND {command!r} → no mapping (no-op)")
-        return False, "I couldn't map that to something I can do."
+        # Never dead-end on "I couldn't map that". A request Vox's fixed commands don't cover goes to
+        # the agent tier, which looks at the screen and works it out; if that can't run, ask.
+        if _setting("agent_enabled", CONFIG.agent_enabled):
+            ok, msg = _start_agent(text)
+            if ok:
+                assistant._dbg("[executor]", f"decision=COMMAND {command!r} → no mapping → escalated to AGENT")
+                return ok, msg
+        assistant._dbg("[executor]", f"decision=COMMAND {command!r} → no mapping → asking")
+        return False, f"What did you want me to do? I heard: {text.strip()[:120]}"
     result = actions.handle(command)
     assistant._dbg("[executor]", f"decision=COMMAND {command!r} → actions.handle → {result!r}")
     _observe(text, parsed[0], parsed[1], success=not actions.failed(result))
