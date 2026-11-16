@@ -28,6 +28,7 @@ dependencies = [
     "kokoro-onnx>=0.5.0",
     "pyobjc-framework-avfoundation>=12.2",
     "pyobjc-framework-cocoa>=12.2",
+    "pyobjc-framework-eventkit>=12.2",
 ]
 
 [project.scripts]

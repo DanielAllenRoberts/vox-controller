@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -29,14 +30,47 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..config import CONFIG
+from ..paths import DATA_DIR
 from . import settings_store, usage
 
 # Process start time → uptimeSeconds in /api/status.
 _STARTED_AT = time.monotonic()
+# True only when the voice daemon started us (start_in_background). Standalone `python -m
+# vox.web.server` has no daemon to restart, so /api/restart refuses there.
+_IN_DAEMON = False
+
+
+def _engine_permissions() -> dict:
+    """The engine's OWN view of its privacy permissions. It inherits them from Vox.app, but a
+    process keeps the answer it started with, so after a grant (or an ad-hoc rebuild, which
+    re-identifies the app) the app and the engine can disagree until the engine restarts."""
+    out = {}
+    try:
+        import ctypes
+        lib = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        out["accessibility"] = bool(lib.AXIsProcessTrusted())
+    except Exception:
+        pass
+    try:
+        import Quartz
+        out["screenRecording"] = bool(Quartz.CGPreflightScreenCaptureAccess())
+    except Exception:
+        pass
+    return out
+
+
+def _version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("vox")
+    except Exception:
+        return "dev"
 
 # Built frontend lives at <repo>/dashboard/dist. This file is
 # src/vox/web/server.py → parents[3] is the repo root.
@@ -164,17 +198,511 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # A plain-text or form POST is a CORS "simple request": a browser sends it to localhost from
+    # ANY web page without asking first, so a malicious page could change settings, teach Vox a
+    # command or type into it. Requiring a JSON content type on every state-changing request forces
+    # a preflight, which the CORS policy above refuses for foreign origins. (PATCH/PUT/DELETE always
+    # preflight, but they're held to the same rule for consistency.)
+    @app.middleware("http")
+    async def _json_only_writes(request: Request, call_next):
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/")
+                and "application/json" not in request.headers.get("content-type", "")):
+            return JSONResponse({"ok": False, "error": "expected application/json"}, status_code=415)
+        return await call_next(request)
+
     # --- Status ---
     @app.get("/api/status")
     def get_status() -> dict:
+        from vox import runtime
+        mode, since = runtime.mode() if _IN_DAEMON else ("standalone", time.time())
         return {
             "running": True,
-            "mode": "idle",
+            "mode": mode,
+            "modeSince": since,
+            "paused": runtime.paused,
+            "pid": os.getpid(),
+            "version": _version(),
+            "permissions": _engine_permissions(),
             "smallBrain": _brain("small_brain"),
             "bigBrain": _brain("big_brain"),
             "personality": settings_store.get("personality") or "",
             "uptimeSeconds": round(time.monotonic() - _STARTED_AT, 1),
         }
+
+    @app.post("/api/restart")
+    def post_restart(request: Request) -> dict:
+        """Restart the voice daemon — the same path as saying "restart vox". Answers first and
+        relaunches half a second later, so the browser gets its response before this process exits.
+
+        Requires a JSON content type: a bodyless POST is a CORS "simple request", so without this any
+        web page could fire a hidden form at localhost and restart Vox. A JSON fetch from another
+        origin needs a preflight, which the CORS policy refuses."""
+        if "application/json" not in request.headers.get("content-type", ""):
+            raise HTTPException(status_code=415, detail="expected application/json")
+        if not _IN_DAEMON:
+            raise HTTPException(status_code=409, detail="dashboard is running standalone — no daemon to restart")
+        from ..core import loop
+        print("↻ Restarting Vox (dashboard)…")
+        threading.Timer(0.5, loop.relaunch).start()
+        return {"ok": True}
+
+    # --- Typed input + pause (ideas #68) ---
+    @app.post("/api/say")
+    async def post_say(request: Request):
+        """Feed text to Vox as if it had been spoken: it's heard in whatever mode Vox is in (from
+        idle it runs as a one-shot). Replies arrive on the conversation feed, as they do for speech."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        if not _IN_DAEMON:
+            raise HTTPException(status_code=409, detail="no daemon running to hear it")
+        from vox import runtime
+        if not runtime.submit(str(body.get("text", ""))):
+            raise HTTPException(status_code=400, detail="empty text, or too many queued")
+        return {"ok": True}
+
+    @app.post("/api/ptt")
+    async def post_ptt(request: Request):
+        """Hold-to-talk: {"held": true} while the talk key is down, {"held": false} on release."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime
+        runtime.set_ptt(bool(body.get("held")))
+        return {"ok": True}
+
+    @app.get("/api/changes")
+    def changes() -> dict:
+        """When the board and the reminders last changed (file mtimes, any writer: voice, MCP, app).
+        The app polls this cheaply and reloads a page only when its number moves."""
+        import os
+        from vox.paths import DATA_DIR
+
+        def stamp(*names):
+            best = 0.0
+            for n in names:
+                try:
+                    best = max(best, os.path.getmtime(DATA_DIR / n))
+                except OSError:
+                    pass
+            return best
+        team_files = ["team.json"]
+        try:
+            team_files += [f"team/{f}" for f in os.listdir(DATA_DIR / "team")]
+        except OSError:
+            pass
+        return {"board": stamp("board.db", "board.db-wal"), "reminders": stamp("reminders.json"),
+                "team": stamp(*team_files)}
+
+    # --- Coding agents (vox.team; the Agents page) ---
+    @app.get("/api/team")
+    def team_list() -> dict:
+        from vox import team
+        pend = team.pending_approval()
+        return {"agents": team.status(), "projectsRoot": str(team.projects_root()),
+                "pending": {"agent": pend["agent"], "what": pend["what"]} if pend else None}
+
+    @app.get("/api/team/{name}/log")
+    def team_log(name: str, limit: int = 300) -> dict:
+        from vox import team
+        return {"events": team.transcript(name, limit)}
+
+    @app.post("/api/team")
+    async def team_start(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        folder, task = str(body.get("folder", "")).strip(), str(body.get("task", "")).strip()
+        if not folder or not task:
+            return _bad_request("'folder' and 'task' are required")
+        return {"message": team.start(folder, task, str(body.get("name", "")).strip() or None)}
+
+    @app.post("/api/team/{name}/message")
+    async def team_message(name: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        import asyncio as _aio
+        text = str(body.get("text", "")).strip()
+        if not text:
+            return _bad_request("'text' is required")
+        # Don't hold the request open for the whole turn: the page shows progress from the log.
+        return {"message": await _aio.to_thread(team.message, name, text, 1)}
+
+    @app.post("/api/team/{name}/stop")
+    async def team_stop(name: str, request: Request):
+        _b, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        return {"message": team.stop(name)}
+
+    @app.delete("/api/team/{name}")
+    def team_remove(name: str):
+        from vox import team
+        return {"ok": True} if team.remove(name) else _not_found("agent")
+
+    @app.post("/api/team/approval")
+    async def team_approval(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import team
+        return {"message": team.answer(bool(body.get("allow")), body.get("agent") or None)}
+
+    # --- MCP connections (vox.mcp_servers; Settings → Connections) ---
+    @app.get("/api/mcp")
+    def mcp_list() -> dict:
+        from vox import mcp_servers
+        return {"servers": mcp_servers.servers()}
+
+    @app.post("/api/mcp")
+    async def mcp_add(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import mcp_servers
+        try:
+            args = body.get("args") or []
+            if isinstance(args, str):
+                import shlex
+                args = shlex.split(args)
+            return mcp_servers.add(str(body.get("name", "")), kind=str(body.get("kind", "http")),
+                                   url=str(body.get("url", "")), headers=body.get("headers") or None,
+                                   command=str(body.get("command", "")), args=args, env=body.get("env") or None)
+        except ValueError as exc:
+            return _bad_request(str(exc))
+
+    @app.post("/api/mcp/{name}/test")
+    def mcp_test(name: str) -> dict:
+        """Connect and list the server's tools (can take a few seconds)."""
+        from vox import mcp_servers
+        return mcp_servers.test(name)
+
+    @app.patch("/api/mcp/{name}")
+    async def mcp_patch(name: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import mcp_servers
+        if not mcp_servers.set_enabled(name, bool(body.get("enabled", True))):
+            return _not_found("connection")
+        return {"ok": True}
+
+    @app.delete("/api/mcp/{name}")
+    def mcp_delete(name: str):
+        from vox import mcp_servers
+        return {"ok": True} if mcp_servers.remove(name) else _not_found("connection")
+
+    # --- Spotify account link (vox.spotify) ---
+    @app.get("/api/spotify")
+    def spotify_status() -> dict:
+        from vox import spotify
+        return spotify.status()
+
+    @app.post("/api/spotify/connect")
+    async def spotify_connect(request: Request):
+        """The Spotify login URL for the app to open in the browser."""
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import spotify
+        try:
+            return {"url": spotify.auth_url()}
+        except ValueError as exc:
+            return _bad_request(str(exc))
+
+    @app.get("/api/spotify/callback")
+    def spotify_callback(code: str = "", state: str = "", error: str = ""):
+        """Where Spotify sends the browser after login. A plain page the user can close."""
+        from fastapi.responses import HTMLResponse
+        from vox import spotify
+        if error or not code:
+            msg = f"Spotify didn't link ({error or 'no code'}). Close this tab and press Connect again."
+        else:
+            try:
+                who = spotify.finish_login(code, state)
+                msg = f"Spotify is linked{' as ' + who if who else ''}. You can close this tab."
+            except Exception as exc:
+                msg = f"Spotify didn't link: {exc}. Close this tab and try again."
+        import html
+        return HTMLResponse(f"<!doctype html><meta charset=utf-8><title>Vox</title>"
+                            f"<body style='font:16px -apple-system;padding:48px'><h2>Vox</h2>"
+                            f"<p>{html.escape(msg)}</p></body>")
+
+    @app.post("/api/spotify/disconnect")
+    async def spotify_disconnect(request: Request):
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import spotify
+        spotify.disconnect()
+        return {"ok": True}
+
+    @app.post("/api/stop")
+    async def post_stop(request: Request):
+        """The ⏹ button: stop whatever Vox is doing now (speech, a brain call, an agent run).
+        Listening carries on. Returns what was stopped, e.g. {"stopped": ["speech"]}."""
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime
+        stopped = runtime.request_stop()
+        print(f"⏹ Stop button{': ' + ', '.join(stopped) if stopped else ' (nothing was running)'}", flush=True)
+        return {"ok": True, "stopped": stopped}
+
+    @app.post("/api/listening")
+    async def post_listening(request: Request):
+        """Pause / resume the mic ({"paused": true}). Typed input keeps working while paused."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime
+        runtime.set_paused(bool(body.get("paused")))
+        return {"ok": True, "paused": runtime.paused}
+
+    # --- Setup: API keys + a brain test (used by the app's onboarding) ---
+    def _secret_names() -> list[str]:
+        return sorted({CONFIG.anthropic_key_env, CONFIG.llm_api_key_env, CONFIG.local_ai_key_env,
+                       CONFIG.openai_key_env, "COMPOSIO_API_KEY"})
+
+    @app.get("/api/brain/models")
+    async def brain_models(provider: str = "chatgpt") -> dict:
+        """Models a provider offers, read live (only ChatGPT for now: OpenAI's list for this key)."""
+        if provider != "chatgpt":
+            return {"provider": provider, "models": []}
+        from .. import assistant
+        return {"provider": provider, "models": await asyncio.to_thread(assistant.chatgpt_models)}
+
+    @app.get("/api/secrets")
+    def get_secrets() -> dict:
+        """Which API keys are set. Never returns the values."""
+        return {n: bool(os.environ.get(n)) for n in _secret_names()}
+
+    @app.post("/api/secrets")
+    async def post_secret(request: Request):
+        """Save one API key in Vox's key store (owner-only) and apply it now, no restart needed."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        name, value = str(body.get("name", "")), str(body.get("value", "")).strip()
+        if name not in _secret_names():
+            raise HTTPException(status_code=400, detail=f"unknown key name; expected one of {_secret_names()}")
+        from .. import secrets_store
+        secrets_store.put(name, value)
+        return {"ok": True, "set": bool(value)}
+
+    @app.post("/api/brain/test")
+    async def post_brain_test(request: Request):
+        """One tiny round-trip to a brain, so setup can prove it works and show how fast it is."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        brain = "big" if body.get("brain") == "big" else "small"
+        from .. import assistant
+
+        def call():
+            t0 = time.monotonic()
+            reply = assistant.complete("Are you there?", brain=brain, kind="test",
+                                       system="Reply with exactly the word: ready")
+            return reply, (time.monotonic() - t0) * 1000
+
+        reply, ms = await asyncio.to_thread(call)
+        failed = (not reply) or reply.startswith("(LLM error") or reply.startswith("I need ")
+        return {"ok": not failed, "reply": reply[:300], "ms": round(ms)}
+
+    # --- Agent hooks: "David needs you" (research/agent-messaging.md, feature 1) ---
+    @app.post("/api/agents/event")
+    async def post_agent_event(request: Request):
+        """Receives Claude Code hook events (configure a `type: "http"` hook pointing here). A
+        Notification means an agent is blocked on you (a permission prompt, or idle waiting for
+        input); Vox says which agent, by the name it registered. This works without trusting the
+        model to announce itself."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        event = str(body.get("hook_event_name", ""))
+        how = settings_store.get("agent_alerts") or getattr(CONFIG, "agent_alerts", "bubble")
+        # Empty 204 replies: Claude Code parses a JSON response body as hook *output*.
+        if how == "off" or event not in ("Notification", "Stop"):
+            return Response(status_code=204)
+        if event == "Stop" and not (settings_store.get("agent_done_alerts") or False):
+            return Response(status_code=204)
+        from .. import agents
+        who = agents.name_for(str(body.get("session_id", "")), str(body.get("cwd", ""))) or "An agent"
+        folder = os.path.basename(str(body.get("cwd", "")).rstrip("/"))
+        if event == "Stop":
+            text = f"{who} is done" + (f" in {folder}." if folder and who == "An agent" else ".")
+        else:
+            msg = str(body.get("message", "")).strip()
+            kind = str(body.get("notification_type", ""))
+            if "permission" in (kind + msg).lower():
+                # "Claude needs your permission to use Bash" → "David needs your OK to use Bash"
+                rest = re.sub(r"^claude needs your permission\s*", "", msg, flags=re.I).strip()
+                text = f"{who} needs your OK" + (f" {rest}" if rest else ".")
+            else:
+                text = f"{who} is waiting for you" + (f" in {folder}." if folder else ".")
+        def deliver():
+            try:
+                if how == "speak":
+                    from .. import tts
+                    tts.speak(text)
+                else:
+                    from .. import bubble
+                    bubble.show(text, source=who if who != "An agent" else "")
+            except Exception:
+                pass
+        threading.Thread(target=deliver, daemon=True).start()
+        print(f"🔔 agent alert: {text}")
+        return Response(status_code=204)
+
+    # --- Prompts: every prompt Vox sends, editable by the user (vox/prompts.py) ---
+    @app.get("/api/prompts")
+    def get_prompts() -> list:
+        from .. import prompts
+        return prompts.all_prompts()
+
+    @app.get("/api/prompts/recent")
+    def get_prompts_recent(prompt: str = "", limit: int = 10) -> list:
+        from .. import prompts
+        return prompts.recent(prompt or None, max(1, min(limit, 50)))
+
+    @app.put("/api/prompts/{name}")
+    async def put_prompt(name: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import prompts
+        try:
+            return prompts.put(name, str(body.get("text", "")))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such prompt")
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    @app.delete("/api/prompts/{name}")
+    def reset_prompt(name: str):
+        from .. import prompts
+        try:
+            return prompts.reset(name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such prompt")
+
+    # --- Onboarding: voice previews + get to know you (vox/onboarding.py) ---
+    @app.post("/api/voices/preview")
+    async def post_voice_preview(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import onboarding
+        onboarding.preview(str(body.get("engine", "kokoro")), str(body.get("voice", "")))
+        return {"ok": True}
+
+    @app.get("/api/onboarding/questions")
+    async def get_onboarding_questions() -> dict:
+        from .. import onboarding
+        return await asyncio.to_thread(onboarding.questions)
+
+    @app.post("/api/transcribe")
+    async def post_transcribe(request: Request):
+        """{"audio": <base64 16-bit WAV>} → {"text": ...}. Used to answer setup questions by voice."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        import base64
+        from .. import voice_samples
+        try:
+            audio = voice_samples._decode_wav(base64.b64decode(str(body.get("audio", "")), validate=True))
+            text = await asyncio.to_thread(lambda: voice_samples._get_transcriber().transcribe(audio))
+            return {"text": (text or "").strip()}
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": f"couldn't read that audio ({type(exc).__name__}: {exc})"},
+                                status_code=400)
+
+    @app.post("/api/onboarding/answers")
+    async def post_onboarding_answers(request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import onboarding
+        return {"ok": True, "saved": onboarding.save_answers(body.get("answers") or [])}
+
+    # --- Issues logged by voice (vox/issues.py) ---
+    @app.get("/api/issues")
+    def get_issues() -> list:
+        from .. import issues
+        return issues.all_issues()
+
+    @app.patch("/api/issues/{iid}")
+    async def patch_issue(iid: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import issues
+        try:
+            return issues.set_status(iid, str(body.get("status", "open")), body.get("note"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such issue")
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    # --- Insights → Testing: every feature, how to test it, and the user's verdict (vox/features.py) ---
+    @app.get("/api/features")
+    def get_features() -> list:
+        from .. import features
+        return features.all_features()
+
+    @app.patch("/api/features/{fid}")
+    async def patch_feature(fid: str, request: Request):
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from .. import features
+        try:
+            return features.update(fid, status=body.get("status"), comment=body.get("comment"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="no such feature")
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    # --- Voice Lab: the user's own recordings for testing (vox/voice_samples.py) ---
+    @app.get("/api/samples")
+    def get_samples() -> dict:
+        from .. import voice_samples
+        return {"samples": voice_samples.all_samples(), "prompts": voice_samples.PROMPTS}
+
+    @app.post("/api/samples")
+    async def post_sample(request: Request):
+        """{"audio": <base64 16-bit PCM WAV>, "prompt": str, "category": str}. Transcribes it,
+        names it after what was heard, saves it. Returns the stored entry."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        import base64
+        from .. import voice_samples
+        try:
+            wav = base64.b64decode(str(body.get("audio", "")), validate=True)
+            return await asyncio.to_thread(voice_samples.add, wav, str(body.get("prompt", "")),
+                                           str(body.get("category", "")))
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    @app.get("/api/samples/{sid}/audio")
+    def get_sample_audio(sid: str):
+        from .. import voice_samples
+        path = voice_samples.path_of(sid)
+        if path is None or not path.exists():
+            raise HTTPException(status_code=404, detail="no such recording")
+        return FileResponse(path, media_type="audio/wav")
+
+    @app.delete("/api/samples/{sid}")
+    def delete_sample(sid: str) -> dict:
+        from .. import voice_samples
+        if not voice_samples.remove(sid):
+            raise HTTPException(status_code=404, detail="no such recording")
+        return {"ok": True}
 
     # --- Settings ---
     @app.get("/api/settings")
@@ -378,8 +906,9 @@ def create_app() -> FastAPI:
         text = body.get("text")
         if not isinstance(text, str) or not text.strip():
             return _bad_request("'text' is required and must be a non-empty string")
+        app_name = body.get("app")
         try:
-            return mod.add_rule(text.strip())
+            return mod.add_rule(text.strip(), app=app_name if isinstance(app_name, str) else None)
         except ValueError as exc:
             return _bad_request(str(exc))
         except Exception as exc:
@@ -406,8 +935,11 @@ def create_app() -> FastAPI:
             if not isinstance(enabled, bool):
                 return _bad_request("'enabled' must be a boolean")
             patch["enabled"] = enabled
+        if "app" in body:  # null / "" = everywhere
+            a = body.get("app")
+            patch["app"] = a if isinstance(a, str) else None
         if not patch:
-            return _bad_request("provide at least one of 'text' or 'enabled'")
+            return _bad_request("provide at least one of 'text', 'enabled' or 'app'")
         try:
             updated = mod.update_rule(the_id, **patch)
         except ValueError as exc:
@@ -620,13 +1152,26 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     # --- Workspace board (Trello-like kanban + agent knowledge base; guarded; board_store, idea #51) ---
+    @app.get("/api/boards")
+    def get_boards() -> list:
+        """Every board's id and name (the Board page's switcher)."""
+        try:
+            from vox import board_store
+            conn = board_store.build()
+            try:
+                return [{"id": b["id"], "name": b["name"]} for b in board_store.list_boards(conn)]
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
     @app.get("/api/board")
-    def get_board() -> dict:
+    def get_board(archived: bool = False, board: str = "") -> dict:
         mod = _try_import("board")
         if mod is None:
             return {"id": None, "name": None, "lists": []}
         try:
-            return mod.snapshot()
+            return mod.snapshot(board or None, archived=archived)
         except Exception:  # never 500 a read — degrade to an empty board
             return {"id": None, "name": None, "lists": []}
 
@@ -655,7 +1200,10 @@ def create_app() -> FastAPI:
         if not isinstance(list_name, str) or not list_name.strip():
             return _bad_request("'list' (column name) is required")
         try:
-            return mod.create_card(list_name, title, body.get("body") or "", body.get("tags") or "")
+            card = mod.create_card(list_name, title, body.get("body") or "", body.get("tags") or "")
+            if body.get("due"):
+                card = mod.update_card(card["id"], due=body["due"])
+            return card
         except ValueError as exc:
             return _bad_request(str(exc))
         except Exception as exc:
@@ -671,11 +1219,15 @@ def create_app() -> FastAPI:
             return err
         # Only forward provided fields; at least one must be present.
         patch: dict = {}
-        for key in ("title", "body", "tags"):
+        for key in ("title", "body", "tags", "due", "checklist", "archived"):
             if key in body:
                 patch[key] = body.get(key)
+        if "due" in patch and patch["due"] is None:
+            patch["due"] = ""  # null clears the deadline
         if not patch:
-            return _bad_request("provide at least one of 'title', 'body', or 'tags'")
+            return _bad_request("provide at least one of 'title', 'body', 'tags', 'due', 'checklist' or 'archived'")
+        if "checklist" in patch and not isinstance(patch["checklist"], list):
+            return _bad_request("'checklist' must be a list")
         if "title" in patch and (not isinstance(patch["title"], str) or not patch["title"].strip()):
             return _bad_request("'title' must be a non-empty string")
         try:
@@ -723,6 +1275,30 @@ def create_app() -> FastAPI:
             return _not_found("card")
         return {"ok": True}
 
+    @app.post("/api/board/bulk")
+    async def bulk_board(request: Request):
+        """{"ops": [{"op": "add"|"move"|"delete"|"archive"|"update", …}]} → per-op results."""
+        mod = _try_import("board")
+        if mod is None:
+            return _service_unavailable("board")
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        ops = body.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return _bad_request("'ops' must be a non-empty list")
+        return {"results": mod.bulk(ops[:200])}
+
+    @app.get("/api/board/due")
+    def board_due(days: int = 7) -> list:
+        mod = _try_import("board")
+        if mod is None:
+            return []
+        try:
+            return mod.due(max(0, min(days, 366)))
+        except Exception:
+            return []
+
     @app.post("/api/board/lists")
     async def create_board_list(request: Request):
         mod = _try_import("board")
@@ -761,8 +1337,8 @@ def create_app() -> FastAPI:
         if err is not None:
             return err
         kind = body.get("kind")
-        if kind not in ("timer", "alarm", "reminder"):
-            return _bad_request("'kind' must be one of timer|alarm|reminder")
+        if kind not in ("timer", "alarm", "reminder", "routine"):
+            return _bad_request("'kind' must be one of timer|alarm|reminder|routine")
         fire_at = body.get("fireAt")
         if not isinstance(fire_at, str) or not fire_at.strip():
             return _bad_request("'fireAt' (ISO local datetime) is required")
@@ -784,6 +1360,20 @@ def create_app() -> FastAPI:
         except Exception as exc:
             return _bad_request(f"could not create reminder: {exc}")
         return _job_to_api(job)
+
+    @app.post("/api/reminders/{the_id}/run")
+    async def run_routine(the_id: str, request: Request):
+        """Run a routine now (the Reminders page's Run Now). It speaks as if it had fired."""
+        _body, err = await _json_body(request)
+        if err is not None:
+            return err
+        mod = _try_import_scheduler()
+        job = next((j for j in (mod.list_jobs() if mod else []) if j.get("id") == the_id), None)
+        if job is None:
+            return _not_found("routine")
+        from vox import routines
+        routines.run_in_background(job)
+        return {"ok": True}
 
     @app.delete("/api/reminders/{the_id}")
     def remove_reminder(the_id: str):
@@ -976,6 +1566,12 @@ def create_app() -> FastAPI:
             return {"error": f"could not build MCP config: {exc}"}
 
     # --- Handbook (catalog of voice commands & features) ---
+    @app.get("/api/guide")
+    def get_guide() -> list:
+        """Every feature, what it does and how to use it (Vox.app → Guide)."""
+        from vox import guide
+        return guide.guide()
+
     @app.get("/api/handbook")
     def get_handbook() -> list:
         """A structured reference catalog for the dashboard Handbook page.
@@ -1099,7 +1695,7 @@ def _memory_dir() -> Path:
                     return Path(val).resolve()
             except Exception:
                 pass
-    return (_REPO_ROOT / "data" / "memory").resolve()
+    return (DATA_DIR / "memory").resolve()
 
 
 def _mcp_config() -> dict:
@@ -1626,6 +2222,8 @@ def start_in_background(cfg=CONFIG) -> threading.Thread | None:
     swallowed so the voice daemon keeps running. Reads host/port from ``cfg`` if
     present, else the documented defaults.
     """
+    global _IN_DAEMON
+    _IN_DAEMON = True
     host = getattr(cfg, "dashboard_host", "127.0.0.1")
     port = getattr(cfg, "dashboard_port", 8765)
 

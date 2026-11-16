@@ -143,6 +143,42 @@ def clean_phrase(text: str) -> str:
     return t
 
 
+_MAX_PHRASE_WORDS = 6
+_CORRECTION_RE = re.compile(
+    r"^(?:no|nope|not|wrong|actually|why|what i meant|i meant|i said|that s not|that didn t|"
+    r"it didn t|that wasn t|this is|it s not|stop)\b")
+
+
+def collapse_repeats(phrase: str) -> str:
+    """'open arc open arc' → 'open arc'. Saying it again when nothing happened stacks the phrase."""
+    w = phrase.split()
+    for size in range(1, len(w) // 2 + 1):
+        if len(w) % size == 0 and w[:size] * (len(w) // size) == w:
+            return " ".join(w[:size])
+    return phrase
+
+
+def phrase_quality(phrase: str, intent: str, arg: str | None) -> tuple[bool, str]:
+    """Would this phrase make sense as a saved command? Separate from ``is_learnable`` (which judges
+    the ACTION). In the trial's first weeks the learner saved stutters ('open obsidian open
+    obsidian'), corrections ('no that didn't really work click on the team folder'), a 15-word
+    complaint about CPU load as a way to say 'next song', and phrasings the parser already
+    understands ('click on scheduler'), none of which would ever be used again."""
+    words = phrase.split()
+    if len(words) > _MAX_PHRASE_WORDS:
+        return False, f"{len(words)} words reads as a sentence, not a command"
+    if _CORRECTION_RE.match(phrase):
+        return False, "a correction or complaint, not a command"
+    try:
+        from vox import actions
+        parsed = actions.parse(phrase)
+        if parsed and parsed[0] == intent and command_store.normalize(parsed[1] or "") == command_store.normalize(arg or ""):
+            return False, "Vox already understands this phrasing without learning it"
+    except Exception:
+        pass
+    return True, "ok"
+
+
 def is_learnable(intent: str, arg: str | None, *, confidence: float | None = None) -> tuple[bool, str]:
     """The gate from doc 01. Returns ``(ok, reason)`` — the reason is recorded either way, so
     "why didn't it learn that?" is always answerable."""
@@ -236,9 +272,11 @@ def observe(heard: str, intent: str, arg: str | None, *, app: str | None = None,
         if mode() == "off" or not success:
             return None
         ok, why = is_learnable(intent, arg, confidence=confidence)
-        phrase = clean_phrase(heard)
+        phrase = collapse_repeats(clean_phrase(heard))
         if not phrase:
             return None
+        if ok:
+            ok, why = phrase_quality(phrase, intent, arg)
         conn = command_store.connect()
         try:
             ctx_id = _context_id(conn, app, intent)
@@ -275,6 +313,20 @@ def observe(heard: str, intent: str, arg: str | None, *, app: str | None = None,
                      "app": scoped_app, "context_id": ctx_id,
                      "command_id": existing["id"] if existing else None}
 
+            # A new way of saying an existing command, or words that share nothing with what they did
+            # ("first pause" → pause, a mis-hear), must be heard TWICE before it's kept: on one
+            # sighting it's as likely to be a mis-hearing as a habit.
+            hits = int(cand.get("window_hits") or 0)
+            leap = looks_like_a_leap(phrase, arg or intent)
+            if hits < 2 and (existing is not None or leap):
+                if log:
+                    log(f"  [learn] {phrase!r} → {intent}{'/' + arg if arg else ''} — candidate "
+                        f"#{cand['id']}, waiting for a second sighting "
+                        f"({'alias of #' + str(existing['id']) if existing else 'words differ from the target'}) "
+                        f"[{ctx_label}]")
+                return {"learnable": True, "candidate_id": cand["id"], "would_promote": False,
+                        "bar": "needs a second sighting"}
+
             # An action we already have a command for → the words are a new ALIAS, never a new row.
             if existing is not None:
                 added = command_store.attach_phrase(conn, existing["id"], phrase)
@@ -306,6 +358,11 @@ def observe(heard: str, intent: str, arg: str | None, *, app: str | None = None,
 
             cmd_id = command_store.promote(conn, cand["id"], reason="threshold")
             _last["command_id"] = cmd_id
+            if _pending is not None and _pending.get("candidate_id") == cand["id"]:
+                # So a "no, that's not what I meant" right after it retires the new command too.
+                # Without this the correction only walked the candidate back and the wrong command
+                # stayed live (seen 9 Nov: 'open cloud' → iCloud Drive, learned and kept).
+                _pending["command_id"] = cmd_id
             _refresh_cache()
             if log:
                 uses = int(_setting("learning_probation_uses", 2))
@@ -422,7 +479,11 @@ def remap_last(intent: str, arg: str | None, log=None) -> str | None:
 
 
 _NEGATIVE = ("no", "nope", "not that", "wrong", "that's wrong", "thats wrong", "undo", "cancel",
-             "stop", "never mind", "nevermind", "not what i meant", "go back")
+             "stop", "never mind", "nevermind", "not what i meant", "not what i wanted",
+             "not what i said", "not it", "go back")
+# Lead-ins people put before a correction: "that's not what I meant", "no, it's not that",
+# "oh no wrong one". Stripped before matching _NEGATIVE, which only matched at the very start.
+_NEG_LEAD = re.compile(r"^(?:(?:oh|uh|um|sorry|no|nope|vox)\s+)*(?:that ?s|that is|it ?s|it is)?\s*")
 
 
 def check_negative(text: str, log=None) -> bool:
@@ -435,7 +496,8 @@ def check_negative(text: str, log=None) -> bool:
         return False
     t = command_store.normalize(text)
     repeated = bool(t) and t == pend["phrase"]
-    if not (repeated or any(t == n or t.startswith(n + " ") for n in _NEGATIVE)):
+    bare = _NEG_LEAD.sub("", t)
+    if not (repeated or any(x == n or x.startswith(n + " ") for x in (t, bare) if x for n in _NEGATIVE)):
         return False
     try:
         conn = command_store.connect()

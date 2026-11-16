@@ -16,14 +16,14 @@ any error returns the text unchanged (exactly today's behaviour).
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import json
 import re
 import threading
 import uuid
-from pathlib import Path
 
-# Runtime store lives under data/ (gitignored). This file is src/vox/vocab.py → parents[2] is root.
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "vocab.json"
 
 _LOCK = threading.RLock()
@@ -47,6 +47,7 @@ def _clean(e) -> dict | None:
         "heard": heard,
         "write": write,
         "enabled": bool(e.get("enabled", True)),
+        "learned": bool(e.get("learned", False)),
     }
 
 
@@ -119,7 +120,7 @@ def list_entries() -> list[dict]:
         return [dict(e) for e in _ENTRIES]
 
 
-def add(heard: str, write: str) -> dict:
+def add(heard: str, write: str, *, learned: bool = False) -> dict:
     """Add a correction. Raises ValueError if ``heard`` is blank. ``write`` may be empty (deletes the
     heard word). If ``heard`` already exists (case-insensitive), its ``write`` is updated instead."""
     heard = (heard or "").strip()
@@ -135,7 +136,8 @@ def add(heard: str, write: str) -> dict:
                 _recompile()
                 _save()
                 return dict(e)
-        entry = {"id": uuid.uuid4().hex[:8], "heard": heard, "write": write, "enabled": True}
+        entry = {"id": uuid.uuid4().hex[:8], "heard": heard, "write": write, "enabled": True,
+                 "learned": bool(learned)}
         _ENTRIES.append(entry)
         _recompile()
         _save()

@@ -16,15 +16,15 @@ Public API (CONTRACT): ``SCHEMA`` ; ``get(key)`` ; ``set(key, value)`` ;
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import json
 import threading
-from pathlib import Path
 
 from ..config import CONFIG
 
-# Runtime store lives under data/ (gitignored). This file is
-# src/vox/web/settings_store.py → parents[3] is the repo root.
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+# Runtime store lives under data/ (gitignored) — see vox/paths.py.
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "settings.json"
 
 _LOCK = threading.RLock()
@@ -33,6 +33,7 @@ _PROVIDER_OPTIONS = [
     {"value": "claude_sdk", "label": "Claude (subscription / SDK)"},
     {"value": "anthropic", "label": "Anthropic API"},
     {"value": "openai", "label": "OpenAI-compatible (DeepSeek / Ollama / LM Studio)"},
+    {"value": "chatgpt", "label": "ChatGPT (OpenAI API key)"},
     {"value": "local_ai", "label": "Local AI (your own GPU / endpoint)"},
     {"value": "claude_cli", "label": "Claude CLI"},
 ]
@@ -107,6 +108,19 @@ _SCHEMA_META: list[dict] = [
         "options": _MODEL_OPTIONS,
         "help": "Model for the big brain — pick one that matches the provider above. Applies on the "
                 "next reply. (Need a model not listed? Set big_brain_model in config.py.)",
+    },
+    {
+        "key": "small_brain_thinking",
+        "label": "Small brain thinking",
+        "group": "Brains",
+        "type": "select",
+        "options": [
+            {"value": "off", "label": "Off: fastest (about 1s)"},
+            {"value": "on", "label": "On: more careful with vague requests (2-5s)"},
+        ],
+        "help": "DeepSeek and Claude can think silently before answering. Off answers plain commands "
+                "just as well in about half the time; on asks more often when it isn't sure. Applies "
+                "on the next reply.",
     },
     {
         "key": "escalate_to_big_brain",
@@ -186,8 +200,9 @@ _SCHEMA_META: list[dict] = [
         "label": "Agent step limit",
         "group": "Behavior",
         "type": "number",
-        "help": "Hard cap on how many actions one agent run may take before it gives up. Lower is "
-                "safer and cheaper; each step costs a screenshot.",
+        "help": "Safety cap on how many actions one agent run may take (default 50). It stops a "
+                "runaway, not a long task. Each step costs a screenshot (about 3 US cents); runs "
+                "also stop after 10 minutes, and the ⏹ button stops one at any time.",
     },
     {
         "key": "agent_effort",
@@ -219,6 +234,45 @@ _SCHEMA_META: list[dict] = [
         "group": "Behavior",
         "type": "toggle",
         "help": "A long pause auto-exits dictation so it can't get stuck.",
+    },
+    {
+        "key": "auto_dictation",
+        "label": "Type automatically in text fields",
+        "group": "Behavior",
+        "type": "toggle",
+        "help": "In control mode, when you're in a text box, Vox types what you say unless the "
+                "whole thing is a command (like \"next tab\"), so you don't need \"start typing\". "
+                "Commands that could lose your text (close tab, reload) need \"Vox, …\" first or "
+                "a yes. Say \"scratch that\" to remove the last bit typed, or \"that was a "
+                "command\" to run it instead. Never types into password fields. Applies live.",
+    },
+    {
+        "key": "reminders_wait_for_you",
+        "label": "Reminders wait until you're back",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "If a reminder or routine comes due while you're away (screen locked, or no typing, "
+                "mouse or talking to Vox for a few minutes), Vox holds it and says it when you're "
+                "back. Alarms and timers always go off on time.",
+    },
+    {
+        "key": "reminder_away_minutes",
+        "label": "Away after (minutes)",
+        "group": "Behavior",
+        "type": "number",
+        "default": 5,
+        "help": "How long without any input before you count as away.",
+    },
+    {
+        "key": "memory_dream",
+        "label": "Tidy memory overnight",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "Once a day (after 3 a.m., or when the Mac next wakes) Vox reads what you said over "
+                "the last day and keeps any lasting facts about you it missed, updating ones that "
+                "changed. One quick brain call a day; stays on this Mac.",
     },
     {
         "key": "memory_autocapture",
@@ -312,6 +366,23 @@ _SCHEMA_META: list[dict] = [
         "type": "text",
         "help": "Decimal seconds: captured audio must be at least this long to count as a barge-in. Applies live.",
     },
+    {
+        "key": "idle_speech_gate",
+        "label": "Idle speech gate",
+        "group": "Voice",
+        "type": "toggle",
+        "help": "While idle, only transcribe a sound if it contains real speech, so a door, a cough or a "
+                "lone 'uh' doesn't cost a full Whisper pass. Saves CPU; if Vox starts missing 'Hey Vox', "
+                "turn it off or lower the minimum below. Applies live.",
+    },
+    {
+        "key": "idle_speech_gate_ms",
+        "label": "Idle speech gate minimum (ms)",
+        "group": "Voice",
+        "type": "number",
+        "help": "How many milliseconds of speech an idle sound needs before Vox transcribes it. Wake "
+                "phrases measured 220 ms or more in testing; 150 is the default. Applies live.",
+    },
     # --- MCP voice --- the vox-speak MCP heads-up voice, kept separate from the system voice
     # above so the IDE assistant sounds different from Vox. Reload the MCP server in your editor
     # to pick up changes (it reads these at speak-time).
@@ -363,7 +434,7 @@ _SCHEMA_META: list[dict] = [
         "type": "select",
         "options_source": "input_devices",
         "options": [{"value": "", "label": "System default"}],
-        "help": "Which microphone Vox listens to. The list is read live from your Mac, so plugging in a new device and reloading this page shows it. Devices are saved by NAME, not index, so it survives unplugging something else. Restart the daemon to apply — the mic stream is opened once at startup.",
+        "help": "Which microphone Vox listens to. The list is read live from your Mac, so plugging in a new device and reloading this page shows it. Devices are saved by NAME, not index, so it survives unplugging something else. Applies straight away; if the chosen mic won't open, Vox keeps the one it had.",
     },
     # --- Notifications (the silent sibling of the speak MCP) ---
     {
@@ -392,6 +463,84 @@ _SCHEMA_META: list[dict] = [
         "group": "Notifications",
         "type": "number",
         "help": "Width of the notification card. Its height grows to fit the wrapped message.",
+    },
+    {
+        "key": "team_projects_root",
+        "label": "Projects folder",
+        "group": "Behavior",
+        "type": "text",
+        "default": "~/Repos",
+        "help": "Where your project folders live. 'Start an agent in the getprice folder' looks for it "
+                "here (up to three levels down).",
+    },
+    {
+        "key": "team_speak_updates",
+        "label": "Agents speak their updates",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "Coding agents say when they finish or need you (a bubble shows either way).",
+    },
+    {
+        "key": "spotify_client_id",
+        "label": "Spotify Client ID",
+        "group": "Behavior",
+        "type": "text",
+        "help": "From your free app at developer.spotify.com (Settings → General → Spotify explains it).",
+    },
+    {
+        "key": "blocked_apps",
+        "label": "Apps Vox won't open",
+        "group": "Behavior",
+        "type": "text",
+        "help": "Comma-separated apps or sites Vox won't open or switch to, whoever asks (you, a saved "
+                "command or the brain). Managed on the Commands page.",
+    },
+    {
+        "key": "home_location",
+        "label": "Home location",
+        "group": "Behavior",
+        "type": "text",
+        "help": "Where you are, for \"what's the weather?\" with no place named. Empty uses the city in "
+                "your Mac's time zone.",
+    },
+    {
+        "key": "fast_wake",
+        "label": "Fast wake",
+        "group": "Voice",
+        "type": "toggle",
+        "help": "Recognise \"Hey Vox\" and the other wake phrases with a tiny recogniser first, so "
+                "Vox wakes about half a second sooner. Anything it isn't sure of still goes through "
+                "full transcription. Applies live.",
+    },
+    {
+        "key": "idle_wake_precheck",
+        "label": "Quick wake-word check while idle",
+        "group": "Voice",
+        "type": "toggle",
+        "help": "While idle, listen for the wake word with a tiny recogniser before running full "
+                "transcription. Saves most idle CPU in a talkative room, but may miss a fast "
+                "'Vox, open …'. Applies live.",
+    },
+    {
+        "key": "agent_alerts",
+        "label": "Agent alerts",
+        "group": "Notifications",
+        "type": "select",
+        "options": [
+            {"value": "bubble", "label": "Show a bubble"},
+            {"value": "speak", "label": "Say it out loud"},
+            {"value": "off", "label": "Off"},
+        ],
+        "help": "When a Claude Code agent is waiting for you (a permission prompt, or idle), say which "
+                "one. Needs the Vox hook in Claude Code's settings; see mcp/README.md.",
+    },
+    {
+        "key": "agent_done_alerts",
+        "label": "Also tell me when an agent finishes",
+        "group": "Notifications",
+        "type": "toggle",
+        "help": "Announce every time an agent finishes a turn. Chatty with several agents running.",
     },
     {
         "key": "speech_queue_enabled",
@@ -432,6 +581,17 @@ _SCHEMA_META: list[dict] = [
         "help": "Resolve voice commands from the per-app command database (in front of the built-in "
                 "parser), so the same words can do different things depending on the focused app. "
                 "Off = built-in commands only. Applies live — no restart.",
+    },
+    {
+        "key": "mishear_learning",
+        "default": True,
+        "label": "Learn mis-heard words",
+        "group": "Commands",
+        "type": "toggle",
+        "help": "When two requests fail within a few minutes, Vox looks in the background for a word "
+                "it keeps mishearing (a name on screen written as a sound-alike) and adds the fix to "
+                "Vocabulary, with a bubble saying what it learned. Never changes ordinary English "
+                "words. Applies live.",
     },
     {
         "key": "learning_mode",
@@ -647,6 +807,12 @@ def set(key: str, value) -> dict:  # noqa: A001 - matches the contract's API nam
         overrides = _load_overrides()
         overrides[key] = coerced
         _save_overrides(overrides)
+    if key == "input_device":   # switch the mic now (menu bar picker), not at the next restart
+        try:
+            from ..audio import apply_input_device
+            apply_input_device(coerced)
+        except Exception:
+            pass
     return {"ok": True, "value": coerced}
 
 

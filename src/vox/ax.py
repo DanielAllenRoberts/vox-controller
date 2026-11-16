@@ -77,6 +77,8 @@ def _load():
                 # AXValueType=I(uint32), out=pointer to a 2-double struct. CGPoint and CGSize share
                 # that {dd} layout, so one binding extracts both (fields read as .x/.y either way).
                 ("AXValueGetValue", b"C@Io^{CGPoint=dd}"),
+                ("AXUIElementCreateSystemWide", b"@"),
+                ("AXUIElementGetPid", b"i@o^i"),
             ])
         except Exception:
             _FNS = {}
@@ -102,6 +104,31 @@ def frontmost():
         from AppKit import NSWorkspace
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
         return (app.processIdentifier(), app.localizedName() or "") if app else None
+    except Exception:
+        return None
+
+
+def focused_app():
+    """(pid, name) of the focused app via the AX system-wide element, in-process. None on failure.
+
+    Unlike ``frontmost()`` this is a live query to the accessibility server, not a KVO property
+    waiting on a run loop, so it should not go stale in the daemon (issue O18). ``focus_watch``
+    still cross-checks it against System Events and drops it if it ever lags. The name is the
+    executable's, which is what System Events reports (``zen``, not ``Zen``; no hidden U+200E as
+    in ``localizedName`` for WhatsApp): it matched for all 130 processes checked, so command-DB
+    per-app keys stay the same."""
+    fns = _load()
+    if not fns or "AXUIElementCreateSystemWide" not in fns:
+        return None
+    try:
+        from AppKit import NSRunningApplication
+        app = _attr(fns, fns["AXUIElementCreateSystemWide"](), "AXFocusedApplication")
+        if app is None:
+            return None
+        err, pid = fns["AXUIElementGetPid"](app, None)
+        ra = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid) if err == 0 else None
+        exe = ra.executableURL() if ra is not None else None
+        return (int(pid), str(exe.lastPathComponent())) if exe is not None else None
     except Exception:
         return None
 
@@ -197,12 +224,23 @@ def _has_press(fns, el):
 
 def _label_of(fns, el, role):
     """A display label for a listable element: title → description → placeholder, else "text box" for
-    an unlabelled input (so an empty Slack/YouTube box still gets a badge). None if nothing usable."""
+    an unlabelled input (so an empty Slack/YouTube box still gets a badge). None if nothing usable.
+    Static text keeps its words in AXValue, not AXTitle: without reading it, a sidebar row whose
+    only label is its text ("Memory" in Vox.app, folders in Finder/Mail/Notes) had no name at all."""
     for attr in ("AXTitle", "AXDescription", "AXPlaceholderValue"):
         nm = _attr(fns, el, attr)
         if isinstance(nm, str) and nm.strip():
             return nm.strip()
+    if role == "AXStaticText":
+        v = _attr(fns, el, "AXValue")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return "text box" if role in _TEXT_INPUT_ROLES else None
+
+
+def _name_of(fns, el):
+    """The name to match a spoken target against (same rule as ``_label_of``, any role)."""
+    return _label_of(fns, el, _attr(fns, el, "AXRole") or "")
 
 
 def _app_root(fns, settle: float | None = None):
@@ -257,22 +295,163 @@ def _has_windows(fns, app) -> bool:
         return True  # unknown → don't trigger a retry on a guess
 
 
+_ROW_ROLES = {"AXRow", "AXCell"}
+
+
 def _pressable(fns, el, chain):
-    """`el` if it supports AXPress, else the nearest ancestor (deepest first) that does, else None.
-    The matching label is often an AXStaticText with no AXPress — the row/group around it has it."""
+    """`el` if it supports AXPress, else the nearest ancestor (deepest first) that does, else the
+    nearest list row, else None. The matching label is often an AXStaticText with no AXPress; the
+    row/group around it has it. Sidebar and list rows (SwiftUI/AppKit outlines: Vox.app's own
+    sidebar, Finder, Mail, Notes, System Settings) have no AXPress at all; they're selected by a
+    click, which the callers perform at the element's frame, with AXSelected as the fallback."""
     if _has_press(fns, el):
         return el
     for anc in reversed(chain):
         if _has_press(fns, anc):
             return anc
+    for anc in reversed(chain):
+        if _attr(fns, anc, "AXRole") in _ROW_ROLES:
+            return anc
     return None
 
 
-def click(target: str):
+def _press(fns, el) -> bool:
+    """AXPress, or select it if it's a list row (rows don't support AXPress)."""
+    try:
+        if fns["AXUIElementPerformAction"](el, "AXPress") == 0:
+            return True
+    except Exception:
+        pass
+    if _attr(fns, el, "AXRole") in _ROW_ROLES:
+        try:
+            return fns["AXUIElementSetAttributeValue"](el, "AXSelected", True) == 0
+        except Exception:
+            return False
+    return False
+
+
+# --- the menu bar: every command an app has, with its keyboard shortcut ----------------------------
+# "Refresh the page", "export as PDF", "reopen the closed tab": the app's own menus already name these
+# commands and their shortcuts, so Vox can choose the menu item instead of guessing a key combo.
+
+_MENU_MODS = ((1, "shift"), (2, "option"), (4, "control"))  # AXMenuItemCmdModifiers bits; 8 = no ⌘
+
+
+def _shortcut(fns, item) -> str:
+    char = _attr(fns, item, "AXMenuItemCmdChar")
+    if not isinstance(char, str) or not char.strip():
+        return ""
+    mods = _attr(fns, item, "AXMenuItemCmdModifiers") or 0
+    try:
+        mods = int(mods)
+    except (TypeError, ValueError):
+        mods = 0
+    parts = [] if mods & 8 else ["cmd"]
+    parts += [name for bit, name in _MENU_MODS if mods & bit]
+    return "+".join(parts + [char.strip().lower()])
+
+
+def menu_items(pid=None, limit: int = 600) -> list[dict]:
+    """The app's menu commands: [{"menu": "View", "title": "Reload Page", "shortcut": "cmd+r",
+    "enabled": True, "_el": <AX element>}], one submenu level deep. Reading needs no focus change.
+    Empty when AX is unavailable."""
+    fns = _load()
+    if not fns:
+        return []
+    pid = pid or _target_pid()
+    if not pid:
+        return []
+    app = fns["AXUIElementCreateApplication"](pid)
+    bar = _attr(fns, app, "AXMenuBar")
+    out: list[dict] = []
+
+    def walk(menu_el, path: str, depth: int):
+        for menu in (_attr(fns, menu_el, "AXChildren") or []):          # the AXMenu under a bar item
+            for item in (_attr(fns, menu, "AXChildren") or []):
+                if len(out) >= limit:
+                    return
+                title = _attr(fns, item, "AXTitle")
+                if not isinstance(title, str) or not title.strip():
+                    continue                                              # separators
+                kids = _attr(fns, item, "AXChildren") or []
+                if kids and depth < 2:
+                    walk(item, f"{path} > {title.strip()}", depth + 1)
+                    continue
+                out.append({"menu": path, "title": title.strip(), "shortcut": _shortcut(fns, item),
+                            "enabled": _attr(fns, item, "AXEnabled") is not False, "_el": item})
+
+    for top in (_attr(fns, bar, "AXChildren") or [])[1:]:                # [0] is the Apple menu
+        name = _attr(fns, top, "AXTitle")
+        if isinstance(name, str) and name.strip():
+            walk(top, name.strip(), 1)
+    return out
+
+
+def _menu_norm(s: str) -> str:
+    """Lowercase words without punctuation, plurals folded ("Tabs" matches "tab")."""
+    import re as _re
+    words = _re.sub(r"[^a-z0-9 ]+", "", s.lower().replace("…", "").replace("...", "")).split()
+    return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words)
+
+
+def find_menu_item(target: str, items: list[dict] | None = None) -> dict | None:
+    """The menu command matching `target`: the exact title, else a title containing every word of
+    the target ("developer tools" → "Web Developer Tools"), else a target containing every word of
+    the title ("zoom in please" → "Zoom In"). Nothing looser: "show sidebar" must not choose
+    "Show All". Shorter titles and enabled items win ties; the first menu wins after that."""
+    items = menu_items() if items is None else items
+    want = _menu_norm(target)
+    if not want or not items:
+        return None
+    words = set(want.split())
+    best, best_score = None, 0.0
+    for it in items:
+        t = _menu_norm(it["title"])
+        if not t:
+            continue
+        tw = set(t.split())
+        if t == want:
+            score = 3.0
+        elif words <= tw:
+            score = 2.0 + len(words) / len(tw)
+        elif tw <= words and len(tw) >= max(2, len(words) - 1):
+            score = 1.0 + len(tw) / len(words)
+        else:
+            continue
+        score += 0.1 if it["enabled"] else 0.0
+        if score > best_score:
+            best, best_score = it, score
+    return best
+
+
+def press_menu(target: str):
+    """Choose the menu command matching `target` in the target app. Returns (status, item) with
+    status "pressed" / "disabled" / "not_found" / "press_failed", or None without AX."""
+    fns = _load()
+    if not fns:
+        return None
+    item = find_menu_item(target)
+    if item is None:
+        return ("not_found", None)
+    if not item["enabled"]:
+        return ("disabled", item)
+    try:
+        ok = fns["AXUIElementPerformAction"](item["_el"], "AXPress") == 0
+    except Exception:
+        ok = False
+    return ("pressed" if ok else "press_failed", item)
+
+
+def click(target: str, ask_if_ambiguous: bool = False):
     """Find a control labelled `target` in the target app and AXPress the nearest pressable element.
     Returns ("clicked", label) / ("not_found", None) / ("press_failed", label) /
     ("focus_changed", app_now), or None if native AX is unavailable (caller should fall back to
     AppleScript). Exact label wins over a substring match.
+
+    ``ask_if_ambiguous``: keep walking past the first exact match, and if a second, separate control
+    carries the same label return ("ambiguous", label) WITHOUT pressing anything — the caller numbers
+    the matches and lets the user pick (Apple Voice Control does this for "Click Options" with three
+    Options buttons). Costs at most a full walk, i.e. what a miss already costs.
 
     The app searched is the pinned one when a caller has pinned it (``pinned_to``), and the press is
     refused if that app stopped being frontmost while we were walking its tree — see ``_focus_moved``
@@ -286,21 +465,30 @@ def click(target: str):
     tl = (target or "").strip().lower()
     if not tl:
         return ("not_found", None)
-    found = {"exact": None, "fallback": None, "n": 0}
+    found = {"exact": None, "fallback": None, "n": 0, "frame": None, "dupe": False}
+
+    def done():
+        return (found["exact"] is not None and tangible(found["frame"])
+                and (not ask_if_ambiguous or found["dupe"]))
 
     def walk(el, depth, chain):
-        if found["exact"] or depth > _MAX_DEPTH or found["n"] > _BUDGET:
+        if done() or depth > _MAX_DEPTH or found["n"] > _BUDGET:
             return
         found["n"] += 1
-        nm = _attr(fns, el, "AXTitle")
-        if not (isinstance(nm, str) and nm.strip()):
-            nm = _attr(fns, el, "AXDescription")
+        nm = _name_of(fns, el)
         if isinstance(nm, str) and nm.strip():
             low = nm.strip().lower()
             if low == tl:
                 pe = _pressable(fns, el, chain)
                 if pe is not None:
-                    found["exact"] = (pe, el, nm.strip())  # keep the labelled el for its frame
+                    fr = _frame(fns, el)
+                    if found["exact"] is None or (not tangible(found["frame"]) and tangible(fr)):
+                        # keep the labelled el for its frame. A 1-px sliver (a sticky header
+                        # clipped to nothing — Slack has these) gives way to a real one later on.
+                        found["exact"] = (pe, el, nm.strip())
+                        found["frame"] = fr
+                    elif tangible(fr) and not overlaps(found["frame"], fr):
+                        found["dupe"] = True  # a second, separate control with the same label
                     return
             elif found["fallback"] is None and tl in low:
                 pe = _pressable(fns, el, chain)
@@ -310,13 +498,15 @@ def click(target: str):
         child_chain = chain + [el]
         for k in kids:
             walk(k, depth + 1, child_chain)
-            if found["exact"]:
+            if done():
                 return
 
     try:
         walk(root, 0, [])
     except Exception:
         return None
+    if found["dupe"]:
+        return ("ambiguous", found["exact"][2])
     hit = found["exact"] or found["fallback"]
     if hit is None:
         return ("not_found", None)
@@ -339,11 +529,7 @@ def click(target: str):
             return ("clicked", label)
         except Exception:
             pass
-    try:
-        err = fns["AXUIElementPerformAction"](press_el, "AXPress")
-    except Exception:
-        return ("press_failed", label)
-    return ("clicked", label) if err == 0 else ("press_failed", label)
+    return ("clicked", label) if _press(fns, press_el) else ("press_failed", label)
 
 
 def targets(limit: int = 60):
@@ -357,12 +543,12 @@ def targets(limit: int = 60):
         return None
     out, seen, n = [], set(), [0]
 
-    def walk(el, depth):
+    def walk(el, depth, in_row=False):
         if len(out) >= limit or depth > _MAX_DEPTH or n[0] > _BUDGET:
             return
         n[0] += 1
         role = _attr(fns, el, "AXRole")
-        if role in _CLICKABLE_ROLES:
+        if role in _CLICKABLE_ROLES and (role != "AXStaticText" or in_row or _has_press(fns, el)):
             nm = _label_of(fns, el, role)
             if nm and len(nm) < 60 and nm not in seen:
                 seen.add(nm)
@@ -370,7 +556,7 @@ def targets(limit: int = 60):
         for k in (_attr(fns, el, "AXChildren") or []):
             if len(out) >= limit:
                 break
-            walk(k, depth + 1)
+            walk(k, depth + 1, in_row or role in _ROW_ROLES)
 
     try:
         walk(root, 0)
@@ -403,6 +589,21 @@ def _axpair(fns, axval, type_const):
         return (float(pt.x), float(pt.y)) if ok else None
     except Exception:
         return None
+
+
+def overlaps(a, b) -> bool:
+    """Do two (x, y, w, h) frames overlap? A missing frame counts as overlapping, so an element we
+    can't place is never treated as a separate second match (that would show a pointless chooser)."""
+    if a is None or b is None:
+        return True
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def tangible(frame) -> bool:
+    """Big enough to be something a person sees and means. Slack keeps clipped sticky headers in
+    the tree at 1 px tall; counting those turned one "Jump to date" into two. A missing frame is
+    given the benefit of the doubt (AXPress still works on it)."""
+    return frame is None or (frame[2] >= 4 and frame[3] >= 4)
 
 
 def _frame(fns, el):
@@ -554,11 +755,7 @@ def click_index(i: int):
             pass  # coordinate click failed → fall back to AXPress
     if fns is None:
         return None
-    try:
-        err = fns["AXUIElementPerformAction"](press_el, "AXPress")
-    except Exception:
-        return ("press_failed", label)
-    return ("clicked", label) if err == 0 else ("press_failed", label)
+    return ("clicked", label) if _press(fns, press_el) else ("press_failed", label)
 
 
 # --- CLI: try the numbered-click engine before it's wired to voice/overlay (idea #52) ------------
@@ -628,9 +825,7 @@ def _find_labelled(fns, root, target: str, roles=None):
         found["n"] += 1
         role = _attr(fns, el, "AXRole") or ""
         if roles is None or role in roles:
-            nm = _attr(fns, el, "AXTitle")
-            if not (isinstance(nm, str) and nm.strip()):
-                nm = _attr(fns, el, "AXDescription")
+            nm = _label_of(fns, el, role)
             if isinstance(nm, str) and nm.strip():
                 low = nm.strip().lower()
                 if low == tl:
@@ -751,3 +946,175 @@ def frame_index(i: int):
         return None
     _press_el, label, frame = _LAST_TARGETS[i]
     return (label, frame) if frame is not None else None
+
+
+# --- focused text field probe (auto dictation, research/command-vs-dictation.md L2) --------------
+# Auto dictation types whatever isn't a command — but only where typing can land. Dragon opens its
+# Dictation Box and Wispr sends to a notification when no editable box has focus; Vox falls back to
+# plain control mode. So the one question asked per utterance is "is the focused element a text
+# field, and is it NOT a password field?". It must be cheap (it runs before every utterance is
+# routed) and it must fail SAFE: any doubt → not editable → control mode exactly as today.
+
+_FOCUS_FNS = None            # extra bindings the probe needs, loaded once ({} if unavailable)
+_FOCUS_CACHE = (0.0, None)   # (monotonic time, last result) — one read serves one utterance
+_FOCUS_TTL = 0.25            # seconds; long enough to share a read within an utterance, no longer
+_focus_enabled_pids = set()  # pids we've asked to expose their Electron web tree (see below)
+_PEEK_CHARS = 200            # how much text before the cursor to hand back
+_PEEK_MAX_DOC = 50_000       # don't copy AXValue out of a huge document just to peek at it
+_AXVALUE_CFRANGE = 4         # kAXValueCFRangeType
+
+
+def _focus_fns():
+    """Bindings only the probe needs, kept out of ``_load`` so a failure here can't take clicking
+    down with it. AXValueGetValue is bound AGAIN with a CFRange signature in its own dict: the main
+    binding is typed for the 2-double CGPoint/CGSize struct and would misread a 2-long CFRange."""
+    global _FOCUS_FNS
+    if _FOCUS_FNS is None:
+        _FOCUS_FNS = {}
+        try:
+            import objc
+            from Foundation import NSBundle
+            bundle = NSBundle.bundleWithPath_(
+                "/System/Library/Frameworks/ApplicationServices.framework")
+            objc.loadBundleFunctions(bundle, _FOCUS_FNS, [
+                ("AXUIElementIsAttributeSettable", b"i@@o^C"),
+                ("AXValueGetValue", b"C@Io^{CFRange=qq}"),
+            ])
+        except Exception:
+            _FOCUS_FNS = {}
+    return _FOCUS_FNS
+
+
+def _expose_web_tree(fns, pid) -> None:
+    """Electron hides its web-content tree (Slack's composer included) until an assistive client
+    asks, and until then the focused element reads as the bare window or web area. Ask once per pid;
+    no settle wait — the first probe in a fresh app may miss (→ control mode, the safe side) and
+    every probe after it sees the real field."""
+    if not pid or pid in _focus_enabled_pids:
+        return
+    _focus_enabled_pids.add(pid)
+    try:
+        fns["AXUIElementSetAttributeValue"](fns["AXUIElementCreateApplication"](pid),
+                                            "AXManualAccessibility", True)
+    except Exception:
+        pass
+
+
+def _focused_element(fns):
+    """(element, pid) of the focused UI element, or (None, None).
+
+    The system-wide element is the direct question, but it answers kAXErrorCannotComplete (-25204)
+    often enough to need a fallback (measured: every time while the login window was frontmost).
+    The fallback asks the focused APP for its focused element; the app comes from the focus watcher
+    (System-Events-verified, at most one poll old) rather than NSWorkspace, which goes stale in this
+    run-loop-less daemon (issue O18)."""
+    try:
+        el = _attr(fns, fns["AXUIElementCreateSystemWide"](), "AXFocusedUIElement")
+    except Exception:
+        el = None
+    if el is not None:
+        try:
+            err, p = fns["AXUIElementGetPid"](el, None)
+            pid = int(p) if err == 0 else None
+        except Exception:
+            pid = None
+        _expose_web_tree(fns, pid)
+        return el, pid
+    try:
+        from vox import focus_watch
+        last = focus_watch.last()
+    except Exception:
+        last = None
+    p = last or focused_app() or frontmost()
+    if not p:
+        return None, None
+    pid = int(p[0])
+    _expose_web_tree(fns, pid)
+    try:
+        app = fns["AXUIElementCreateApplication"](pid)
+    except Exception:
+        return None, None
+    return _attr(fns, app, "AXFocusedUIElement"), pid
+
+
+def _text_before_cursor(fns, extra, el):
+    """Up to _PEEK_CHARS of the field's text before the insertion point, or None when it can't be
+    read (no AXValue, no selection range, a huge document). Used to pick the leading space and the
+    capital letter from what's ACTUALLY in the field — better than remembering what we typed, which
+    is blind to clicks, keyboard typing and commands in between (Talon peeks with keystrokes; AX
+    lets us just read it)."""
+    if "AXValueGetValue" not in extra:
+        return None
+    try:
+        n = _attr(fns, el, "AXNumberOfCharacters")
+        if isinstance(n, int) and n > _PEEK_MAX_DOC:
+            return None
+        rng = _attr(fns, el, "AXSelectedTextRange")
+        val = _attr(fns, el, "AXValue")
+        if rng is None or not isinstance(val, str):
+            return None
+        ok, r = extra["AXValueGetValue"](rng, _AXVALUE_CFRANGE, None)
+        if not ok:
+            return None
+        loc = int(r.location if hasattr(r, "location") else r[0])
+        loc = max(0, min(loc, len(val)))
+        return str(val[max(0, loc - _PEEK_CHARS):loc])
+    except Exception:
+        return None
+
+
+def focused_text_target(max_age: float = _FOCUS_TTL):
+    """What has keyboard focus, as far as typing is concerned. Returns a dict, or None when native AX
+    is unavailable (callers must then behave exactly as plain control mode)::
+
+        {"editable": bool, "secure": bool, "role": str, "subrole": str, "pid": int | None,
+         "element": <AXUIElement>, "before": str | None, "ms": float}
+
+    editable — role is a text-input role (``_TEXT_INPUT_ROLES``) whose AXValue isn't reported
+      read-only, OR any element with a settable AXValue AND a text selection range. The second arm is
+      for web ``contenteditable`` / Electron editors (Slack, Google Docs), which don't always wear a
+      text role.
+    secure — a password field. NEVER editable here: auto dictation must not type into one, and the
+      caller must not log what was said.
+    before — text just before the cursor (see ``_text_before_cursor``); only read for editable,
+      non-secure fields.
+
+    Cached for ``max_age`` seconds so routing and typing within one utterance share a single read;
+    pass 0 to force a fresh one (e.g. right before deleting text)."""
+    global _FOCUS_CACHE
+    now = time.monotonic()
+    if max_age > 0 and _FOCUS_CACHE[1] is not None and now - _FOCUS_CACHE[0] <= max_age:
+        return _FOCUS_CACHE[1]
+    fns = _load()
+    if not fns or "AXUIElementCreateSystemWide" not in fns:
+        return None
+    extra = _focus_fns()
+    t0 = time.perf_counter()
+    el, pid = _focused_element(fns)
+    out = {"editable": False, "secure": False, "role": "", "subrole": "", "pid": pid,
+           "element": el, "before": None, "ms": 0.0}
+    if el is not None:
+        role = _attr(fns, el, "AXRole") or ""
+        subrole = _attr(fns, el, "AXSubrole") or ""
+        out["role"], out["subrole"] = str(role), str(subrole)
+        secure = "AXSecureTextField" in (role, subrole)
+        settable = None
+        if "AXUIElementIsAttributeSettable" in extra:
+            try:
+                err, s = extra["AXUIElementIsAttributeSettable"](el, "AXValue", None)
+                settable = bool(s) if err == 0 else None
+            except Exception:
+                settable = None
+        if role in _TEXT_INPUT_ROLES:
+            # A text role with an AXValue explicitly reported NOT settable is a read-only view
+            # (a log pane, a terminal scrollback) — typing there is at best a no-op.
+            editable = settable is not False
+        else:
+            editable = bool(settable) and _attr(fns, el, "AXSelectedTextRange") is not None
+        out["secure"] = secure
+        out["editable"] = bool(editable) and not secure
+        if out["editable"]:
+            out["before"] = _text_before_cursor(fns, extra, el)
+    out["ms"] = (time.perf_counter() - t0) * 1000.0
+    _FOCUS_CACHE = (now, out)
+    return out

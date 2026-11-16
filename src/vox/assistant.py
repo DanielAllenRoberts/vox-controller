@@ -1,10 +1,11 @@
 """Assistant (LLM) brain — provider-agnostic. Powers ASSISTANT mode (and later, escalation).
 
-Pick a provider in config (anthropic / openai-compatible / claude_cli). Keys come from .env.
+Pick a provider in config (anthropic / openai-compatible / claude_cli). Keys come from Vox's key store (vox.secrets_store), set in the app.
 """
 
 import os
 import re
+import threading
 import subprocess
 import time
 
@@ -44,13 +45,16 @@ _SYSTEM = (
     "reply is kept only in the logs / dashboard, which the user is not looking at.)\n\n"
     "Memory: you can remember things across conversations. When the user shares something worth "
     "keeping, append a capture directive on its own line at the very end of your reply — "
-    "'MEMORY[core]: <fact>' for durable, always-relevant facts (their name, standing "
-    "preferences, long-term projects, standing instructions) or 'MEMORY[daily]: <note>' for "
-    "passing, session-specific things (what you did today, one-off requests). "
+    "'MEMORY[core]: <fact>' ONLY for lasting facts ABOUT THE PERSON: who they are, the people in "
+    "their life, what they like and dislike, their work and projects, their goals, health and diet, "
+    "important dates. Or 'MEMORY[daily]: <note>' for passing things (what you did today, one-off "
+    "requests). NEVER save how Vox should do something (a phrase meaning a key, a click, an app "
+    "habit): those are commands and app notes, saved elsewhere, not memories. Never save tasks or "
+    "reminders, or anything you said yourself. "
     "Write each fact as a COMPLETE, SELF-CONTAINED sentence that a FUTURE session with NO context "
     "could understand on its own — always state WHAT the fact is about, never just the bare answer. "
-    "After asking the user's name and hearing 'Daniel', store \"MEMORY[core]: The user's name is "
-    "Daniel\" — NEVER \"MEMORY[core]: Daniel\". Likewise \"The user prefers concise replies\", not "
+    "After asking the user's name and hearing 'Sam', store \"MEMORY[core]: The user's name is "
+    "Sam\" — NEVER \"MEMORY[core]: Sam\". Likewise \"The user prefers concise replies\", not "
     "\"concise\"; \"The user works at Acme as a designer\", not \"Acme\". If it can't stand alone "
     "and be understood months later, rewrite it so it can. "
     "It's stripped before the reply is shown or spoken; never mention it. Use it sparingly and only "
@@ -135,7 +139,34 @@ def _recent_actions_block() -> str:
         return ""
 
 
-def _rules_block() -> str:
+def _short_term_block() -> str:
+    """What was just said and done across every mode (``working_memory``). "" if unavailable."""
+    try:
+        from vox import working_memory
+        return working_memory.block()
+    except Exception:
+        return ""
+
+
+def _calendar_block(text: str) -> str:
+    """Today's (and tomorrow's) events when the question is about the calendar. "" otherwise."""
+    try:
+        from vox import routines
+        return routines.calendar_context(text)
+    except Exception:
+        return ""
+
+
+def _focused_app() -> str | None:
+    """The app in front, as the command cache tracks it (cheap: no AppleScript)."""
+    try:
+        from vox import command_cache
+        return command_cache.current_app()
+    except Exception:
+        return None
+
+
+def _rules_block(app: str | None = None) -> str:
     """The user's enabled custom rules, rendered for the system prompt.
 
     Reads the dashboard's rules store (vox.web.rules.enabled_rules_text()). Fully
@@ -143,7 +174,7 @@ def _rules_block() -> str:
     exactly as today (no rules layered on)."""
     try:
         from vox.web import rules
-        text = (rules.enabled_rules_text() or "").strip()
+        text = (rules.enabled_rules_text(app) or "").strip()
         if text:
             return ("Additional rules from the user (follow these, they override "
                     f"defaults where they conflict):\n{text}")
@@ -214,13 +245,35 @@ def _autocapture_on() -> bool:
     return bool(_setting("memory_autocapture", True))
 
 
+# How-to-operate notes are commands or app notes, not facts about the person. Seen live: "The user
+# wants the spoken word 'refresh' to refresh the browser tab" saved as a permanent memory.
+_HOW_TO = re.compile(
+    r"(?i)\b(?:spoken (?:word|phrase)|when (?:i|they|the user) says?|keystroke|key ?board shortcut|"
+    r"shortcut|cmd ?\+|command ?\+|⌘|press(?:es|ing)? (?:the )?(?:key|cmd|command)|refresh(?:es)? the|"
+    r"reload|click(?:s|ing)? (?:on|the)|vox should|vox (?:must|needs to))\b")
+
+
+def _core_ok(text: str) -> bool:
+    """Whether a fact belongs in long-term memory: about the person, not about operating Vox."""
+    return not _HOW_TO.search(text or "")
+
+
 def _mem_add(text: str, tier: str) -> None:
     """Save one memory at the given tier. Tries the tiered API (add(text, tier=...))
     and falls back to the legacy flat API (add(text)) if it doesn't accept a tier.
+    A "core" fact that's really a how-to note is kept, but in the daily log.
     Fully guarded: a missing/broken memory module is a silent no-op — capture must
     never break a reply."""
     text = (text or "").strip()
     if not text:
+        return
+    if tier == "core" and not _core_ok(text):
+        _dbg("[memory]", f"not long-term (a how-to note) → daily: {text!r}")
+        tier = "daily"
+    if tier == "core":
+        # A new fact may REPLACE one we have ("my sister is called Alex" after "…Sam"): that needs a
+        # quick brain call, so do it off the reply path.
+        threading.Thread(target=_save_core, args=(text,), name="vox-memory", daemon=True).start()
         return
     try:
         from vox import memory
@@ -232,13 +285,64 @@ def _mem_add(text: str, tier: str) -> None:
         pass
 
 
+_REPLACE_SYSTEM = (
+    "You keep a list of facts about a person. Decide whether a NEW fact REPLACES one of the EXISTING "
+    "facts: the same thing about them, with a changed value (a new job, a different city, a renamed "
+    "pet, an updated preference, a corrected name). Facts that merely share words, or add something "
+    "alongside (a second sister, another hobby), do NOT replace anything. Reply with ONLY the number "
+    "of the fact it replaces, or NONE."
+)
+
+
+def _replaced_fact(text: str, entries: list[dict]) -> dict | None:
+    """The existing core fact ``text`` supersedes, or None. Only asks the brain when there are
+    candidates that talk about the same things (shared words)."""
+    from vox import memory
+    new = set(memory._tokens(text))
+    if not new:
+        return None
+    scored = []
+    for e in entries:
+        old = set(memory._tokens(e.get("text", "")))
+        if old and new & old:
+            scored.append((len(new & old) / len(new | old), e))
+    cands = [e for j, e in sorted(scored, key=lambda x: -x[0]) if 0.12 <= j < 0.75][:5]
+    if not cands:
+        return None
+    listing = "\n".join(f"{i}. {e['text']}" for i, e in enumerate(cands, 1))
+    try:
+        raw = complete(f"EXISTING:\n{listing}\n\nNEW: {text}", None, brain="small",
+                       system=_REPLACE_SYSTEM, kind="memory", prompt="memory_update").strip()
+    except Exception:
+        return None
+    m = re.match(r"\s*(\d+)", raw)
+    if not m or not (1 <= int(m.group(1)) <= len(cands)):
+        return None
+    return cands[int(m.group(1)) - 1]
+
+
+def _save_core(text: str) -> None:
+    try:
+        from vox import memory
+        old = _replaced_fact(text, memory.core())
+        if old is not None:
+            memory.update(old["id"], text=text)
+            _dbg("[memory]", f"updated {old['text']!r} → {text!r}")
+            return
+        memory.add(text, tier="core")
+    except Exception:
+        pass
+
+
 # MEMORY[core]: ... / MEMORY[daily]: ... — a capture directive the model may append.
 # Matched on its own line; the rest of the line (to EOL) is the fact/note.
 _MEMORY_DIRECTIVE = re.compile(r"(?im)^[ \t]*MEMORY\[(core|daily)\]:[ \t]*(.+?)[ \t]*$")
 
-# Explicit user request to remember something → core by default. Captures the fact
-# after "remember that/to" so "remember that I like tea" stores "I like tea".
-_REMEMBER_THAT = re.compile(r"(?i)\bremember\s+(?:that|to)\s+(.+)", re.DOTALL)
+# Explicit user request to remember something → core. Captures the fact after "remember that"
+# so "remember that I like tea" stores "I like tea". "Remember to call Sam" is a task, not a fact:
+# it goes to the daily log instead.
+_REMEMBER_THAT = re.compile(r"(?i)\bremember\s+that\s+(.+)", re.DOTALL)
+_REMEMBER_TO = re.compile(r"(?i)\bremember\s+to\s+(.+)", re.DOTALL)
 _REMEMBER_THIS = re.compile(r"(?i)\bremember\s+(?:this|that)\b")
 
 
@@ -276,8 +380,13 @@ def _capture_from_user(user_text: str) -> None:
         if not _autocapture_on():
             return
         m = _REMEMBER_THAT.search(user_text)
+        to = _REMEMBER_TO.search(user_text)
         if m:
-            _mem_add(m.group(1), "core")
+            # Kept in their words but made self-contained: "I'm vegetarian" alone, read months
+            # later, doesn't say who.
+            _mem_add(f"The user said: {m.group(1).strip()}", "core")
+        elif to:
+            _mem_add(f"Asked to remember to {to.group(1).strip()}", "daily")
         elif _REMEMBER_THIS.search(user_text):
             # "remember this" with no explicit fact → store the surrounding utterance.
             _mem_add(user_text, "core")
@@ -337,19 +446,38 @@ def respond_turn(text: str, history=None, brain: str = "small") -> tuple[str, bo
     whether Vox keeps listening. The small brain may emit [BIG] to defer the turn to the big
     brain. Falls back to a '?' heuristic if the model omits the tag.
     """
+    from vox import prompts
+    base = prompts.system("chat")
     persona = _active_persona()
-    system = _SYSTEM if not persona else \
-        f"{_SYSTEM}\n\nYour personality (stay in character while staying helpful): {persona}"
+    system = base if not persona else \
+        f"{base}\n\nYour personality (stay in character while staying helpful): {persona}"
     # Layer the user's dashboard rules + relevant memories + what Vox just did (all guarded →
     # no-op if absent). The recent-actions block is what stops the chat brain denying or inventing
     # its own behaviour — it has no other way to know an action ran.
-    for block in (_rules_block(), _memory_block(text), _recent_actions_block()):
+    for block in (_rules_block(_focused_app()), _memory_block(text), _recent_actions_block(),
+                  _short_term_block(), _calendar_block(text)):
         if block:
             system = f"{system}\n\n{block}"
-    raw = complete(text, history, brain=brain, system=system)
+    # The clock (ideas #47). The command brain had it; the chat brain didn't, so "hey vox, what time
+    # is it?" got "I don't have a live clock" (seen live 2026-11-06).
+    try:
+        from vox import actions
+        system = f"{system}\n\n{actions._now_line()}"
+    except Exception:
+        pass
+    system += ("\n\nYou CAN look things up on the internet. If answering needs live or current "
+               "information (weather, news, scores, prices, opening hours) or facts you're unsure of, "
+               "reply with ONLY:  WEB: <the question>  and Vox will look it up and answer.")
+    raw = complete(text, history, brain=brain, system=system, prompt="chat")
+    if raw.strip().upper().startswith("WEB:"):  # the chat brain asked to look it up
+        try:
+            from vox import web_search
+            raw = web_search.answer(raw.strip()[4:].strip() or text) + " [DONE]"
+        except Exception:
+            raw = "I couldn't reach the web just now. [DONE]"
     if (CONFIG.escalate_to_big_brain and brain == "small"
             and raw.strip().upper().startswith("[BIG]")):
-        raw = complete(text, history, brain="big", system=system)  # small brain deferred
+        raw = complete(text, history, brain="big", system=system, prompt="chat")  # small brain deferred
     # Memory (both guarded): an explicit "remember that X" user turn → core; a
     # MEMORY[core|daily] directive the model appended → captured and stripped from the reply.
     _capture_from_user(text)
@@ -367,10 +495,53 @@ def _brain(name: str) -> tuple[str, str]:
             _setting("small_brain_model", CONFIG.small_brain_model))
 
 
-def complete(text: str, history=None, *, brain: str = "small", system: str = _SYSTEM,
-             kind: str = "chat") -> str:
+# Per-call limits for complete() (seconds to wait, tokens to write), read by the providers. Kept
+# per thread so a long rewrite on one thread can't loosen a quick router call on another.
+_LIMITS = threading.local()
+
+
+def _lim(name: str, default):
+    return getattr(_LIMITS, name, None) or default
+
+
+# What complete() returns when the brain failed rather than answered (the providers return these
+# strings instead of raising, so chat can read them out). Text-producing callers must check this:
+# pasting "(the brain timed out — try again)" over the user's essay is the failure (issue f0ff52bd).
+_FAILED = re.compile(r"^\s*(?:\((?:LLM error|claude SDK error|claude CLI error|the brain timed out|no response)\b"
+                     r"|API Error:|I need (?:your|an) .*key|Claude CLI not found"
+                     r"|Credit balance is too low|Invalid API key|Not logged in|Please run /login)")
+
+
+# The Claude subscription paths (Agent SDK, `claude -p`) start Claude Code as a child process, which
+# inherits Vox's environment. Since API keys moved into Vox's key store they're in os.environ, and
+# Claude Code prefers ANTHROPIC_API_KEY over the claude.ai login: every "subscription" call was billed
+# to the API account, and when that ran dry the brain answered "Credit balance is too low" (seen
+# live 9 Nov). Hide the key from those children so they use the subscription, as intended.
+SUBSCRIPTION_ENV = {"ANTHROPIC_API_KEY": ""}
+
+
+def failed(reply: str) -> bool:
+    """True when ``reply`` is one of complete()'s error strings, not an answer."""
+    return bool(_FAILED.match(reply or ""))
+
+
+def complete(text: str, history=None, *, brain: str = "small", system: str | None = None,
+             kind: str = "chat", prompt: str = "", timeout: float | None = None,
+             max_tokens: int | None = None) -> str:
     """One raw completion from the named brain with the given system prompt. Provider-agnostic.
-    `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record."""
+    `kind` ("chat"|"command"|"rewrite") only tags the dashboard usage record. `timeout` and
+    `max_tokens` raise the usual 45 s / llm_max_tokens limits for one long job (a big rewrite)."""
+    _LIMITS.timeout, _LIMITS.max_tokens = timeout, max_tokens
+    try:
+        return _complete(text, history, brain, system, kind, prompt)
+    finally:
+        _LIMITS.timeout = _LIMITS.max_tokens = None
+
+
+def _complete(text, history, brain, system, kind, prompt) -> str:
+    if system is None:
+        from vox import prompts
+        system = prompts.system("chat")
     provider, model = _brain(brain)
     # Debug: dump the COMPLETE outgoing prompt — system + full messages (history + user
     # text) — for every LLM call (covers chat AND the executor, which calls complete()
@@ -386,11 +557,18 @@ def complete(text: str, history=None, *, brain: str = "small", system: str = _SY
         raw = _openai(text, history, model, system, brain, kind)
     elif provider == "local_ai":
         raw = _local_ai(text, history, model, system, brain, kind)
+    elif provider == "chatgpt":
+        raw = _chatgpt(text, history, model, system, brain, kind)
     else:
         raw = _anthropic(text, history, model, system, brain, kind)
     # Debug: dump the COMPLETE raw response, BEFORE any [OPEN]/[DONE]/[BIG]/SAY:/MEMORY[...]
     # stripping happens downstream in respond_turn / _split_signal / _capture_from_reply.
     _dbg("[raw-response]", raw)
+    try:  # what was actually sent, for the Prompts page (Vox.app)
+        from vox import prompts
+        prompts.record(prompt or kind, brain, model, system, _fmt_messages(history, text), raw)
+    except Exception:
+        pass
     return raw
 
 
@@ -436,7 +614,7 @@ def _anthropic(text, history, model, system, brain="small", kind="chat"):
     key_env = getattr(CONFIG, "anthropic_key_env", "ANTHROPIC_API_KEY")
     key = os.environ.get(key_env)
     if not key:
-        return f"I need {key_env} in your .env — add it and restart Vox."
+        return f"I need your {key_env} key. Add it in Vox → Settings → Brains → API keys."
     global _anthropic_client
     if _anthropic_client is None:
         from anthropic import Anthropic
@@ -446,8 +624,8 @@ def _anthropic(text, history, model, system, brain="small", kind="chat"):
     try:
         # 45s cap (matches the SDK path) so a stalled request can't freeze the voice loop — the
         # client otherwise defaults to ~10 min. On timeout the SDK raises and we fall through below.
-        resp = _anthropic_client.with_options(timeout=45.0).messages.create(
-            model=model, max_tokens=CONFIG.llm_max_tokens, system=system, messages=msgs)
+        resp = _anthropic_client.with_options(timeout=_lim("timeout", 45.0)).messages.create(
+            model=model, max_tokens=_lim("max_tokens", CONFIG.llm_max_tokens), system=system, messages=msgs)
         _record_usage("anthropic", model, brain, kind,
                       (resp.usage.input_tokens, resp.usage.output_tokens),
                       (time.monotonic() - t0) * 1000)
@@ -468,6 +646,18 @@ def _openai_client_for(base_url, key):
     return client
 
 
+def _deepseek_thinking_off(model: str, brain: str) -> bool:
+    """DeepSeek V4 models think before answering by default, and that hidden reasoning is most of
+    the small brain's latency: replaying 60 real router calls from vox.log gave p90 4.7s with
+    thinking vs 1.3s without (scripts/replay_router.py). Off is faster and handles plain commands
+    just as well; on is more careful with vague or garbled requests. The budget can't be bounded:
+    the API ignores budget_tokens and reasoning_effort. Only DeepSeek models get the flag, because
+    other OpenAI-compatible servers may reject unknown fields."""
+    if brain != "small" or "deepseek" not in (model or "").lower():
+        return False
+    return _setting("small_brain_thinking", CONFIG.small_brain_thinking) == "off"
+
+
 def _openai_call(text, history, model, system, brain, kind, base_url, key, label="openai"):
     """One completion against any OpenAI-compatible endpoint. `label` tags the usage record."""
     client = _openai_client_for(base_url, key)
@@ -478,13 +668,31 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
     try:
         # 45s cap (matches the SDK/anthropic paths) so a stalled remote/local call can't freeze the
         # voice loop — the client otherwise defaults to ~10 min.
-        resp = client.with_options(timeout=45.0).chat.completions.create(
-            model=model, max_tokens=CONFIG.llm_max_tokens, messages=msgs)
+        create = client.with_options(timeout=_lim("timeout", 45.0)).chat.completions.create
+        max_tokens = _lim("max_tokens", CONFIG.llm_max_tokens)
+        thinking_off = _deepseek_thinking_off(model, brain)
+        if label == "chatgpt":
+            # OpenAI's current models take max_completion_tokens (not max_tokens), and reasoning
+            # models count their hidden thinking against it, so give them room to still answer.
+            resp = create(model=model, max_completion_tokens=max(max_tokens, 4000), messages=msgs)
+        else:
+            resp = create(model=model, max_tokens=max_tokens, messages=msgs,
+                          extra_body={"thinking": {"type": "disabled"}} if thinking_off else None)
+        out = (resp.choices[0].message.content or "").strip()
+        if not out and not thinking_off and resp.choices[0].finish_reason == "length" \
+                and "deepseek" in (model or "").lower():
+            # Hidden reasoning ate the whole budget and left no answer (12% of small-brain calls in
+            # usage.jsonl, median 8.3s). Retry once without thinking: ~1s, instead of handing an
+            # empty reply to the caller's slower fallback.
+            _dbg("[thinking]", f"{model}: reasoning hit max_tokens with no answer — retrying with thinking off")
+            resp = create(model=model, max_tokens=max_tokens, messages=msgs,
+                          extra_body={"thinking": {"type": "disabled"}})
+            out = (resp.choices[0].message.content or "").strip()
         u = getattr(resp, "usage", None)
         _record_usage(label, model, brain, kind,
                       (u.prompt_tokens, u.completion_tokens) if u else None,
                       (time.monotonic() - t0) * 1000)
-        return (resp.choices[0].message.content or "").strip()
+        return out
     except Exception as exc:
         return f"(LLM error: {exc})"
 
@@ -492,8 +700,42 @@ def _openai_call(text, history, model, system, brain, kind, base_url, key, label
 def _openai(text, history, model, system, brain="small", kind="chat"):
     key = os.environ.get(CONFIG.llm_api_key_env)
     if not key:
-        return f"I need {CONFIG.llm_api_key_env} in your .env — add it and restart Vox."
+        return f"I need your {CONFIG.llm_api_key_env} key. Add it in Vox → Settings → Brains → API keys."
     return _openai_call(text, history, model, system, brain, kind, CONFIG.llm_base_url, key)
+
+
+def _chatgpt(text, history, model, system, brain="small", kind="chat"):
+    """OpenAI's own models (the ChatGPT brain), on the user's OpenAI API key."""
+    key = os.environ.get(CONFIG.openai_key_env)
+    if not key:
+        return "I need an OpenAI API key for ChatGPT. Add it in Settings, Brains."
+    return _openai_call(text, history, model, system, brain, kind, CONFIG.openai_base_url, key, label="chatgpt")
+
+
+_CHATGPT_MODELS: dict = {"at": 0.0, "ids": []}
+
+
+def chatgpt_models() -> list[str]:
+    """Chat models this OpenAI key can use, newest-looking first, cached 10 minutes. [] without a key
+    or on error. Read from OpenAI rather than hard-coded: model names change faster than Vox does."""
+    key = os.environ.get(CONFIG.openai_key_env)
+    if not key:
+        return []
+    if _CHATGPT_MODELS["ids"] and time.monotonic() - _CHATGPT_MODELS["at"] < 600:
+        return _CHATGPT_MODELS["ids"]
+    try:
+        client = _openai_client_for(CONFIG.openai_base_url, key)
+        ids = [m.id for m in client.with_options(timeout=10.0).models.list()]
+    except Exception as exc:
+        _dbg("[chatgpt]", f"couldn't list models: {exc}")
+        return []
+    skip = ("audio", "realtime", "transcribe", "tts", "image", "embedding", "moderation", "search",
+            "whisper", "dall-e", "davinci", "babbage", "instruct", "codex")
+    chat = sorted((i for i in ids if i.startswith(("gpt-", "o")) and not any(s in i for s in skip)
+                   and not re.search(r"-\d{4}-\d{2}-\d{2}$", i)),  # dated snapshots duplicate the alias
+                  reverse=True)
+    _CHATGPT_MODELS.update(at=time.monotonic(), ids=chat)
+    return chat
 
 
 def _local_ai(text, history, model, system, brain="small", kind="chat"):
@@ -508,40 +750,173 @@ def _local_ai(text, history, model, system, brain="small", kind="chat"):
     return _openai_call(text, history, mdl, system, brain, kind, base, key, label="local_ai")
 
 
+class _SdkPool:
+    """Pre-warmed Claude Agent SDK clients: the subscription brain without the cold start.
+
+    ``query()`` launches a fresh Claude Code process for every utterance (process start, auth,
+    tool discovery): 5.4 s median for a one-line Haiku reply on this machine. Here a client is
+    connected in the background *before* it's needed, each query takes the ready one, and a
+    replacement starts warming while the user is still talking. Measured: 1.2 s median.
+
+    Each client answers exactly ONE query and is then discarded. That's deliberate. A long-lived
+    session would accumulate stale context, and after a barge-in its unread messages would pair
+    with the next query, so every answer arrives one question late (ideas #64). One-shot clients
+    can't desync: an interrupted one is simply thrown away.
+
+    Clients live on one background asyncio loop. At most ``_MAX_KEYS`` (model, system prompt)
+    pairs are kept warm; the least recently used is dropped, except pinned keys (the command
+    router, warmed at startup). Only prompts that recur are worth warming: chat builds a new system
+    prompt every turn (memory, recent actions), so warming for it would just spawn throwaway
+    processes and evict the router's client.
+    """
+
+    _MAX_KEYS = 2
+
+    def __init__(self):
+        import asyncio
+        import threading
+        self._loop = asyncio.new_event_loop()
+        self._ready: dict = {}   # key -> concurrent Future[ClaudeSDKClient]
+        self._seen: dict = {}    # key -> times used (bounded), to tell recurring prompts from one-offs
+        self._pinned: set = set()
+        self._lock = threading.Lock()
+        threading.Thread(target=self._loop.run_forever, name="vox-sdk-pool", daemon=True).start()
+
+    def run(self, coro, timeout: float):
+        import asyncio
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
+
+    def recurs(self, key) -> bool:
+        """Count a use of ``key``; True once it has been used before (or was pinned)."""
+        with self._lock:
+            self._seen[key] = self._seen.pop(key, 0) + 1
+            while len(self._seen) > 32:
+                self._seen.pop(next(iter(self._seen)))
+            return key in self._pinned or self._seen[key] > 1
+
+    def warm(self, key, options, pin: bool = False) -> None:
+        """Start connecting a client for ``key`` unless one is already ready or on the way."""
+        import asyncio
+        with self._lock:
+            if pin:
+                self._pinned.add(key)
+            if key in self._ready:
+                self._ready[key] = self._ready.pop(key)  # mark as recently used
+                return
+            self._ready[key] = asyncio.run_coroutine_threadsafe(self._connect(options), self._loop)
+            while len(self._ready) > self._MAX_KEYS:
+                victim = next((k for k in self._ready if k not in self._pinned), None)
+                if victim is None:
+                    break
+                old = self._ready.pop(victim)
+                old.add_done_callback(lambda f: self._discard(f.result()) if not f.exception() else None)
+
+    def take(self, key, options):
+        """A connected client for ``key``: the pre-warmed one if it's ready, else a fresh one."""
+        with self._lock:
+            fut = self._ready.pop(key, None)
+        if fut is not None:
+            try:
+                return fut.result(timeout=20)
+            except Exception:
+                pass  # warming failed (CLI missing, auth) → try once more inline for a real error
+        return self.run(self._connect(options), timeout=30)
+
+    def _discard(self, client) -> None:
+        import asyncio
+        asyncio.run_coroutine_threadsafe(self._close(client), self._loop)
+
+    @staticmethod
+    async def _connect(options):
+        from claude_agent_sdk import ClaudeSDKClient
+        client = ClaudeSDKClient(options)
+        await client.connect()
+        return client
+
+    @staticmethod
+    async def _close(client):
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+_sdk_pool: _SdkPool | None = None
+
+
+def _sdk_options(model, system, brain):
+    """Lean options for a voice turn. Every option here was measured to cut latency:
+    ``setting_sources=[]`` skips loading CLAUDE.md and user settings, ``tools=[]`` drops every tool
+    definition from the prompt, and the small brain doesn't think unless asked
+    (``small_brain_thinking``), the same trade-off as the DeepSeek small brain."""
+    from claude_agent_sdk import ClaudeAgentOptions, ThinkingConfigDisabled
+    # strict_mcp_config: no MCP servers at all. Without it the CLI also loads the connectors on the
+    # user's claude.ai account (Drive, Notion…), and the router sometimes tried to use one ("I'll look
+    # up the file in Google Drive" for "reply silently from now on"), slow and wrong (router_eval).
+    kw = dict(system_prompt=system, allowed_tools=[], tools=[], setting_sources=[], max_turns=6, model=model,
+              strict_mcp_config=True, env=SUBSCRIPTION_ENV)
+    if brain == "small" and _setting("small_brain_thinking", CONFIG.small_brain_thinking) != "on":
+        kw["thinking"] = ThinkingConfigDisabled(type="disabled")
+    return ClaudeAgentOptions(**kw)
+
+
+def prewarm_sdk(system: str, brain: str = "small") -> None:
+    """Warm a client for the prompt Vox is about to use (called at startup), so even the first
+    utterance skips the cold start. No-op unless that brain runs on the Claude subscription."""
+    provider, model = _brain(brain)
+    if provider != "claude_sdk":
+        return
+    try:
+        global _sdk_pool
+        _sdk_pool = _sdk_pool or _SdkPool()
+        _sdk_pool.warm((model, system, brain), _sdk_options(model, system, brain), pin=True)
+    except Exception as exc:
+        _dbg("[sdk]", f"prewarm failed: {exc}")
+
+
 def _claude_sdk(text, history, model, system, brain="big", kind="chat"):
-    # Claude Code via the Agent SDK — runs on your Claude subscription, no API key.
+    # Claude Code via the Agent SDK: runs on your Claude subscription, no API key.
     import asyncio
 
-    from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+    from claude_agent_sdk import AssistantMessage, TextBlock
 
+    global _sdk_pool
+    _sdk_pool = _sdk_pool or _SdkPool()
     convo = "\n".join(f"{'You' if r == 'user' else 'Vox'}: {c}" for r, c in (history or []))
     prompt = f"{convo + chr(10) if convo else ''}You: {text}"
-    opts = ClaudeAgentOptions(system_prompt=system, allowed_tools=[], max_turns=6, model=model)
+    key, opts = (model, system, brain), _sdk_options(model, system, brain)
     captured = {}  # tokens from the ResultMessage if the SDK exposes usage
 
-    async def _run():
+    async def _ask(client):
         parts = []
-        async for msg in query(prompt=prompt, options=opts):
+        await client.query(prompt)
+        async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
                 parts += [b.text for b in msg.content if isinstance(b, TextBlock)]
-            # The ResultMessage (has total_cost_usd) carries the cumulative usage.
-            if hasattr(msg, "total_cost_usd"):
+            if hasattr(msg, "total_cost_usd"):  # the ResultMessage carries cumulative usage
                 got = _sdk_extract_tokens(msg)
                 if got is not None:
                     captured["usage"] = got
         return "".join(parts).strip()
 
     t0 = time.monotonic()
+    client = None
     try:
-        reply = asyncio.run(asyncio.wait_for(_run(), timeout=45)) or "(no response)"
-        # Subscription call: tokens recorded only if the SDK exposed them (else None → cost 0).
+        client = _sdk_pool.take(key, opts)
+        if _sdk_pool.recurs(key):
+            _sdk_pool.warm(key, opts)  # the next utterance's client starts warming now
+        wait = _lim("timeout", 45.0)
+        reply = _sdk_pool.run(asyncio.wait_for(_ask(client), timeout=wait), timeout=wait + 5) or "(no response)"
         _record_usage("claude_sdk", model, brain, kind, captured.get("usage"),
                       (time.monotonic() - t0) * 1000)
         return reply
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         return "(the brain timed out — try again)"  # never hang the loop on a wedged call
     except Exception as exc:
         return f"(claude SDK error: {exc})"
+    finally:
+        if client is not None:
+            _sdk_pool._discard(client)  # one query per client: no stale context, no desync
 
 
 def _claude_cli(text, history, model, system, brain="small", kind="chat"):
@@ -551,7 +926,8 @@ def _claude_cli(text, history, model, system, brain="small", kind="chat"):
     cmd = ["claude", "-p", prompt] + (["--model", model] if model else [])
     t0 = time.monotonic()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=max(90, _lim("timeout", 90)),
+                           env={**os.environ, **SUBSCRIPTION_ENV})
         if r.returncode == 0:
             # Subscription CLI doesn't surface tokens here → record with usage None (cost 0).
             _record_usage("claude_cli", model, brain, kind, None, (time.monotonic() - t0) * 1000)
@@ -575,6 +951,12 @@ def look(question: str, image_path: str, brain: str = "small") -> str:
         raw = _anthropic_look(question, image_path, model, brain)
     else:
         raw = "Looking at the screen needs a Claude or Anthropic brain — this one can't see images."
+    try:
+        from vox import prompts
+        prompts.record("click_vision" if "badge" in question else "vision", brain, model,
+                       "(image) " + image_path, question, raw)
+    except Exception:
+        pass
     # Debug: dump the COMPLETE raw vision response before any downstream handling.
     _dbg("[raw-response]", raw)
     return raw
@@ -589,7 +971,7 @@ def _sdk_look(question, image_path, model, brain="small"):
     prompt = (f"Read the image file {image_path} — it's a screenshot of the user's Mac. "
               f"Read it once, then answer concisely for text-to-speech (1-2 sentences): {question}")
     opts = ClaudeAgentOptions(allowed_tools=["Read"], max_turns=12,
-                              permission_mode="bypassPermissions", model=model)
+                              permission_mode="bypassPermissions", model=model, env=SUBSCRIPTION_ENV)
 
     captured = {}
 

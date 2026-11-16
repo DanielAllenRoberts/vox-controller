@@ -19,6 +19,7 @@ command) before falling through to conversational chat — so chat stays chat-fi
 from __future__ import annotations
 
 import re
+import time
 
 from vox import actions
 from vox.config import CONFIG
@@ -37,14 +38,25 @@ def _is_what_app(t: str) -> bool:
 
 # --- scheduler (timers / alarms / reminders) ----------------------------------
 
+# Whole words, and only in a short utterance. These were bare substrings with no length limit, so a
+# pasted page of work notes ("…the job is scheduled for Monday…", "company", "anything") was answered
+# with "You have no timers, alarms, or reminders set." (2026-11-11) — and the cancel test would
+# have deleted reminders from any long text that said both "delete" and "reminder".
+_SCHED_QUERY_VERB = re.compile(r"\b(?:what|list|any|do i have)\b")
+_SCHED_CANCEL_VERB = re.compile(r"\b(?:cancel|clear|delete|remove)\b")
+_SCHED_NOUN = re.compile(r"\b(?:timers?|alarms?|reminders?|schedules?)\b")
+_SCHED_MAX_WORDS = 12      # "what timers and alarms do I have set for tomorrow" ≈ 10
+_SCHED_CREATE_MAX_WORDS = 30
+
+
 def _is_schedule_query(t: str) -> bool:
-    return ("what" in t or "list" in t or "any" in t or "do i have" in t) \
-        and any(k in t for k in ("timer", "alarm", "reminder", "schedule"))
+    return (len(t.split()) <= _SCHED_MAX_WORDS and bool(_SCHED_QUERY_VERB.search(t))
+            and bool(_SCHED_NOUN.search(t)))
 
 
 def _is_schedule_cancel(t: str) -> bool:
-    return any(c in t for c in ("cancel", "clear", "delete", "remove")) \
-        and any(k in t for k in ("timer", "alarm", "reminder"))
+    return (len(t.split()) <= _SCHED_MAX_WORDS and bool(_SCHED_CANCEL_VERB.search(t))
+            and bool(_SCHED_NOUN.search(t.replace("schedule", ""))))
 
 
 def _scheduler(text: str, t: str) -> tuple[bool, str] | None:
@@ -59,7 +71,9 @@ def _scheduler(text: str, t: str) -> tuple[bool, str] | None:
             n = scheduler.cancel_matching(text)
             return (False, f"Cancelled {n} {'item' if n == 1 else 'items'}." if n
                     else "Nothing matched to cancel.")
-        msg = scheduler.parse_and_create(text)
+        # Its regexes search anywhere, so a long dictated note that happens to contain "remind me
+        # at 3" mustn't quietly become a reminder. Real requests are a sentence.
+        msg = scheduler.parse_and_create(text) if len(t.split()) <= _SCHED_CREATE_MAX_WORDS else None
         if msg:
             return (False, msg)
     except Exception:
@@ -163,13 +177,18 @@ def _log_db_hit(text: str, app, r: dict, ok: bool) -> None:
 _SHOW_CLICKABLE_PHRASES = ("show clickable", "show clickables", "click link", "click button",
                            "show numbers", "show links", "show clickable items", "show clickables")
 
+# Apple Voice Control's "Show names": the same badges, each with the control's label beside its
+# number — so you can see what to say, not just a number to read. Doubles as an AX debugging view.
+_SHOW_NAMES_PHRASES = ("show names", "show labels", "show item names", "show the names")
+
 # Explicit dismissals. Kept separate from _CANCEL_PHRASES (which is only consulted while an overlay
 # is up) because these must be recognised as commands even when nothing is showing — otherwise
 # "hide clickable" one beat too late escalates to the LLM, which then tries to interpret it.
 # "hi"/"high" are real mis-hears seen in vox.log: "hide" is short and gets clipped by Whisper, and
 # unlike the show phrases these were never added to the Vosk grammar so they never got snapped back.
 _HIDE_CLICKABLE_PHRASES = ("hide clickable", "hide clickables", "hide numbers", "hide links",
-                           "hide clickable items", "hi clickable", "high clickable")
+                           "hide clickable items", "hi clickable", "high clickable",
+                           "hide names", "hide labels")
 
 _ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
          "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
@@ -211,6 +230,35 @@ _CANCEL_PHRASES = ("cancel", "never mind", "nevermind", "hide", "escape", "forge
                    "clear", "dismiss", "go away")
 
 
+_OTHER_ONE = re.compile(r"^(?:no[, ]+|nope[, ]+|not that[, ]+)*(?:i meant |i mean )?(?:the )?(?:other|another|"
+                        r"different|wrong|not that) (?:one|button|link|\w+(?: \w+)?)$|^(?:no[, ]+)?not that one$|"
+                        r"^wrong one$")
+
+
+def _other_one(t: str) -> tuple[bool, str] | None:
+    """Vox clicked a control by name and it was the wrong one of several with that name ("click
+    Send" with two Sends). Number just the matching controls and let the user say which (the same
+    flow as "show clickable"). Only within 90 s of the click."""
+    last = getattr(actions, "LAST_CLICK", None)
+    if not last or time.time() - last[1] > 90 or not _OTHER_ONE.match(t):
+        return None
+    try:
+        from vox import overlay, targets
+        items = targets.matching(last[0])
+    except Exception:
+        return None
+    actions.LAST_CLICK = None
+    if not items:
+        return (False, f"I can't see any '{last[0]}' to choose from.")
+    if len(items) == 1:
+        return (False, f"That's the only '{items[0]['label']}' I can see.")
+    try:
+        overlay.show(items)
+    except Exception:
+        return (False, f"There are {len(items)} called '{last[0]}', but I couldn't number them.")
+    return (False, f"Which one? Say its number, 1 to {len(items)}.")
+
+
 def _overlay(text: str, t: str) -> tuple[bool, str] | None:
     """Numbered clickable-element overlay flow (idea #52). Returns (acted, msg), or None to fall
     through. Guarded — any AppKit/AX problem degrades gracefully."""
@@ -219,7 +267,8 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
     except Exception:
         return None
 
-    is_show = any(_has_phrase(t, p) for p in _SHOW_CLICKABLE_PHRASES)
+    names = any(_has_phrase(t, p) for p in _SHOW_NAMES_PHRASES)
+    is_show = names or any(_has_phrase(t, p) for p in _SHOW_CLICKABLE_PHRASES)
 
     # A number (or a dismiss) while the overlay is up — but NOT a fresh "show" (that re-shows below).
     if overlay.is_active() and not is_show:
@@ -259,11 +308,11 @@ def _overlay(text: str, t: str) -> tuple[bool, str] | None:
         if not items:
             return (False, "I can't see anything clickable here.")
         try:
-            overlay.show(items)
+            overlay.show(items, names=names)
         except Exception:  # overlay couldn't draw → fall back to naming them (still useful)
             names = ", ".join(i["label"] for i in items[:10])
             return (False, f"I can click: {names}. Say the one you want.")
-        return (True, f"showing {len(items)} clickable targets — say a number")
+        return (True, f"showing {len(items)} clickable targets{' with names' if names else ''} — say a number")
     return None
 
 
@@ -295,6 +344,10 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     except Exception:
         pass
 
+    other = _other_one(t)  # "no, the other one" straight after a click by name
+    if other is not None:
+        return other
+
     ov = _overlay(text, t)  # numbered clickable overlay (idea #52) — before the parser
     if ov is not None:
         return ov
@@ -307,15 +360,26 @@ def try_deterministic(text: str) -> tuple[bool, str] | None:
     if sched is not None:
         return sched
 
-    db = _command_db(text)  # app/site-scoped commands, in front of the regex parser (gated; off by default)
+    # A more specific app wins over a saved command that merely CONTAINS a shorter one: "open notion
+    # calendar" matched the saved "open notion" and opened Notion (seen live). If the parser reads a
+    # multi-word app name that's actually installed, skip the command DB and open that app.
+    parsed = actions.parse(text)
+    specific = (parsed is not None and parsed[0] == "navigate" and len(parsed[1].split()) > 1
+                and not actions.known_url(parsed[1]) and actions._app_exists(actions.resolve_app_name(parsed[1])))
+    db = None if specific else _command_db(text)  # app/site-scoped commands, in front of the regex parser
     if db is not None:
         return db
 
-    if actions.parse(text) is not None:
+    if parsed is not None:
         result = actions.handle(text)
         if result is not None and not actions.failed(result):
-            return (True, result)
+            # Most commands succeed silently. These confirm OUT LOUD: the user asked for a spoken
+            # "issue logged" (logged issue 8d656565), and a settings change should be acknowledged.
+            return (parsed[0] not in _SPOKEN_INTENTS, result)
     return None
+
+
+_SPOKEN_INTENTS = {"log_issue", "set_setting"}
 
 
 # --- assistant action-intent gate ---------------------------------------------

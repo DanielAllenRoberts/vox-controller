@@ -6,6 +6,7 @@ sleep phrase). The assistant label enters ASSISTANT mode (one-shot LLM request).
 See docs/plan/modes.md.
 """
 
+from vox.paths import DATA_DIR
 import os
 import signal
 import subprocess
@@ -13,12 +14,10 @@ import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
 
-from dotenv import load_dotenv
 
-from vox import actions, assistant, dispatch, executor, sounds, tts
-from vox.audio import MicStreamDead, capture_utterance, open_mic_stream
+from vox import actions, assistant, auto_dictation, dispatch, executor, sounds, tts
+from vox.audio import MicStreamDead, NoInputDevice, capture_utterance, open_mic_stream
 from vox.config import CONFIG
 from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
@@ -32,6 +31,16 @@ def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
     NEVER break the voice daemon. Ephemeral by design — record_turn writes nothing to disk."""
     if not text or not str(text).strip():
         return
+    try:  # short-term memory: what the brains see as "just said / just done" (vox.working_memory)
+        from vox import working_memory
+        working_memory.note("user" if role == "user" else "vox", text)
+    except Exception:
+        pass
+    try:  # repeated failures → look for a mis-heard word in the background (vox.mishear)
+        from vox import mishear
+        mishear.note_turn(role, text)
+    except Exception:
+        pass
     try:
         from vox.web import conversation
         conversation.record_turn(role, text, brain=brain, kind=kind)
@@ -59,6 +68,16 @@ class _Quit(Exception):
 
 class _Restart(Exception):
     """Raised to re-exec the program (pick up code changes) by voice."""
+
+
+def relaunch() -> None:
+    """Spawn a fresh Vox and hard-exit this one. Used by the voice "restart vox" and the dashboard's
+    Restart button. Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,
+    so the deadlock there meant restart never fired). start_new_session detaches it so it survives
+    this process exiting; stdout still goes to the terminal."""
+    subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True,
+                     env={**os.environ, "VOX_RESTART": "1"})
+    os._exit(0)
 
 
 def _start_dashboard(cfg, out) -> None:
@@ -120,11 +139,45 @@ def _start_focus_watch(cfg, out, on_change=None) -> None:
             out.emit(f"  [focus] not started: {exc}")
 
 
+# Set by Vox.app when it launched this engine. The app replaces the browser dashboard, so "open
+# dashboard" brings the app forward instead of opening a tab.
+_IN_APP = os.environ.get("VOX_APP") == "1"
+_APP_BUNDLE_ID = "app.vox.mac"
+
+
+def _start_volume_watch(out) -> None:
+    """Log the Mac's output volume whenever it changes, next to everything else in vox.log. The user
+    reported other apps' audio getting much quieter while Vox runs (logged issue 620b806d). Nothing in
+    Vox sets the volume, AEC (which ducks) is off, and the interface stays at 48 kHz, so this records
+    WHEN it happens and what Vox was doing, instead of guessing. One osascript every 4 s."""
+    def run():
+        last = None
+        while True:
+            try:
+                r = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
+                                   capture_output=True, text=True, timeout=3)
+                v = (r.stdout or "").strip()
+                if v == "missing value":  # e.g. a USB interface with a hardware knob: nothing to watch
+                    return
+                if v and v != last:
+                    if last is not None:
+                        out.emit(f"🔈 system output volume {last} → {v}")
+                    last = v
+            except Exception:
+                pass
+            time.sleep(4)
+    threading.Thread(target=run, name="vox-volume-watch", daemon=True).start()
+
+
 def _open_dashboard(cfg, out) -> None:
     """Open the dashboard in its own window (Arc opens external localhost links as a standalone
     'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
     stacks. Closing is non-disruptive — actions.close_dashboard presses the window's close button
     via accessibility (no Space-switch). Guarded so a failure can't break the wake loop."""
+    if _IN_APP:
+        subprocess.run(["open", "-b", _APP_BUNDLE_ID], capture_output=True, text=True)
+        out.emit("🖥  Showing Vox")
+        return
     url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
     try:
         if actions._focus_dashboard(url):  # reuse the existing dashboard window/tab
@@ -138,6 +191,41 @@ def _open_dashboard(cfg, out) -> None:
             out.emit(f"🖥  Opening dashboard → {url}")
         except Exception as exc:
             out.emit(f"  [dashboard] couldn't open browser: {exc}")
+
+
+def _open_mic_or_wait(cfg, out):
+    """``open_mic_stream``, but if NO microphone can be opened, keep the daemon alive and wait for one
+    instead of dying at startup (a Mac mini with its AirPods off has no input at all). Opens the
+    dashboard's Settings page at the Voice group — its Microphone dropdown is read live from the Mac —
+    so the user can connect or pick one, then retries every few seconds. The dashboard, scheduler and
+    MCP keep working meanwhile; Vox just can't hear yet."""
+    import sounddevice as sd
+    waiting = False
+    while True:
+        try:
+            stream = open_mic_stream(cfg, out)
+        except NoInputDevice as exc:
+            if not waiting:
+                waiting = True
+                out.emit(f"⚠️  {exc}\n"
+                         f"   {cfg.assistant_name} is up (dashboard, scheduler, MCP) but can't hear. "
+                         f"Connect a microphone or pick one in Settings → Voice → Microphone — "
+                         f"listening starts the moment one appears.")
+                url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}/settings#voice"
+                if not _IN_APP:  # the app already shows "can't hear" in its status
+                    try:
+                        subprocess.run(["open", url], capture_output=True, text=True)
+                    except Exception:
+                        webbrowser.open(url)
+            time.sleep(5)
+            try:
+                sd._terminate(); sd._initialize()  # re-enumerate — PortAudio's device list is frozen at init
+            except Exception:
+                pass
+            continue
+        if waiting:
+            out.emit("🎙️  Microphone found — listening.")
+        return stream
 
 
 def _is_quit(text: str, cfg) -> bool:
@@ -289,6 +377,18 @@ _MISSED_GRAMMAR: list = []  # phrase set from the last Vosk miss, consumed by th
 
 
 def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
+    from vox import runtime
+    if runtime.is_typed(audio):
+        out.emit(f"  ⌨  you (typed): {audio.text!r}")
+        return audio.text
+    text = _transcribe_audio(transcriber, audio, cfg, out, hotwords)
+    if text and tts.is_echo(text):
+        out.emit(f"  🔁 ignored {text!r}: that's my own voice coming back through the speakers")
+        return ""
+    return text
+
+
+def _transcribe_audio(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     dur = len(audio) / cfg.sample_rate
     with Timer() as stt:
         text = transcriber.transcribe(audio, hotwords=hotwords)
@@ -378,6 +478,7 @@ def check_fast_lane_drift(cfg, out=None) -> list[str]:
         handled_elsewhere |= {p.lower() for p in (getattr(cfg, attr, ()) or ())}
     try:
         handled_elsewhere |= {p.lower() for p in dispatch._SHOW_CLICKABLE_PHRASES}
+        handled_elsewhere |= {p.lower() for p in dispatch._SHOW_NAMES_PHRASES}
         handled_elsewhere |= {p.lower() for p in dispatch._HIDE_CLICKABLE_PHRASES}
     except Exception:
         pass
@@ -422,7 +523,8 @@ def _fast_lane_extra_phrases(cfg) -> list[str]:
     # half was listed here, so "hide clickable" fell through to Whisper, which clips the short word
     # to "hi"/"high" — and those reached the LLM. Seen repeatedly in vox.log.
     try:
-        out += list(dispatch._SHOW_CLICKABLE_PHRASES) + list(dispatch._HIDE_CLICKABLE_PHRASES)
+        out += (list(dispatch._SHOW_CLICKABLE_PHRASES) + list(dispatch._SHOW_NAMES_PHRASES)
+                + list(dispatch._HIDE_CLICKABLE_PHRASES))
     except Exception:
         pass
     # Reload lives in the code parser, so active_phrases() (which reads the DB) doesn't include it.
@@ -458,6 +560,9 @@ def _recognize(audio, cfg, transcriber, out, hotwords: str = "") -> str:
     returns instantly (no Whisper, no LLM) and snaps mis-hears to the nearest command
     ("necks tab" → "next tab"). Anything Vosk can't match falls through to Whisper. Fully guarded —
     any Vosk problem uses the Whisper lane. All `[vosk]` lines go to vox.log for visibility."""
+    from vox import runtime
+    if runtime.is_typed(audio):
+        return _transcribe(transcriber, audio, cfg, out, hotwords=hotwords)
     if _setting("vosk_commands_enabled", getattr(cfg, "vosk_commands_enabled", False)):
         try:
             from vox import command_cache
@@ -502,15 +607,51 @@ def _passes_interrupt_gate(audio, text, cfg) -> bool:
     audio to be sustained ≥ interrupt_min_seconds AND carry ≥ interrupt_min_words transcribed
     words — mirrors livekit min_interruption_duration/min_interruption_words + pipecat's
     MinWords strategy. Ambient TV/chatter that leaks one short word no longer cancels the call.
-    Read via the guarded _setting path so defaults are pure wins and dashboard toggles apply live."""
-    min_secs = _setting("interrupt_min_seconds", cfg.interrupt_min_seconds)
+    Read via the guarded _setting path so defaults are pure wins and dashboard toggles apply live.
+
+    Typed input and hold-to-talk are deliberate by construction, so they always pass. A typed
+    utterance is one sample of "audio" and would otherwise be silently dropped as a blip."""
+    from vox import runtime
+    if runtime.is_typed(audio) or runtime.last_capture_ptt:
+        return True
+    # Real speech, not noise: typing next to the mic cut a reply off (seen live; the old gate only
+    # needed 0.4 s of sound + one transcribed word, and Whisper "hears" words like "you" in clicks).
+    # Measured: short spoken words carry >= 256 ms of Silero-voiced audio, typing carries 0 ms.
+    norm = normalize(text)
+    if tts.is_echo(text):
+        print(f"  [barge-in] ignored {text!r}: my own voice coming back through the speakers", flush=True)
+        return False
+    if norm in _NOISE_HALLUCINATIONS:
+        print(f"  [barge-in] ignored {text!r}: a phrase Whisper invents from noise", flush=True)
+        return False
+    try:
+        from vox.audio import voiced_ms
+        v = voiced_ms(audio)
+        min_v = int(_setting("interrupt_min_voiced_ms", getattr(cfg, "interrupt_min_voiced_ms", 160)))
+        if v < min_v:
+            print(f"  [barge-in] ignored {text!r}: only {v} ms of voice (needs {min_v})", flush=True)
+            return False
+    except Exception:
+        pass
+    # These settings arrive as TEXT from the settings store ("0.4"). Comparing them raw raised a
+    # TypeError on the first barge-in, mid-reply, which is how a reply ended in a frozen loop.
+    try:
+        min_secs = float(_setting("interrupt_min_seconds", cfg.interrupt_min_seconds) or 0)
+        min_words = int(float(_setting("interrupt_min_words", cfg.interrupt_min_words) or 0))
+    except (TypeError, ValueError):
+        min_secs, min_words = cfg.interrupt_min_seconds, cfg.interrupt_min_words
+    if _is_call_stop(text):  # "stop" / "wait" are one word on purpose; the voice check above still applies
+        return True
     if min_secs and len(audio) / cfg.sample_rate < min_secs:
         return False
-    min_words = _setting("interrupt_min_words", cfg.interrupt_min_words)
-    if min_words and len(normalize(text).split()) < min_words:
+    if min_words and len(norm.split()) < min_words:
         return False
     return True
 
+
+# What Whisper transcribes from keyboard clicks, breaths and silence. Never a real interruption.
+_NOISE_HALLUCINATIONS = {"you", "thank you", "thanks", "thank you for watching", "thanks for watching",
+                         "bye", "so", "um", "uh", "hmm", "mm", "huh", "the", "i", "a"}
 
 _CALL_STOP = ("stop", "stop it", "cancel", "cancel it", "wait", "hold on", "hang on",
               "no stop", "stop stop")
@@ -538,11 +679,11 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
     interrupt_slow_calls_only is on (default), barge-in is NOT armed for fast calls — those finish
     before the poll fires anyway, so arming there only wastes a capture window and risks a spurious
     cancel (loop 1, part of O8)."""
+    from vox import runtime
     arm = _setting("barge_in_enabled", cfg.barge_in_enabled)
     if arm and _setting("interrupt_slow_calls_only", cfg.interrupt_slow_calls_only) and not slow:
         arm = False
-    if not arm:
-        return work(), None
+    began = time.time()
     box: dict = {}
 
     def runner():
@@ -554,6 +695,14 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
     t = threading.Thread(target=runner, daemon=True)
     t.start()
     while t.is_alive():
+        # The stop button (runtime.request_stop) cancels a call whether or not barge-in is armed.
+        if runtime.stopped_since(began):
+            if out is not None:
+                out.emit("  ⏹ stop button — cancelling the request.")
+            return None, "cancel"
+        if not arm:
+            t.join(0.1)
+            continue
         audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
         if audio is None:
             continue  # silence — loop and re-check whether work() finished
@@ -585,6 +734,8 @@ def _run_interruptible(work, frames, cfg, transcriber, out=None, slow=True):
         if actions.parse(text) is not None or _is_assistant(text, cfg) or _is_dictate(text, cfg):
             return None, ("redirect", text)
         # anything else (chatter / fuzzy / background) → ignore and keep waiting for work()
+    if runtime.stopped_since(began):  # pressed in the moment between the last check and finishing
+        return None, "cancel"
     if "error" in box:
         raise box["error"]
     return box.get("result"), None
@@ -626,6 +777,7 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
             text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
             if not text or not _passes_interrupt_gate(audio, text, cfg):
                 continue  # blip / too short → not a real barge-in; let the reply continue
+            print(f"  [barge-in] interrupting the reply: heard {text!r}", flush=True)
             tts.stop_speaking()  # gated, real speech over the reply → cut the voice now
             if _is_abort(text, cfg) or _is_sleep(text, cfg):
                 return "sleep", None
@@ -636,23 +788,58 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
             return "redirect", text  # anything else → handle it as the next turn
         return None, None
     finally:
-        done.wait()  # the speak thread BLOCKS to completion; if we cut it, stop_speaking already fired
+        # Bounded. This was a bare done.wait(): when playback wedged (AirPods switching Bluetooth
+        # modes mid-reply), the voice loop waited forever and Vox looked frozen until restarted
+        # (seen live 2026-11-06, main thread parked here for minutes). Give it the reply's length
+        # plus slack, then stop it and move on; the speaker thread is a daemon.
+        if not done.wait(timeout=10 + len(spoken) / 12):
+            tts.stop_speaking()
+            if not done.wait(timeout=2):
+                print("  ⚠️  speech didn't finish (audio output stuck?) — carrying on without it", flush=True)
+
+
+def _floor(text: str, cfg, check, phrases, in_field: bool) -> bool:
+    """A mode-floor test (sleep / quit / mode switch). Normally ``check`` — a SUBSTRING match, so
+    "okay go to sleep" still works. With auto dictation typing into a text field it's whole-utterance
+    only: otherwise dictating "see you later" or "never mind" into a message drops Vox to sleep and
+    swallows the sentence (research/command-vs-dictation.md, L0)."""
+    return auto_dictation.whole_utterance(text, phrases) if in_field else check(text, cfg)
 
 
 def _control_mode(frames, cfg, transcriber, out, mic) -> None:
     out.emit(f'● CONTROL MODE — e.g. "open Safari" or "go to GitHub". Say "{cfg.sleep_spoken}" to stop.')
     pending = []  # short clarification memory: when the brain asks a question, the next answer gets context
     redirect = None  # a clear command captured mid-LLM-call, to run instead of the cancelled one
+    auto_dictation.reset()  # no chunk history / unanswered "Close tab?" carried over from a past session
+
+    def _say(msg: str) -> None:  # auto dictation's spoken prompts ("Close tab?"), then drop our echo
+        out.emit(f"  🔊 {msg}")
+        tts.speak(msg)
+        mic.flush()
+
     while True:
+        auto_on, target = False, None  # auto dictation (off by default): on + the focused field
         if redirect is not None:
-            text, redirect = redirect, None
+            text, redirect = redirect, None  # said over the brain, or "that was a command" → a command
         else:
             audio = capture_utterance(frames, cfg)
             if audio is None:
                 continue  # stay in control mode — only the sleep phrase (or Ctrl+C) exits
-            text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
+            from vox import runtime
+            auto_on = (bool(_setting("auto_dictation", getattr(cfg, "auto_dictation", False)))
+                       and not runtime.is_typed(audio))  # typed input is always addressed to Vox
+            target = auto_dictation.probe() if auto_on else None
+            if target is not None and target.get("editable"):
+                # In a text field Whisper is the arbiter, with no command hotwords — the same pass
+                # dictation mode uses. The Vosk grammar force-aligns whatever it hears onto its
+                # nearest phrase (issues.md O21: "scroll down" → "stand down" at conf 1.0), which in
+                # a text field would turn a typed sentence into a command.
+                text = _transcribe(transcriber, audio, cfg, out)
+            else:
+                text = _recognize(audio, cfg, transcriber, out, hotwords=cfg.command_hotwords)
             if not text:
                 continue
+        in_field = bool(target and target.get("editable"))
         # An agent run (idea #57) works the screen for up to a minute on its own thread. While one
         # is in flight a plain "stop" should cancel IT and leave us in control mode — not drop Vox
         # to idle, which is what the same word means the rest of the time.
@@ -663,36 +850,46 @@ def _control_mode(frames, cfg, transcriber, out, mic) -> None:
             out.emit("🛑 Stopping the agent.")
             pending = []
             continue
-        if _is_abort(text, cfg):  # emergency stop → straight to idle, whatever mode we're in
+        # In a text field every floor check is whole-utterance: dictating "…and then stop everything"
+        # or "can you open the dashboard and check the numbers" must be typed, not obeyed.
+        if _floor(text, cfg, _is_abort, cfg.abort_phrases, in_field):  # emergency stop → idle
             sounds.play(cfg.sound_abort)
             out.emit("🛑 Stopped.")
             return None
-        if _is_quit(text, cfg):
+        if _floor(text, cfg, _is_quit, cfg.quit_phrases, in_field):
             raise _Quit
-        if _is_restart(text, cfg):
+        if _floor(text, cfg, _is_restart, cfg.restart_phrases, in_field):
             raise _Restart
-        if _is_sleep(text, cfg):
+        if _floor(text, cfg, _is_sleep, cfg.sleep_phrases, in_field):
             sounds.play(cfg.sound_sleep)
             out.emit("○ Sleeping.")
             return None
-        if _is_assistant(text, cfg):
+        if _floor(text, cfg, _is_assistant, cfg.assistant_phrases, in_field):
             out.emit("→ switching to assistant…")
             return "assistant"
-        if _is_dictate(text, cfg):
+        if _floor(text, cfg, _is_dictate, cfg.dictate_phrases, in_field):
             out.emit("→ entering dictation…")
             return "dictation"
         # Dashboard open/close also work from CONTROL mode (not just idle) — caught before the
         # generic "open <app>" parser, which would otherwise try to open an app called "dashboard".
-        if _is_open_dashboard(text, cfg):
+        if _floor(text, cfg, _is_open_dashboard, cfg.open_dashboard_phrases, in_field):
             sounds.play(cfg.sound_dashboard_open)
             _open_dashboard(cfg, out)
             pending = []
             continue
-        if _is_close_dashboard(text, cfg):
+        if _floor(text, cfg, _is_close_dashboard, getattr(cfg, "close_dashboard_phrases", ()), in_field):
             sounds.play(cfg.sound_dashboard_close)
             out.emit(f"🖥  {actions.close_dashboard()}")
             pending = []
             continue
+        if auto_on:
+            # Auto dictation: type it, or hand back the command to run below. Never reaches the LLM
+            # unless it comes back as a command ("Vox, …", or "that was a command").
+            cmd = auto_dictation.route(text, target, out=out, speak=_say, pending=bool(pending),
+                                       extra_phrases=_fast_lane_extra_phrases(cfg))
+            if cmd is None:
+                continue
+            text = cmd
         out.emit(f"  you: {text!r}")
         _record_turn("user", text)
         # Shared deterministic layer (vox.dispatch) — ONE place for all three modes: "what app is
@@ -776,6 +973,10 @@ def _assistant_mode(frames, cfg, transcriber, out, mic, return_to=None):
     history = []
     expecting_answer = False  # set when the model tags its reply [OPEN] → wait patiently for you
     redirect = None  # an utterance captured mid-reply, to handle instead of the cancelled one
+    from vox import runtime
+    if runtime.wake_remainder:  # "hey vox what time is it": answer the question, don't ask for it again
+        redirect, runtime.wake_remainder = runtime.wake_remainder, ""
+        out.emit(f"  you: {redirect!r}")
     while True:
         if redirect is not None:
             text, redirect = redirect, None
@@ -1048,7 +1249,7 @@ def _dictation_mode(frames, cfg, transcriber, out, mic=None, return_to=None):
 # Vox restarts itself by spawning a detached process (start_new_session=True), so after a voice
 # "restart" or an auto-restart it's no longer attached to the terminal and Ctrl+C can't reach it.
 # A PID file gives a reliable way to stop it (`vox --stop` / `vox --replace`) regardless.
-_PIDFILE = Path(__file__).resolve().parents[3] / "data" / "vox.pid"
+_PIDFILE = DATA_DIR / "vox.pid"
 
 
 def _write_pidfile() -> None:
@@ -1084,6 +1285,34 @@ def _pid_on_port(cfg) -> "int | None":
         return next((p for p in pids if p != os.getpid()), None)
     except Exception:
         return None
+
+
+_INSTANCE_LOCK = None  # held open for the life of the process; the OS releases it when we exit
+
+
+def _acquire_instance_lock(wait: float) -> bool:
+    """Take the one-engine-at-a-time lock (``data/vox.lock``), retrying for up to ``wait`` seconds.
+    False if another live engine holds it. Platforms without flock skip the lock (True)."""
+    global _INSTANCE_LOCK
+    try:
+        import fcntl
+    except ImportError:
+        return True
+    try:
+        fh = open(DATA_DIR / "vox.lock", "a+")
+    except OSError:
+        return True   # can't even create the file: don't block startup over it
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _INSTANCE_LOCK = fh
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                return False
+            time.sleep(0.25)
 
 
 def _running_pid(cfg) -> "int | None":
@@ -1150,13 +1379,22 @@ def main() -> None:
             out.emit(f"No running {cfg.assistant_name} found.")
         return
 
-    load_dotenv()  # load ANTHROPIC_API_KEY etc. from .env
+    # API keys come from Vox's own key store (<data>/secrets.db), set in the app; an old .env is
+    # imported into it once and not read after that.
+    from vox import secrets_store
+    try:
+        imported = secrets_store.load()
+        if imported:
+            out.emit(f"🔑 Moved {len(imported)} API key(s) from .env into Vox's key store: {', '.join(imported)}")
+    except Exception as exc:
+        out.emit(f"⚠️  Couldn't read the API key store: {exc}")
 
     # Single-instance guard: a second daemon fights the first over the mic + ducks the audio (and
     # leaves the dashboard served by a stale process). Refuse to start a second copy — EXCEPT on a
     # restart, where the process we're replacing is exiting and may still briefly hold the port
     # (restart spawns us with VOX_RESTART=1; pop it so our own child processes don't inherit it).
-    if os.environ.pop("VOX_RESTART", "") != "1" and _another_instance_running(cfg):
+    restarting = os.environ.pop("VOX_RESTART", "") == "1"
+    if not restarting and _another_instance_running(cfg):
         if args & {"--replace", "--force"}:  # `vox --replace`: stop the old one, then start fresh
             out.emit(f"↻ --replace: stopping the running {cfg.assistant_name} first…")
             _stop_running(cfg, out)
@@ -1174,15 +1412,44 @@ def main() -> None:
             )
             return
 
+    # The real single-instance guarantee: an exclusive lock held for this process's lifetime. The
+    # port check above has a gap: during a restart the port is briefly free, and a second start in
+    # that moment (the app reopening while the engine restarts) slipped through. That copy failed to
+    # bind the port, kept its mic loop, and typed every dictated word a second time for a day
+    # (2026-11-07). A restart waits for the old process to let go of the lock.
+    if not _acquire_instance_lock(wait=15.0 if restarting else 2.0):
+        pid = _running_pid(cfg)
+        out.emit(f"⚠️  {cfg.assistant_name} is already running{f' (PID {pid})' if pid else ''}; "
+                 f"not starting a second copy.")
+        return
+
+    from vox import runtime
+    try:  # `kill -USR1 <pid>` prints every thread's Python stack to the console log: a wedged loop
+        import faulthandler  # can then be diagnosed instead of guessed at from native samples
+        import signal
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except Exception:
+        pass
     _write_pidfile()  # we're cleared to run — record our PID so `--stop`/`--replace` can find us
 
     out.emit(f"Loading {cfg.assistant_name}… (first run downloads models)")
     with Timer() as load:
         transcriber = WhisperTranscriber(cfg.whisper_model, cfg.whisper_compute_type,
-                                         cpu_threads=cfg.whisper_cpu_threads)
+                                         cpu_threads=cfg.whisper_cpu_threads,
+                                         beam_size=cfg.whisper_beam_size)
         wake = make_backend(cfg, transcriber, out)
     out.emit(f"Models loaded in {load.seconds:.1f}s.  [wake backend: {cfg.wake_backend}]")
+    try:  # the Voice Lab transcribes recordings with this same model instead of loading a second copy
+        from vox import voice_samples
+        voice_samples.use_transcriber(transcriber)
+    except Exception:
+        pass
 
+    try:  # Claude-subscription brain: connect a client now so the first command skips the cold start
+        assistant.prewarm_sdk(executor._router_system(), "small")  # the exact prompt the router sends (core + router + app notes)
+    except Exception:
+        pass
+    _start_volume_watch(out)    # diagnostics for "Vox turns my music down" (logged issue 620b806d)
     _start_dashboard(cfg, out)  # additive; non-fatal if the web package is missing/broken
     _start_scheduler(cfg, out)  # additive; non-fatal if the scheduler module is missing/broken
     _cmd_on_focus = _start_command_cache(cfg, out)  # boot-load the command DB + install query logging
@@ -1191,7 +1458,7 @@ def main() -> None:
     idle_msg = f"Idle. {wake.prompt} (Ctrl+C to quit)"
     out.emit(idle_msg)
     try:
-        with open_mic_stream(cfg, out) as mic:
+        with _open_mic_or_wait(cfg, out) as mic:
             frames = mic.frames()
             # _Quit/_Restart are handled INSIDE the `with` (not propagated out) so we never run
             # MicStream.__exit__: PortAudio's Pa_StopStream → CoreAudio DeviceStop can deadlock and
@@ -1199,6 +1466,7 @@ def main() -> None:
             # frees the mic when we exit, so a clean re-open works.
             try:
                 while True:
+                    runtime.set_mode("idle")
                     label = wake.listen(frames, mic)
                     if label == "quit":
                         raise _Quit
@@ -1220,9 +1488,13 @@ def main() -> None:
                         # Same shared dispatch as control/assistant: deterministic (what-app /
                         # scheduler / command) first, else the executor (write / make-pretty /
                         # vision / fuzzy) — so one-shots cover everything the other modes do.
+                        # One-shots belong in the conversation too: they were missing from the
+                        # Conversation page, Home's Recent, and the context saved with a logged issue.
+                        _record_turn("user", cmd, kind="oneshot")
                         det = dispatch.try_deterministic(cmd)
                         if det is not None:
                             acted, msg = det
+                            _record_turn("assistant", str(msg), kind="command")
                             if acted:
                                 out.emit(f"⚡ {cmd!r} → {msg}")
                             else:
@@ -1237,6 +1509,9 @@ def main() -> None:
                             out.emit("→ entering dictation…")
                             label = "dictation"  # fall through to the mode-chaining loop below
                         else:
+                            if msg:
+                                _record_turn("assistant", assistant.split_say(str(msg))[0], brain="small",
+                                             kind="command" if acted else "reply")
                             if acted:
                                 out.emit(f"⚡ {msg}")
                             elif msg:
@@ -1251,6 +1526,7 @@ def main() -> None:
                     # it returns to control when done (instead of idling).
                     from_control = False
                     while label in ("control", "assistant", "dictation"):
+                        runtime.set_mode(label)
                         if label == "control":
                             sounds.play(cfg.sound_control)
                             label = _control_mode(frames, cfg, transcriber, out, mic)
@@ -1275,12 +1551,7 @@ def main() -> None:
                 os._exit(0)
             except _Restart:
                 out.emit("\n↻ Restarting Vox…")
-                # Fresh process + hard exit instead of os.execv (which only ran AFTER the mic close,
-                # so the deadlock there meant restart never fired). start_new_session detaches it so
-                # it survives this process exiting; stdout still goes to the terminal.
-                subprocess.Popen([sys.executable, "-m", "vox"], start_new_session=True,
-                                 env={**os.environ, "VOX_RESTART": "1"})
-                os._exit(0)
+                relaunch()
             except (KeyboardInterrupt, _Quit):
                 sounds.play(cfg.sound_sleep)
                 out.emit("\n👋 Quitting Vox.")

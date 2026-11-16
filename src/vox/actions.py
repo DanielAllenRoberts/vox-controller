@@ -9,6 +9,7 @@ import difflib
 import os
 import re
 import subprocess
+import time
 import urllib.parse
 
 from vox.config import CONFIG
@@ -37,6 +38,54 @@ _SITE_ALIASES = {
 
 # Chromium-family browsers share an AppleScript dictionary for tab creation/indexing.
 _CHROMIUM = {"Arc", "Google Chrome", "Brave Browser", "Microsoft Edge", "Chromium"}
+# Firefox-based browsers have no AppleScript tab dictionary, so tabs are driven by keyboard there.
+_FIREFOX_FAMILY = {"Firefox", "Zen", "Floorp", "LibreWolf", "Waterfox"}
+KNOWN_BROWSERS = _CHROMIUM | _FIREFOX_FAMILY | {"Safari", "Vivaldi", "Opera", "Orion", "Dia"}
+
+_browser_cache: tuple[float, str] | None = None
+
+
+def browser() -> str:
+    """The browser browser commands should act on. Used to be hardcoded to Arc, so after switching
+    to Zen, "show tabs" launched Arc. Now: the browser in front if one is; else the `browser`
+    setting; else ("auto", the default) the Mac's default browser. Cached ~2 s because reading the
+    frontmost app costs ~150 ms and one command can ask several times."""
+    global _browser_cache
+    import time as _t
+    now = _t.monotonic()
+    if _browser_cache and now - _browser_cache[0] < 2.0:
+        return _browser_cache[1]
+    front = frontmost_app()
+    if front in KNOWN_BROWSERS:
+        b = front
+    else:
+        pref = str(_setting_value("browser", CONFIG.browser) or "auto")
+        b = pref if pref and pref != "auto" else (_default_browser() or "Safari")
+    _browser_cache = (now, b)
+    return b
+
+
+def _setting_value(key: str, fallback):
+    try:
+        from vox.web import settings_store
+        v = settings_store.get(key)
+        return fallback if v is None else v
+    except Exception:
+        return fallback
+
+
+def _default_browser() -> str | None:
+    """The app macOS opens web links with (System Settings → Desktop & Dock → Default web browser)."""
+    try:
+        from AppKit import NSWorkspace
+        from Foundation import NSBundle, NSURL
+        url = NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(NSURL.URLWithString_("https://example.com"))
+        if url is None:
+            return None
+        info = NSBundle.bundleWithURL_(url).infoDictionary() or {}
+        return str(info.get("CFBundleName") or url.lastPathComponent().replace(".app", ""))
+    except Exception:
+        return None
 
 # Spoken numbers/ordinals -> index.
 _NUMBERS = {
@@ -64,6 +113,35 @@ def handle(text: str) -> str:
     return _run(text)
 
 
+def _window_subject(words: str) -> str | None:
+    """"this window" / "it" → "" (the window in front); "slack" / "the slack window" → "slack".
+    None when it doesn't read as a window or app (keeps "center the text" away from windows)."""
+    w = re.sub(r"^(?:the|my)\s+", "", (words or "").strip())
+    if w in ("", "this", "it", "that", "this window", "the window", "that window", "window", "this app",
+             "the app", "everything here", "this one"):
+        return ""
+    w = re.sub(r"\s+(?:window|app)$", "", w)
+    if not w or len(w.split()) > 3 or w in ("text", "image", "picture", "line", "title", "paragraph"):
+        return None
+    return w
+
+
+def _window_display(arg: str) -> str:
+    which, _, app = arg.partition("|")
+    if app:
+        hit = _blocked(app, resolve_app_name(app))
+        if hit:
+            return f"{hit} is blocked, so I won't touch it."
+    from vox import windows
+    return windows.move_to_display(which, resolve_app_name(app) if app else "")
+
+
+def _window_layout(arg: str) -> str:
+    layout, _, app = arg.partition("|")
+    from vox import windows
+    return windows.place(layout, resolve_app_name(app) if app else "")
+
+
 def run_intent(name: str, arg: str, _text: str | None = None) -> str:
     """Execute a known ``(intent, arg)`` action directly via the dispatch map. Used by the command
     DB resolver, which already has the intent+arg and must NOT re-parse. Unknown intent → handoff."""
@@ -75,10 +153,17 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
         "reload": _reload,
-        "click": click_element,
+        "click": lambda a: click_element(a, ask_if_ambiguous=True),
         "scroll": _scroll, "press": _press,
         "right_click": _right_click, "double_click": _double_click,
         "drag": _drag, "set_value": _set_value,
+        "point": point_at,
+        "log_issue": _log_issue,
+        "set_setting": set_setting,
+        "media": media,
+        "quit_app": quit_app,
+        "window_display": _window_display, "window_layout": _window_layout,
+        "spotify": lambda a: __import__("vox.spotify", fromlist=["run"]).run(a),
     }
     return dispatch.get(name, lambda _: _handoff(_text if _text is not None else name))(arg)
 
@@ -91,13 +176,132 @@ def _run(text: str) -> str:
     return run_intent(name, arg, _text=text)
 
 
+# Commands that take no argument match on a phrase CONTAINED in the utterance, so on their own they
+# fire on sentences that merely mention them: "the next tab in the spreadsheet is broken" switched
+# tabs, "I think we should go back to the old design" pressed Back (todo.md, "parser greediness").
+# Commands with an argument validate it; these can't, so they get a length check instead: once polite
+# wrappers are stripped, a real command is short. Anything longer goes to the brain, which reads the
+# whole sentence. Six words keeps "switch to the next window" and "go to the next tab".
+_NO_ARG_INTENTS = {"tab_arrow", "close_tab", "back", "reload", "sidebar", "window_move", "desktop_move"}
+_POLITE_HEAD = re.compile(r"^(?:(?:please|can you|could you|would you|will you|hey vox|vox|okay|ok|now|"
+                          r"and|then|just|um|uh)\s+)+")
+_POLITE_TAIL = re.compile(r"(?:\s+(?:please|for me|now|thanks|thank you))+$")
+_NO_ARG_MAX_WORDS = 6
+
+
 def parse(text: str) -> tuple[str, str] | None:
     """Map an utterance to an (intent, argument) pair, or None."""
+    hit = _parse(text)
+    if hit and hit[0] in _NO_ARG_INTENTS:
+        core = _POLITE_TAIL.sub("", _POLITE_HEAD.sub("", text.lower().strip().rstrip(".!?")))
+        if len(core.split()) > _NO_ARG_MAX_WORDS:
+            return None
+    return hit
+
+
+def _parse(text: str) -> tuple[str, str] | None:
+    """The phrase matcher behind ``parse`` (which adds the no-argument length guard)."""
     t = text.lower().strip().rstrip(".!?")
 
     # --- desktop primitives (idea #61) ---------------------------------------------------------
     # These go FIRST. "right click submit" contains "click submit", and "scroll to the top" contains
     # "to the top" (the jump-to-first-tab phrase) — both would be swallowed by the patterns below.
+
+    # Quit an app: "close notion", "quit spotify". Without this, "close notion" went to the brain,
+    # which picked close_tab and closed a browser tab (seen live). Tabs/windows/Vox are excluded;
+    # the handler only quits an app that's actually running.
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you)[,]?\s+)*(?:close|closed|quit|exit|shut down)\s+"
+                     r"(?:the\s+|my\s+)?([a-z0-9][a-z0-9 .+-]*?)(?:\s+app)?", t)
+    if m and not re.search(r"\b(?:tabs?|windows?|this|that|it|vox|fox|box|dashboard|everything|all)\b", m.group(1)):
+        return ("quit_app", m.group(1).strip())
+
+    # Media: "pause spotify", "next song", "pause the music": straight to the player, in the
+    # background, no brain (it used to go to the LLM, which opened Spotify and clicked Pause).
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*"
+                     r"(pause|stop|play|resume|unpause|continue|skip|next|previous|last|toggle"
+                     # Whisper's mishearings of "pause" (seen live: "pose my music" went to the
+                     # brain, which pressed Space in the app in front). Safe: only before a music noun.
+                     r"|pose|posed|paws|pours|pores|porz)\s+"
+                     r"(?:the\s+|this\s+|my\s+)?(music|song|track|spotify|apple music|playback|audio|podcast)"
+                     r"(?:\s+on\s+(spotify|apple music|music))?(?:\s+please)?", t)
+    if m:
+        verb, noun, on = m.group(1), m.group(2), m.group(3)
+        verb = "pause" if verb in ("pose", "posed", "paws", "pours", "pores", "porz") else verb
+        action = ({"pause": "pause", "stop": "pause", "play": "play", "resume": "play", "unpause": "play",
+                   "continue": "play", "skip": "next", "next": "next", "previous": "previous",
+                   "last": "previous", "toggle": "playpause"}[verb])
+        if verb in ("play", "resume") and noun in ("song", "track"):
+            action = "play"
+        app = on or (noun if noun in ("spotify", "apple music") else "")
+        # "play music" / "pause the song" mean the music apps, never a YouTube tab (see media()).
+        return ("media", f"{action}:{app or 'musicapp'}")
+    # Bare "pause" / "play" / "press pause" / "pause the video": whatever is playing, YouTube included
+    # (seen live: "pause" with YouTube playing got "I can't pause"). Not "stop": that one means abort.
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*(?:press\s+|hit\s+)?"
+                     r"(pause|play|resume|unpause|play pause)"
+                     r"(?:\s+(?:it|that|this|the video|video|youtube|the youtube video|playback|media))?(?:\s+please)?", t)
+    if m:
+        verb = m.group(1)
+        on_video = bool(re.search(r"\b(?:video|youtube)\b", t))   # "play youtube", "pause the video"
+        return ("media", f"{'pause' if verb == 'pause' else 'playpause' if verb == 'play pause' else 'play'}:"
+                         f"{'browser' if on_video else ''}")
+    if re.fullmatch(r"(?:skip|next)(?:\s+(?:this|the))?\s*(?:song|track)?|go to the next (?:song|track)", t) and \
+            re.search(r"song|track|skip", t):
+        return ("media", "next:")
+    if re.fullmatch(r"(?:previous|last|go back a|go back one)\s+(?:song|track)", t):
+        return ("media", "previous:")
+
+    # Spotify (vox.spotify): what's playing, a playlist by name, add this song to a playlist, a song.
+    _pp = r"(?:(?:please|vox|can you|could you|ok|okay|hey)[,]?\s+)*"
+    if re.fullmatch(_pp + r"(?:what'?s|what is) (?:this|that) (?:song|track|tune)|what (?:song|track) is (?:this|that|playing)"
+                    r"|what'?s playing|what is playing|what am i listening to|who (?:sings|is singing) (?:this|that)"
+                    r"|(?:what'?s|what is) the name of (?:this|that) (?:song|track)|name (?:this|that) (?:song|tune)", t):
+        return ("spotify", "now")
+    m = re.fullmatch(_pp + r"(shuffle|play|put on|start) (?:my |the )?(.+?) play ?list(?: on spotify)?(?: please)?", t)
+    if m:
+        return ("spotify", f"{'shuffle' if m.group(1) == 'shuffle' else 'playlist'}|{m.group(2)}")
+    m = re.fullmatch(_pp + r"(?:add|save|put) (this song|this track|the song|the track|this tune|the current song|"
+                     r"what'?s playing|this|it|that|that song) (?:to|into|on|onto) (?:my |the )?(.+?)( play ?list)?(?: please)?", t)
+    if m and (m.group(3) or m.group(1) not in ("this", "it", "that")):
+        return ("spotify", f"add|{m.group(2)}")
+    m = re.fullmatch(_pp + r"play (.+? by .+?)(?: on spotify)?(?: please)?|" + _pp + r"play (.+?) on spotify(?: please)?", t)
+    if m:
+        return ("spotify", f"play|{m.group(1) or m.group(2)}")
+
+    # Vox's own everyday settings by voice ("reply silently from now on"). Allow-listed in
+    # VOICE_SETTINGS; anything else stays in the app.
+    for pattern, key, value in _VOICE_SETTING_PHRASES:
+        if re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*" + pattern
+                        + r"(?:\s+(?:from now on|for now|please|again))*", t):
+            return ("set_setting", f"{key}={value}")
+
+    # "log an issue: the circle thing didn't work" → saved with what was happening (vox/issues.py).
+    # Whisper hears "log an issue" as "login issue" / "log in issue" / "logging issue" (seen live).
+    m = re.match(r"(?:(?:please|vox|can you|could you|i want to|i'd like to)[,:]?\s+)*"
+                 r"(?:log(?:\s*in|ging)?|report|note|file|lock|logan)\s+(?:this|an|a|the|that|another|new)?\s*"
+                 r"(?:issue|bug|problem)s?\b[\s,:.-]*(?:for me[\s,:.-]*)?(.*)$", t)
+    if m:
+        return ("log_issue", text.strip()[len(text.strip()) - len(m.group(1)):] if m.group(1) else "")
+
+    # Point at something without clicking it (ideas #69.2): "point at export", "circle the save
+    # button", "where's the settings icon". "where is" only counts with a UI noun at the end, so
+    # "where is the nearest pharmacy" still reaches the brain as a question.
+    # Anchored at the START (after politeness): "search for how to highlight text" and "open circle
+    # ci" contain the words but are searches/opens, not requests to point.
+    m = (re.match(r"(?:(?:please|can you|could you|vox|hey vox|now)\s+)*(?:point\s+(?:at|to)|circle|highlight|outline)"
+                  r"\s+(?:the\s+)?(.+)", t)
+         or re.match(r"(?:(?:so|and|ok|okay|hey vox|vox)\s+)*where(?:'s|\s+is)\s+(?:the\s+)?(.+?\s+(?:button|link|icon|"
+                     r"tab|menu|field|setting|option|toggle|checkbox|switch))$", t))
+    if m:
+        tgt = re.sub(r"\s+(?:button|link|icon|tab|menu|field|setting|option|toggle|checkbox|switch)$", "",
+                     m.group(1).strip())
+        # A vague target ("circle something on the screen") isn't a label to search for; the brain
+        # decides what to show. Seen live: it searched for an element called "something on the screen".
+        # Descriptive targets ("where jc's birthday is on my calendar", "where I should study") aren't
+        # labels to search for: the brain + vision handle those (seen live in Notion Calendar).
+        if (tgt and tgt not in {"it", "that", "this"} and len(tgt.split()) <= 4
+                and not re.match(r"(?:something|anything|stuff|whatever|things?|where|what|which|how|when|who)\b", tgt)):
+            return ("point", tgt)
 
     # Right / double click, by control label or by a badge number from the overlay.
     m = re.search(r"\b(right|double)[\s-]?click\s+(?:on\s+)?(?:the\s+)?(.+)", t)
@@ -226,6 +430,31 @@ def parse(text: str) -> tuple[str, str] | None:
     if m:
         return ("window", m.group(1).strip())
 
+    # Windows across displays (vox.windows): "move Slack to the left screen", "send this to the
+    # iPad", "maximise this window", "snap this to the right half". BEFORE desktop switching, whose
+    # "next screen" would otherwise swallow "move this to the next screen".
+    _pol = r"(?:(?:please|vox|can you|could you|ok|okay|and)[,]?\s+)*"
+    _where = (r"(other|next|another|previous|left|right|main|primary|external|big|laptop|built in|ipad|sidecar|"
+              r"first|second|third|one|two|three|1|2|3|[a-z0-9]+)")
+    m = (re.fullmatch(_pol + r"(?:move|send|put|throw|shift|take)\s+(.+?)\s+(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?"
+                      + _where + r"\s+(?:screen|display|monitor)(?:\s+please)?", t)
+         or re.fullmatch(_pol + r"(?:move|send|put|throw|shift|take)\s+(.+?)\s+(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?"
+                         r"(ipad|sidecar|laptop|other screen|other monitor|other display)(?:\s+please)?", t))
+    if m:
+        which = m.group(2).replace(" screen", "").replace(" monitor", "").replace(" display", "")
+        return ("window_display", f"{which}|{_window_subject(m.group(1))}")
+    m = (re.fullmatch(_pol + r"(?:maximi[sz]e|fill the screen with|make full size)\s*(.*?)(?:\s+please)?", t)
+         or re.fullmatch(_pol + r"make\s+(.+?)\s+(?:fill the screen|full size|full screen size)(?:\s+please)?", t))
+    if m and (m.group(1) == "" or _window_subject(m.group(1)) is not None):
+        return ("window_layout", f"fill|{_window_subject(m.group(1)) or ''}")
+    m = re.fullmatch(_pol + r"(?:snap|move|put|tile|dock)\s+(.+?)\s+(?:to|on|onto)\s+(?:the\s+)?(left|right)"
+                     r"(?:\s+(?:half|side))(?:\s+of\s+the\s+screen)?(?:\s+please)?", t)
+    if m and _window_subject(m.group(1)) is not None:
+        return ("window_layout", f"{m.group(2)}|{_window_subject(m.group(1))}")
+    m = re.fullmatch(_pol + r"(?:center|centre)\s+(.+?)(?:\s+on the screen)?(?:\s+please)?", t)
+    if m and _window_subject(m.group(1)) is not None:
+        return ("window_layout", f"center|{_window_subject(m.group(1))}")
+
     # Desktop / Space switching (macOS Mission Control). Synonyms: desktop / space / screen,
     # plus "swipe left/right" (easier to say than "next desktop").
     m = re.search(r"\bswipe\s+(left|right)\b", t)
@@ -239,17 +468,26 @@ def parse(text: str) -> tuple[str, str] | None:
     if m and _to_index(m.group(1)) is not None:
         return ("desktop_index", str(_to_index(m.group(1))))
     # Arc profile switching — relative (⌘⌥←/→) or absolute (Ctrl+<n>).
-    m = re.search(r"\b(next|previous|prev)\s+profile\b", t)
+    m = re.search(r"\b(next|previous|prev)\s+(?:profile|workspace)\b", t)
     if m:
         return ("profile_move", "next" if m.group(1) == "next" else "previous")
-    m = (re.search(r"\bprofile\s+(?:number\s+)?(\w+)\b", t)
+    m = (re.search(r"\b(?:profile|space|workspace)\s+(?:number\s+)?(\w+)\b", t)
          or re.search(r"\b(?:go to|switch to|open)\s+(?:the\s+)?(\w+)\s+profile\b", t))
     if m and _to_index(m.group(1)) is not None:
         return ("profile", str(_to_index(m.group(1))))
+    # A browser space by name: "switch to the GetPrice space", "go to my uni workspace".
+    m = re.fullmatch(r"(?:(?:please|vox|can you|could you|ok|okay)[,]?\s+)*(?:go to|switch to|open|change to)\s+"
+                     r"(?:the\s+|my\s+)?([a-z0-9][a-z0-9 ]{0,30}?)\s+(?:profile|space|workspace)(?:\s+please)?", t)
+    if m and _to_index(m.group(1)) is None:
+        return ("profile", m.group(1).strip())
     # Cycle a specific app's windows across Spaces (simulated Dock-click) — "cursor
     # window", "next cursor window", "cursor space", "switch cursor".
-    m = re.search(r"\b(?:next\s+)?([a-z][a-z ]*?)\s+(?:window|space|screen)\b", t)
-    if m and m.group(1).strip() not in ("the", "my", "a", "this", "next"):
+    # Anchored + at most three words of app name: unanchored, "can you circle something on the
+    # screen" became an app called "can you circle something on the".
+    m = re.match(r"(?:(?:please|vox)\s+)?(?:next\s+|switch\s+to\s+(?:the\s+|my\s+)?|go\s+to\s+(?:the\s+|my\s+)?)?"
+                 r"([a-z]+(?:\s+[a-z]+){0,2}?)\s+(?:window|space|screen)$", t)
+    if (m and m.group(1).strip() not in ("the", "my", "a", "this", "next", "on the", "the whole")
+            and not re.match(r"(?:close|closed|quit|exit|open|minimi[sz]e|hide|show)\b", m.group(1))):
         return ("app_cycle", m.group(1).strip())
     m = re.search(r"\b(?:switch|cycle|toggle)\s+(?:to\s+)?([a-z]+(?:\s+[a-z]+)?)\b", t)
     if m:
@@ -384,12 +622,21 @@ def board_block(max_cards: int = 40) -> str:
             if shown >= max_cards:
                 lines.append("    …more not shown")
                 break
-            lines.append(f"    #{c['id']} {c['title']}")
+            extra = ""
+            if c.get("due"):
+                extra += f" (due {c['due'].replace('T', ' ')})"
+            if c.get("tags"):
+                extra += f" [{', '.join(c['tags'])}]"
+            if c.get("checklist"):
+                done = sum(1 for i in c["checklist"] if i.get("done"))
+                extra += f" checklist {done}/{len(c['checklist'])}"
+            lines.append(f"    #{c['id']} {c['title']}{extra}")
             shown += 1
     other = [n for n in names if n != (snap or {}).get("name")]
     extra = f" Other boards: {', '.join(other)}." if other else ""
-    return (f"[Workspace board \"{(snap or {}).get('name', 'Workspace')}\" — the user's task board."
-            f"{extra} Use BOARD: to change it]\n" + "\n".join(lines))
+    import datetime as _dt
+    return (f"[Workspace board \"{(snap or {}).get('name', 'Workspace')}\" — the user's task board. "
+            f"Today is {_dt.date.today():%A %Y-%m-%d}.{extra} Use BOARD: to change it]\n" + "\n".join(lines))
 
 
 def recent_actions_block(limit: int = 6) -> str:
@@ -408,11 +655,28 @@ def recent_actions_block(limit: int = 6) -> str:
             conn.close()
     except Exception:
         return ""
+    # Only the last half hour. command_log stamps are UTC with no date shown, so yesterday's
+    # "16:52 open claude" used to read as something that had just happened.
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+    def _fresh(r) -> bool:
+        try:
+            return datetime.fromisoformat(str(r.get("ts")).replace(" ", "T")).replace(tzinfo=timezone.utc) >= cutoff
+        except Exception:
+            return False
+
+    rows = [r for r in rows if _fresh(r)]
     if not rows:
         return ""
     lines = []
     for r in reversed(rows):  # oldest first — reads as a timeline
-        ts = (r.get("ts") or "")[-8:-3]  # HH:MM
+        try:  # "4 min ago": the stored HH:MM is UTC, which read as the wrong time of day
+            mins = int((datetime.now(timezone.utc) - datetime.fromisoformat(
+                str(r.get("ts")).replace(" ", "T")).replace(tzinfo=timezone.utc)).total_seconds() // 60)
+            ts = "just now" if mins < 1 else f"{mins} min ago"
+        except Exception:
+            ts = ""
         did = r.get("resolved_intent") or "?"
         if r.get("resolved_arg"):
             did += f" {r['resolved_arg']}"
@@ -442,23 +706,37 @@ def environment_context() -> str:
     # Browser tab detail (active tab + the open-tabs list) is only included when the browser is the
     # FOCUSED app — otherwise we were dumping every Arc tab on every turn, off-browser, wasting the
     # brain's context/tokens. When you're actually on the browser it's exactly what helps tab nav.
-    on_browser = bool(app) and app.lower() == CONFIG.browser.lower()
+    on_browser = bool(app) and app.lower() == browser().lower()
     if on_browser:
-        title, url = _active_tab(CONFIG.browser)
+        title, url = _active_tab(browser())
         if title or url:
             parts.append(f"Active tab: {title} — {url}".rstrip(" —"))
     apps = running_apps()
     if apps:
         parts.append("Running apps: " + ", ".join(apps[:40]))
     if on_browser:
-        ok, titles = _tab_titles(CONFIG.browser)
+        ok, titles = _tab_titles(browser())
         if ok and titles:
-            _, urls = _tab_urls(CONFIG.browser)  # parallel to titles; surface the domain for matching
+            _, urls = _tab_urls(browser())  # parallel to titles; surface the domain for matching
             entries = []
             for i, t in enumerate(titles[:25]):
                 dom = _domain(urls[i]) if i < len(urls) else ""
                 entries.append(f"{t[:60]} ({dom})" if dom else t[:60])
-            parts.append(f"Open {CONFIG.browser} tabs: " + " | ".join(entries))
+            parts.append(f"Open {browser()} tabs: " + " | ".join(entries))
+    try:  # the user's MCP connections (Settings → Connections), so the brain knows APPS: can reach them
+        from vox import mcp_servers
+        names = mcp_servers.enabled_names()
+        if names:
+            parts.append("Connections (use APPS:): " + ", ".join(names))
+    except Exception:
+        pass
+    try:  # with two or more screens, which is which (for "move this to the left screen")
+        from vox import windows
+        disp = windows.describe()
+        if disp:
+            parts.append(disp)
+    except Exception:
+        pass
     parts.append(_now_line())
     return "\n".join(parts)
 
@@ -634,7 +912,12 @@ def focus_target() -> tuple[int, str] | None:
     return focus_watch.last() or ax.frontmost_verified() or ax.frontmost()
 
 
-def click_element(target: str) -> str:
+# Result prefix when "click X" matched several separate controls called X and Vox numbered them on
+# screen instead of guessing (Apple Voice Control's flow). Not a failure — nothing should escalate.
+WHICH_ONE = "Which one?"
+
+
+def click_element(target: str, ask_if_ambiguous: bool = False) -> str:
     """Find a control labelled `target` in the target app's accessibility tree and click it
     (AXPress the nearest pressable element). Uses the fast native AX engine (``vox.ax``, ~77 ms even
     on a miss) so it can't freeze the voice loop; falls back to the AppleScript walk only if native
@@ -643,7 +926,11 @@ def click_element(target: str) -> str:
     "Target app" is pinned up front (``focus_target``) and held for the whole find-and-press, so the
     click goes to the app the user was looking at when they spoke rather than to whatever happens to
     be frontmost by the time we press (issue O18). An outer pin — the executor sets one before its
-    LLM round-trip — wins, since it was taken closer to the utterance."""
+    LLM round-trip — wins, since it was taken closer to the utterance.
+
+    ``ask_if_ambiguous`` (the user's own voice commands, not the screen agent or MCP): when several
+    separate controls carry exactly that label, number them and return a ``WHICH_ONE`` prompt
+    instead of clicking whichever the walk reached first."""
     t = (target or "").strip().replace("\\", " ").replace('"', " ")
     if not t:
         return "Click what? Try 'click Submit'."
@@ -651,10 +938,28 @@ def click_element(target: str) -> str:
     from vox import ax
     aim = None if ax.pinned() else focus_target()  # an outer pin already answered this
     with ax.pinned_to(*(aim or (0, ""))) as pin:
-        return _click_pinned(t, target, pin[1] if pin else "")
+        result = _click_pinned(t, target, pin[1] if pin else "", ask_if_ambiguous)
+    if result.startswith("Clicked"):
+        global LAST_CLICK
+        LAST_CLICK = (t, time.time())   # for "no, the other one" (dispatch)
+    return result
 
 
-def _click_pinned(t: str, target: str, want: str) -> str:
+# (what was clicked by name, when): "no, the other one" re-offers the controls with that name.
+LAST_CLICK: tuple[str, float] | None = None
+
+
+def _which_one(t: str, label: str) -> str | None:
+    """Number the controls called ``label`` and ask which; None if fewer than two are visible."""
+    try:
+        from vox import targets
+        n = targets.offer_choices(label or t)
+    except Exception:
+        n = None
+    return f"{WHICH_ONE} There are {n} called '{label or t}' — say a number." if n else None
+
+
+def _click_pinned(t: str, target: str, want: str, ask: bool = False) -> str:
     """The body of ``click_element``, run with the target app already pinned."""
     # On a web page, ask the PAGE first. The browser's web AX tree is only intermittently exposed
     # (collapsed in 20% of samples — see vox/webdom.py), so an AX miss here means "the tree is down"
@@ -662,7 +967,12 @@ def _click_pinned(t: str, target: str, want: str) -> str:
     # browser chrome and every native app still take the AX path below unchanged.
     try:
         from vox import targets
-        web = targets.click_label(t)
+        web = targets.click_label(t, ask_if_ambiguous=ask)
+        if web is not None and web[0] == "ambiguous":
+            msg = _which_one(t, web[1])
+            if msg:
+                return msg
+            web = targets.click_label(t)  # couldn't number them on screen → click as before
     except Exception:
         web = None
     if web is not None:
@@ -672,7 +982,12 @@ def _click_pinned(t: str, target: str, want: str) -> str:
     # timeout), so we do NOT retry on the slow AppleScript path.
     try:
         from vox import ax
-        res = ax.click(t)
+        res = ax.click(t, ask_if_ambiguous=ask)
+        if res is not None and res[0] == "ambiguous":
+            msg = _which_one(t, res[1])
+            if msg:
+                return msg
+            res = ax.click(t)  # couldn't number them on screen → click the first, as before
     except Exception:
         res = None
     if res is not None:
@@ -821,14 +1136,38 @@ def _browser_tab_script(browser: str, url: str) -> str | None:
 
 
 def _open_url(url: str) -> None:
-    script = _browser_tab_script(CONFIG.browser, url)
+    script = _browser_tab_script(browser(), url)
     if script and _osa(script)[0]:
         return
     subprocess.run(["open", url], capture_output=True, text=True)
 
 
+def blocked_apps() -> list[str]:
+    try:
+        from vox.web import settings_store
+        raw = settings_store.get("blocked_apps") or ""
+    except Exception:
+        raw = ""
+    return [b.strip() for b in str(raw).split(",") if b.strip()]
+
+
+def _blocked(*names: str) -> str | None:
+    """The blocklist entry that covers any of these names (app or site), else None."""
+    block = {b.lower(): b for b in blocked_apps()}
+    for n in names:
+        n = (n or "").lower().strip()
+        host = urllib.parse.urlparse(n if "://" in n else f"https://{n}").netloc.removeprefix("www.")
+        for key in (n, host, host.split(".")[0] if host else ""):
+            if key and key in block:
+                return block[key]
+    return None
+
+
 def _navigate(target: str, force_new: bool = False) -> str:
     name = resolve_app_name(target)
+    hit = _blocked(target, name, known_url(target) or "")
+    if hit:
+        return f"{hit} is blocked, so I won't open it. You can unblock it on the Commands page."
     if _app_exists(name):
         subprocess.run(["open", "-a", name], capture_output=True, text=True)
         return f"Opening {name}."
@@ -856,7 +1195,7 @@ def _reuse_tab(url: str) -> bool:
     host = urllib.parse.urlparse(url).netloc.replace('"', "")
     if not host:
         return False
-    if CONFIG.browser == "Arc":
+    if browser() == "Arc":
         # Reuse only tabs in the CURRENT space (reliable, never jumps profiles). Arc's
         # `tabs of front window` span ALL profiles, so matching there jumps you to another
         # profile — don't. Favorites/pinned outside the current space won't be reused.
@@ -867,11 +1206,11 @@ def _reuse_tab(url: str) -> bool:
             '    end repeat\n    return "none"\nend tell')
         return _osa(script) == (True, "ok")
     # Chrome family: no spaces — reuse any matching tab.
-    ok, urls = _tab_urls(CONFIG.browser)
+    ok, urls = _tab_urls(browser())
     if ok:
         i = next((j for j, u in enumerate(urls) if host in u), None)
         if i is not None:
-            _select_tab(CONFIG.browser, i + 1)
+            _select_tab(browser(), i + 1)
             return True
     return False
 
@@ -889,7 +1228,7 @@ def _focus_dashboard(url: str) -> bool:
         return False
     # (1) An existing standalone Little Arc window — raise it in place (no Arc activate → no Space jump).
     se = (
-        f'tell application "System Events" to tell process "{CONFIG.browser}"\n'
+        f'tell application "System Events" to tell process "{browser()}"\n'
         f'    repeat with w in windows\n'
         f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
         '            perform action "AXRaise" of w\n'
@@ -902,7 +1241,7 @@ def _focus_dashboard(url: str) -> bool:
         return True
     # (2) A matching tab in the current Space — activate Arc only INSIDE the match (not before it),
     #     so checking-and-finding-nothing doesn't pull focus to Arc.
-    if CONFIG.browser != "Arc":
+    if browser() != "Arc":
         return _reuse_tab(url)
     tab = (
         'tell application "Arc"\n'
@@ -927,13 +1266,18 @@ def close_dashboard() -> str:
     main window is always closed as a tab and we never AXPress (and thus close) the main window —
     the standalone path only fires for a genuine 'Little Arc', which Arc's AppleScript can't see.
     Never raises."""
+    if os.environ.get("VOX_APP") == "1":  # Vox.app replaces the browser dashboard: hide it
+        subprocess.run(["osascript", "-e", 'tell application "System Events" to set visible of '
+                        '(first process whose bundle identifier is "app.vox.mac") to false'],
+                       capture_output=True, text=True)
+        return "Hid Vox."
     url = f"http://{CONFIG.dashboard_host}:{CONFIG.dashboard_port}"
     host = urllib.parse.urlparse(url).netloc.replace('"', "")
     if not host:
         return "No dashboard URL configured."
     # (1) Close a matching TAB (incl. the active tab of the main window) — closes only the tab.
     tab = (
-        f'tell application "{CONFIG.browser}"\n'
+        f'tell application "{browser()}"\n'
         '    repeat with w in windows\n'
         '        repeat with t in tabs of w\n'
         f'            if URL of t contains "{host}" then\n'
@@ -949,7 +1293,7 @@ def close_dashboard() -> str:
     # (2) Standalone Little Arc window: press its close button (shallow chrome search, not the heavy
     #     web AX tree). AXPress needs no focus → non-disruptive.
     se = (
-        f'tell application "System Events" to tell process "{CONFIG.browser}"\n'
+        f'tell application "System Events" to tell process "{browser()}"\n'
         f'    repeat with w in windows\n'
         f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
         '            repeat with g in (UI elements of w)\n'
@@ -1034,8 +1378,71 @@ def _best_match(query: str, titles: list[str]) -> int | None:
     return best if best_score >= 0.55 else None
 
 
+def _match_score(query: str, title: str) -> float:
+    """How well a spoken query matches one tab title (substring or close phonetic match)."""
+    q, tl = query.lower().strip(), title.lower()
+    if q in tl:
+        return 0.9
+    score = difflib.SequenceMatcher(None, q, tl).ratio()
+    for w in tl.split():
+        score = max(score, difflib.SequenceMatcher(None, q, w).ratio())
+    return score
+
+
+def _arc_active_space() -> str:
+    ok, out = _osa('tell application "Arc" to return title of active space of front window')
+    return out if ok else ""
+
+
+def _arc_tab(query: str) -> str | None:
+    """Arc: pick among ALL matching tabs, preferring one in the profile on screen.
+
+    `tabs of front window` spans every profile, and favorites (where Gmail usually lives) aren't
+    listed under any space — so with a Gmail favorite in several profiles, "go to my gmail tab"
+    took whichever came first, often the wrong account. A Workspace Gmail's title doesn't even say
+    "Gmail" ("… - Acme Mail"), so the URL host counts too. Arc can't say which profile a favorite
+    belongs to, so — like _reuse_tab — select each candidate in turn and keep the first that leaves
+    the active space unchanged; if none does, fall back to the best match. None = couldn't read."""
+    ok, titles = _tab_titles("Arc")
+    uok, urls = _tab_urls("Arc")
+    if not ok:
+        return None
+    hay = list(titles)
+    if uok and len(urls) == len(titles):
+        hay = [t + (" gmail" if "mail.google." in u else "") for t, u in zip(titles, urls)]
+    scored = sorted(((_match_score(query, h), i) for i, h in enumerate(hay)), key=lambda x: -x[0])
+    best = scored[0][0] if scored else 0.0
+    # Only the top tier competes ("gmail" also fuzzy-matches every "… Mail" title at ~0.6) —
+    # trying weak matches would hop you through half your tabs.
+    cands = [i for sc, i in scored if sc >= 0.55 and sc >= best - 0.02]
+    if not cands:
+        return f"No tab matching {query!r}."
+    here = _arc_active_space() if len(cands) > 1 else ""
+    for i in cands:
+        sok, sout = _select_tab("Arc", i + 1)
+        if not sok:
+            return f"Couldn't switch tab ({sout})."
+        if not here or _arc_active_space() == here:
+            return f"Switched to {titles[i]!r}."
+    _select_tab("Arc", cands[0] + 1)
+    return f"Switched to {titles[cands[0]]!r}."
+
+
 def _tab(query: str) -> str:
-    b = CONFIG.browser
+    b = browser()
+    if b == "Arc":
+        msg = _arc_tab(query)
+        if msg is not None:
+            return msg
+    if b in _FIREFOX_FAMILY:
+        # No AppleScript tab list in Firefox/Zen. Their address bar searches open tabs when the text
+        # starts with "% ": type it and take the first match.
+        q = query.replace("\\", " ").replace('"', " ")
+        ok, out = _osa(f'tell application "{b}" to activate\n'
+                       'tell application "System Events"\n'
+                       '    keystroke "l" using command down\n    delay 0.15\n'
+                       f'    keystroke "% {q}"\n    delay 0.6\n    key code 36\nend tell')
+        return f"Looked for a {query!r} tab." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't switch tab ({out}).")
     ok, titles = _tab_titles(b)
     if not ok:
         return f"Couldn't read tabs (tab switching may not support {b})."
@@ -1050,12 +1457,22 @@ def _tab_arrow(arg: str) -> str:
     # Move between tabs with ⌘⌥up/down — stays within the current profile (unlike the
     # full tab list, which spans all spaces). Arc's sidebar is vertical, hence up/down.
     direction, n = arg.split(":")
-    code = 125 if direction == "down" else 126  # down / up arrow key code
     n = max(1, min(int(n), 30))
-    script = (f'tell application "{CONFIG.browser}" to activate\n'
+    b = browser()
+    if b != "Arc" and n >= 30:
+        # "first/last tab" is encoded as 30 steps for Arc's vertical list; elsewhere ⌃Tab wraps
+        # around, so 30 steps lands anywhere. Jump straight there instead.
+        return _tab_index("first" if direction == "up" else "last")
+    if b == "Arc":
+        code = 125 if direction == "down" else 126  # down / up arrow key code
+        press = f'key code {code} using {{command down, option down}}'
+    else:  # ⌃Tab / ⌃⇧Tab: next / previous tab in Safari, Chrome-family and Firefox-family
+        press = ('key code 48 using {control down}' if direction == "down"
+                 else 'key code 48 using {control down, shift down}')
+    script = (f'tell application "{b}" to activate\n'
               'tell application "System Events"\n'
               f'    repeat {n} times\n'
-              f'        key code {code} using {{command down, option down}}\n'
+              f'        {press}\n'
               '    end repeat\nend tell')
     ok, out = _osa(script)
     if ok:
@@ -1065,7 +1482,7 @@ def _tab_arrow(arg: str) -> str:
 
 def _tab_index(arg: str) -> str:
     expr = {"first": "1", "last": "n"}.get(arg, arg)
-    b = CONFIG.browser
+    b = browser()
     if b == "Arc":
         script = (f'tell application "Arc"\n    activate\n    set n to count of tabs of front window\n'
                   f'    set j to {expr}\n    if j < 1 then set j to 1\n    if j > n then set j to n\n'
@@ -1075,7 +1492,12 @@ def _tab_index(arg: str) -> str:
                   f'    set j to {expr}\n    if j < 1 then set j to 1\n    if j > n then set j to n\n'
                   f'    set active tab index of front window to j\nend tell')
     else:
-        return f"Tab switching isn't wired up for {b} yet."
+        # Safari / Firefox / Zen: ⌘1–⌘8 pick a tab, ⌘9 is always the last one.
+        key = "1" if arg == "first" else "9" if arg == "last" else (arg if arg.isdigit() and 1 <= int(arg) <= 8 else None)
+        if key is None:
+            return f"In {b} I can jump to tabs 1 to 8, or the first or last."
+        script = (f'tell application "{b}" to activate\n'
+                  f'tell application "System Events" to keystroke "{key}" using command down')
     ok, out = _osa(script)
     return f"Tab {arg}." if ok else f"Couldn't switch tab ({out})."
 
@@ -1113,8 +1535,58 @@ def _desktop_move(direction: str) -> str:
     return _perm_msg() if _is_perm_err(out) else f"Couldn't switch desktop ({out})."
 
 
+def _browser_spaces(name: str) -> tuple[int | None, list[dict]]:
+    """The browser's spaces/profiles from its own "Spaces" menu (Zen and Arc both have one):
+    (pid, [{"title", "shortcut", "_el"}]). The spaces are the items with a Control+<n> shortcut;
+    "Next Space" / "Previous Space" are included too. Read-only: walks the menu bar, presses nothing."""
+    from vox import ax
+    try:
+        from AppKit import NSWorkspace
+        pid = next((int(a.processIdentifier()) for a in NSWorkspace.sharedWorkspace().runningApplications()
+                    if (a.localizedName() or "").replace("\u200e", "").lower() == name.lower()), None)
+    except Exception:
+        pid = None
+    if pid is None:
+        return None, []
+    items = [it for it in (ax.menu_items(pid) or []) if it.get("menu", "").split(" > ")[0] in ("Spaces", "Space", "Profiles")]
+    return pid, items
+
+
+def _press_space_item(name: str, pid: int, item: dict) -> bool:
+    from vox import ax
+    _osa(f'tell application "{name}" to activate')
+    fns = ax._load()
+    try:
+        return bool(fns) and fns["AXUIElementPerformAction"](item["_el"], "AXPress") == 0
+    except Exception:
+        return False
+
+
 def _profile(arg: str) -> str:
-    # Arc switches profiles/spaces with Ctrl+<n> when it's focused.
+    """Switch the browser's space/profile by number ("profile 2") or name ("the GetPrice space").
+    Uses the browser's own Spaces menu, so it works in Zen as well as Arc (logged 75ee9efa: "profile
+    1" did nothing in Zen because this only knew Arc's keystroke)."""
+    name = browser()
+    pid, items = _browser_spaces(name)
+    shown = name[:1].upper() + name[1:]
+    spaces = [it for it in items if re.fullmatch(r"control\+\d", it.get("shortcut") or "")]
+    if spaces:
+        want = arg.strip().lower()
+        if want.isdigit():
+            hit = next((it for it in spaces if it["shortcut"] == f"control+{want}"), None)
+            if hit is None:
+                return f"{shown} has {len(spaces)} spaces: " + ", ".join(it["title"] for it in spaces) + "."
+        else:
+            hit = (next((it for it in spaces if it["title"].lower() == want), None)
+                   or next((it for it in spaces if want in it["title"].lower()), None))
+            if hit is None:
+                return f"No space called {arg!r} in {shown}. You have " + ", ".join(it["title"] for it in spaces) + "."
+        if _press_space_item(name, pid, hit):
+            return f"{hit['title']}."
+    if name != "Arc":
+        return f"{shown} doesn't have spaces I can switch."
+    if not arg.isdigit():
+        return f"Say the space's number in {name}, like 'profile 2'."
     ok, out = _osa('tell application "Arc" to activate\n'
                    f'tell application "System Events" to keystroke "{arg}" using control down')
     if ok:
@@ -1123,7 +1595,15 @@ def _profile(arg: str) -> str:
 
 
 def _profile_move(direction: str) -> str:
-    # Arc switches profiles/spaces with ⌘⌥←/→ when focused.
+    """Next / previous space: the browser's own menu item if it has one, else Arc's ⌘⌥←/→."""
+    name = browser()
+    pid, items = _browser_spaces(name)
+    want = "next space" if direction == "next" else "previous space"
+    hit = next((it for it in items if it.get("title", "").lower() == want), None)
+    if hit is not None and _press_space_item(name, pid, hit):
+        return f"{'Next' if direction == 'next' else 'Previous'} space."
+    if name != "Arc":
+        return f"{name[:1].upper() + name[1:]} doesn't have spaces I can switch."
     code = 124 if direction == "next" else 123  # right / left arrow
     ok, out = _osa('tell application "Arc" to activate\n'
                    f'tell application "System Events" to key code {code} using {{command down, option down}}')
@@ -1134,7 +1614,7 @@ def _profile_move(direction: str) -> str:
 
 def _back(_: str) -> str:
     # Browser back — ⌘[ . Activate the browser first so the keystroke lands there.
-    ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
+    ok, out = _osa(f'tell application "{browser()}" to activate\n'
                    'tell application "System Events" to keystroke "[" using command down')
     return "Back." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't go back ({out})")
 
@@ -1147,8 +1627,7 @@ def _reload(_: str) -> str:
     Unlike ``_back``/``close_tab`` this does NOT activate the browser first — reload is the one the
     user is most likely to say while the browser is already in front, and stealing focus to the
     browser when it isn't would reload a page they weren't looking at."""
-    front = frontmost_app()
-    target = front if front in _CHROMIUM or front == "Safari" else CONFIG.browser
+    target = browser()
     ok, out = _osa(f'tell application "{target}" to activate\n'
                    'tell application "System Events" to keystroke "r" using command down')
     return "Reloaded." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't reload ({out}).")
@@ -1156,7 +1635,7 @@ def _reload(_: str) -> str:
 
 def close_tab() -> str:
     # Close the current browser tab (⌘W). Activate the browser first so the keystroke lands there.
-    ok, out = _osa(f'tell application "{CONFIG.browser}" to activate\n'
+    ok, out = _osa(f'tell application "{browser()}" to activate\n'
                    'tell application "System Events" to keystroke "w" using command down')
     return "Closed the tab." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't close the tab ({out}).")
 
@@ -1164,6 +1643,9 @@ def close_tab() -> str:
 def _app_cycle(app: str) -> str:
     # Click the app's Dock icon — cycles its windows even across Spaces (your manual trick).
     name = resolve_app_name(app)
+    hit = _blocked(app, name)
+    if hit:
+        return f"{hit} is blocked, so I won't switch to it."
     if not _app_exists(name):
         return f"No app called {name!r}."
     ok, out = _osa(f'tell application "System Events" to tell process "Dock" '
@@ -1215,11 +1697,18 @@ def _sidebar(direction: str) -> str:
     # by a focused web app (Docs/Notion grab ⌘S as "Save"), and the item name reveals the current
     # state so show/hide are honoured exactly. direction is "show" | "hide" | "toggle". Needs
     # Accessibility permission.
-    if CONFIG.browser != "Arc":
-        return f"Sidebar control is Arc-specific (browser is {CONFIG.browser})."
+    b = browser()
+    if b in _FIREFOX_FAMILY:
+        # Zen: ⌥⌘S shows/hides the tab sidebar (docs.zen-browser.app/user-manual/shortcuts). It's a
+        # toggle; there's no menu item to read the current state from.
+        ok, out = _osa(f'tell application "{b}" to activate\n'
+                       'tell application "System Events" to keystroke "s" using {command down, option down}')
+        return "Toggled the tab sidebar." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't toggle the sidebar ({out}).")
+    if b not in ("Arc", "Safari"):
+        return f"Showing tabs isn't supported in {b} yet."
     script = (
-        'tell application "Arc" to activate\n'
-        'tell application "System Events" to tell process "Arc"\n'
+        f'tell application "{b}" to activate\n'
+        f'tell application "System Events" to tell process "{b}"\n'
         '    set m to menu "View" of menu bar 1\n'
         '    set isHidden to (exists menu item "Show Sidebar" of m)\n'
         f'    if "{direction}" is "show" then\n'
@@ -1274,10 +1763,26 @@ def reset_dictation() -> None:
     _dictation_new_sentence = True
 
 
-def dictate(text: str) -> None:
+def prime_dictation(before: str) -> None:
+    """Set the spacing/capitalization state from the text actually sitting before the cursor (read
+    via AX by auto dictation). The session state above is a guess built from what Vox itself typed;
+    in auto mode the cursor moves between chunks — commands, clicks, your own keyboard — so reading
+    the field is the only way to get "no space at the start of a line" and "capital after a full
+    stop" right. Talon peeks the same way (dictation_peek), with keystrokes instead of AX."""
+    global _dictation_active, _dictation_new_sentence
+    _dictation_active = bool(before) and not before[-1:].isspace()
+    tail = before.rstrip(" \t")
+    _dictation_new_sentence = not tail or tail[-1] in ".!?\n"
+
+
+def dictate(text: str) -> str | None:
     """Insert spoken text at the cursor (frontmost app). A few spoken words act as edit keys;
     everything else is pasted. Chunks are separated with a LEADING space (survives editors that
-    trim trailing spaces) and the first word of each sentence is capitalized."""
+    trim trailing spaces) and the first word of each sentence is capitalized.
+
+    Returns exactly the string that was pasted (leading space included), or None when the utterance
+    was an edit key / nothing was typed — auto dictation's chunk history needs the precise length to
+    take a chunk back out again ("scratch that")."""
     global _dictation_active, _dictation_new_sentence
     raw = text.strip()
     low = raw.lower().rstrip(".!?")
@@ -1289,10 +1794,11 @@ def dictate(text: str) -> None:
         lit = m.group(1).strip()
         if _dictation_new_sentence and lit[:1].islower():
             lit = lit[0].upper() + lit[1:]
-        _paste((" " if _dictation_active else "") + lit)
+        pasted = (" " if _dictation_active else "") + lit
+        _paste(pasted)
         _dictation_active = True
         _dictation_new_sentence = lit.rstrip()[-1:] in ".!?"
-        return
+        return pasted
 
     # Bigger deletions + undo. These match the WHOLE utterance only (like the edit keys below), so
     # they never fire mid-sentence — say them on their own to use them, dictate them in a sentence
@@ -1356,9 +1862,11 @@ def dictate(text: str) -> None:
     if _dictation_new_sentence and raw[:1].islower():
         raw = raw[0].upper() + raw[1:]
     # Leading space separates this chunk from the previous one across the pause.
-    _paste((" " if _dictation_active else "") + raw)
+    pasted = (" " if _dictation_active else "") + raw
+    _paste(pasted)
     _dictation_active = True
     _dictation_new_sentence = raw.rstrip()[-1:] in ".!?"
+    return pasted
 
 
 def type_text(text: str) -> str:
@@ -1372,10 +1880,10 @@ def _get_clipboard() -> str:
     return out if ok else ""
 
 
-def edit_selection(transform) -> str:
-    """Rewrite the user's SELECTED text: copy it (⌘C), run transform(text)->text, paste it back
-    (⌘V), then restore the clipboard. `transform` is a callable (e.g. an LLM call). Needs
-    Accessibility permission; works anywhere standard copy/paste does (Docs, editors, fields)."""
+def selected_text() -> str | None:
+    """The text currently selected in the focused app, read via ⌘C with the clipboard restored
+    afterwards. None when nothing is selected (or the app didn't answer the copy). Needs
+    Accessibility permission; works anywhere standard copy does."""
     import time
     original = _get_clipboard()
     sentinel = "__vox_no_selection__"
@@ -1383,13 +1891,26 @@ def edit_selection(transform) -> str:
          'tell application "System Events" to keystroke "c" using command down')
     time.sleep(0.15)
     selected = _get_clipboard()
+    _osa(f'set the clipboard to {_as_str(original)}')
     if selected == sentinel or not selected.strip():
-        _osa(f'set the clipboard to {_as_str(original)}')
+        return None
+    return selected
+
+
+def edit_selection(transform) -> str:
+    """Rewrite the user's SELECTED text: copy it (⌘C), run transform(text)->text, paste it back
+    (⌘V), then restore the clipboard. `transform` is a callable (e.g. an LLM call). Needs
+    Accessibility permission; works anywhere standard copy/paste does (Docs, editors, fields)."""
+    selected = selected_text()
+    if selected is None:
         return "Highlight some text first, then say it again."
-    new_text = (transform(selected) or "").strip()
+    try:
+        new_text = (transform(selected) or "").strip()
+    except Exception as exc:  # never paste an error over the user's text
+        return f"Couldn't rewrite it ({str(exc)[:120]}). Your text is untouched."
     if not new_text:
-        _osa(f'set the clipboard to {_as_str(original)}')
         return "The brain returned nothing — left your text as is."
+    original = _get_clipboard()
     _osa(f'set the clipboard to {_as_str(new_text)}\n'
          'tell application "System Events" to keystroke "v" using command down\n'
          'delay 0.1\n'
@@ -1479,6 +2000,219 @@ def _click_variant(target: str, button: str, clicks: int, verb: str) -> str:
     except Exception as exc:
         return f"failed: couldn't {verb} {label!r} ({exc})."
     return f"{verb}ed {label}"
+
+
+# Settings Vox may change when asked out loud. Deliberately the harmless, everyday ones: never the
+# brains, keys, permissions, or anything about what Vox is allowed to do on its own.
+VOICE_SETTINGS = {
+    "tts_enabled": "speak replies out loud",
+    "kokoro_voice": "the voice it speaks with",
+    "learning_mode": "learning new commands (auto / suggest / off)",
+    "auto_dictation": "typing automatically into text fields",
+    "small_brain_thinking": "thinking before answering (on / off)",
+    "screen_vision_enabled": "answering questions about the screen",
+    "agent_alerts": "how coding agents get your attention (bubble / speak / off)",
+    "bubble_corner": "where notification bubbles appear",
+    "fast_wake": "fast wake",
+}
+
+_VOICE_SETTING_PHRASES = [
+    (r"(?:reply|answer|respond)\s+(?:silently|quietly|without (?:talking|speaking))", "tts_enabled", "false"),
+    (r"(?:stop|don'?t|do not)\s+(?:speaking|talking)\s+(?:replies|back|out loud)", "tts_enabled", "false"),
+    (r"(?:mute|silence)\s+(?:your\s+)?(?:replies|voice)", "tts_enabled", "false"),
+    (r"(?:speak|say|talk)\s+(?:replies|your replies)?\s*(?:out loud|aloud)", "tts_enabled", "true"),
+    (r"(?:speak|talk)\s+(?:to me\s+)?again|(?:unmute|turn on)\s+(?:your\s+)?(?:replies|voice)", "tts_enabled", "true"),
+    (r"(?:stop|don'?t)\s+learning(?:\s+(?:new\s+)?commands)?", "learning_mode", "off"),
+    (r"(?:start|resume)\s+learning(?:\s+(?:new\s+)?commands)?", "learning_mode", "auto"),
+]
+
+
+_PLAYERS = {"spotify": "Spotify", "apple music": "Music", "music": "Music"}
+
+
+def media(arg: str) -> str:
+    """Play / pause / next / previous on the music player, WITHOUT bringing it forward. Spotify and
+    Music take AppleScript in the background; anything else (YouTube, podcasts in a browser) gets the
+    system media key, the same as the keyboard's ⏯ ⏭ ⏮ keys."""
+    action, _, app = (arg or "playpause:").partition(":")
+    app = app.strip()
+    if action in ("play", "pause", "playpause") and app in ("", "browser"):
+        # YouTube's own button knows whether it's playing ("Pause (k)" while playing, "Play (k)" while
+        # paused). The media key is a TOGGLE: "play" on a playing video paused it (logged 7c4aafe2).
+        spotify_playing = app == "" and _music_app_playing() is not None
+        if not spotify_playing:
+            yt = _youtube(action)
+            if yt is not None:
+                return yt
+        if app == "browser":
+            app = ""
+    if app == "musicapp":   # "play music": Spotify/Music (or the media key), skipping the YouTube check
+        app = ""
+    player = _PLAYERS.get(app)
+    if player is None and action in ("pause", "next", "previous"):
+        # Not named: Spotify / Music only if it's actually PLAYING. Otherwise the system media key,
+        # which macOS sends to whatever is playing (a YouTube tab included). Before, an idle Spotify
+        # that was merely open got the "pause" while YouTube kept playing.
+        for name in ("Spotify", "Music"):
+            ok, out = _osa(f'tell application "System Events" to (exists process "{name}")')
+            if ok and out.strip() == "true":
+                ok, state = _osa(f'tell application "{name}" to player state as string')
+                if ok and state.strip() == "playing":
+                    player = name
+                    break
+    verbs = {"pause": "pause", "play": "play", "playpause": "playpause",
+             "next": "next track", "previous": "previous track"}
+    if player is not None:
+        ok, out = _osa(f'tell application "{player}" to {verbs.get(action, "playpause")}')
+        if ok:
+            return {"pause": f"Paused {player}.", "play": f"Playing {player}.",
+                    "next": "Next track.", "previous": "Previous track."}.get(action, f"{player}: play/pause.")
+    if _media_key(action):
+        return {"next": "Next track.", "previous": "Previous track."}.get(action, "Play/pause.")
+    return "Couldn't control the music." if player else "Nothing's playing that I can control."
+
+
+def _music_app_playing() -> str | None:
+    """Spotify or Music if one of them is playing right now, else None."""
+    for name in ("Spotify", "Music"):
+        ok, out = _osa(f'tell application "System Events" to (exists process "{name}")')
+        if ok and out.strip() == "true":
+            ok, state = _osa(f'tell application "{name}" to player state as string')
+            if ok and state.strip() == "playing":
+                return name
+    return None
+
+
+def _youtube(action: str) -> str | None:
+    """Play/pause the YouTube video in the browser by its own button, and only if that changes
+    something. None when no YouTube player is visible (then the media key is used)."""
+    try:
+        from vox import ax
+        from AppKit import NSWorkspace
+        name = browser()
+        pid = next((int(a.processIdentifier()) for a in NSWorkspace.sharedWorkspace().runningApplications()
+                    if (a.localizedName() or "").replace("\u200e", "").lower() == name.lower()), None)
+        if pid is None:
+            return None
+        with ax.pinned_to(pid, name):
+            labels = ax.targets(limit=400) or []
+            playing = any(l.startswith("Pause (k)") or l == "Pause keyboard shortcut k" for l in labels)
+            paused = any(l.startswith("Play (k)") or l == "Play keyboard shortcut k" for l in labels)
+            if not (playing or paused):
+                return None
+            if (action == "play" and playing) or (action == "pause" and paused):
+                return f"It's already {'playing' if playing else 'paused'}."
+            res = ax.click("Pause (k)" if playing else "Play (k)")
+        if res and res[0] == "clicked":
+            return "Paused the video." if playing else "Playing the video."
+        return None   # couldn't press it (e.g. the browser isn't in front) → media key
+    except Exception:
+        return None
+
+
+def _media_key(action: str) -> bool:
+    """Press the system media key (NX_KEYTYPE_PLAY 16 / NEXT 17 / PREVIOUS 18)."""
+    code = {"next": 17, "previous": 18}.get(action, 16)
+    try:
+        import Quartz
+        from AppKit import NSEvent
+        for down in (True, False):
+            flags = 0xA00 if down else 0xB00
+            ev = NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                14, (0, 0), flags, 0, 0, None, 8, (code << 16) | flags, -1)
+            Quartz.CGEventPost(0, ev.CGEvent())
+        return True
+    except Exception:
+        return False
+
+
+def quit_app(name: str) -> str:
+    """Quit an app that's running (matched against running apps, so it never launches anything)."""
+    want = (name or "").strip().lower()
+    running = running_apps()
+    hit = (next((a for a in running if a.lower() == want), None)
+           or next((a for a in running if a.lower() == resolve_app_name(want).lower()), None)
+           or next((a for a in running if a.lower().startswith(want + " ") or want.startswith(a.lower())), None))
+    if hit is None:
+        return f"{resolve_app_name(want)} isn't open."
+    ok, out = _osa(f'tell application "{hit}" to quit')
+    return f"Closed {hit}." if ok else (_perm_msg() if _is_perm_err(out) else f"Couldn't close {hit} ({out}).")
+
+
+def set_setting(arg: str) -> str:
+    """Change one allow-listed setting ("key=value"). The settings store validates the value."""
+    key, _, value = (arg or "").partition("=")
+    key, value = key.strip(), value.strip()
+    if key not in VOICE_SETTINGS:
+        return "That one can only be changed in Vox's settings."
+    try:
+        from vox.web import settings_store
+        meta = next((s for s in settings_store.all() if s["key"] == key), None)
+        if meta is None:
+            return "That setting isn't available."
+        v = value.lower() in ("true", "on", "yes", "1") if meta["type"] == "toggle" else value
+        settings_store.set(key, v)
+    except Exception as exc:
+        return f"Couldn't change that ({exc})."
+    if key == "tts_enabled":
+        return "OK, I'll reply silently." if v is False else "OK, I'll speak my replies again."
+    return f"Done: {VOICE_SETTINGS[key]} is now {value}."
+
+
+def _log_issue(text: str) -> str:
+    text = (text or "").strip()
+    if len(text.split()) < 3:  # "log issue I" — cut off mid-sentence (logged as 'i' once)
+        return "What went wrong? Say 'log an issue' and then describe it, in one go."
+    from vox import issues
+    issues.add(text)
+    try:  # confirmed out loud by dispatch (_SPOKEN_INTENTS) and quietly on screen too
+        from vox import bubble
+        bubble.show(f"Issue logged: {text[:120]}", source="Vox", duration=4)
+    except Exception:
+        pass
+    return "Issue logged."
+
+
+def point_at(target: str) -> str:
+    """Show where something is: ring it on screen without clicking (ideas #69.2). Accepts a control
+    label ("Export") or a badge number from "show clickable" ("14"). On a web page whose AX tree is
+    down, falls back to the page's own elements, like click-by-label does."""
+    from vox import overlay
+    t = (target or "").strip()
+    if not t:
+        return "Point at what? Try 'point at Export'."
+    from vox import ax
+    n = int(t) if t.isdigit() else _to_index(t.lower())
+    hit = ax.frame_index(n - 1) if n is not None else None
+    if hit is None and not t.isdigit():
+        hit = ax.frame_of(t)
+    if hit is None and not t.isdigit():
+        try:
+            from vox import targets
+            items = targets.visible_targets(400) or []
+            low = t.lower()
+            exact = [it for it in items if it["label"].strip().lower() == low]
+            loose = sorted((it for it in items if low in it["label"].strip().lower()), key=lambda it: len(it["label"]))
+            it = (exact or loose or [None])[0]
+            if it:
+                hit = (it["label"], (it["x"], it["y"], it["w"], it["h"]))
+        except Exception:
+            hit = None
+    if hit is None:
+        try:  # not found by name: look at the screen (vision badge pick) before giving up
+            from vox import executor
+            seen = executor._point_by_vision(target)
+            if seen:
+                return seen
+        except Exception:
+            pass
+        return f"I couldn't find {target!r} on screen."
+    label, (x, y, w, h) = hit
+    try:
+        overlay.point([{"x": x, "y": y, "w": w, "h": h, "label": label or target}])
+    except overlay.OverlayUnavailable as exc:
+        return f"failed: couldn't point ({exc})."
+    return f"There's {label or target}."
 
 
 def _right_click(target: str) -> str:

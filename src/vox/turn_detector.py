@@ -32,7 +32,9 @@ MAX_SECONDS = 8
 MAX_SAMPLES = MAX_SECONDS * SAMPLE_RATE  # 128000 → 800 mel frames
 
 _MODEL_REPO = "pipecat-ai/smart-turn-v3"
-_MODEL_FILE = "smart-turn-v3.0.onnx"
+# v3.2 (Jan 2026) handles noisy rooms and short answers better, and fixed a padding bug in training:
+# it expects silence padded at the START. pipecat bundles it as its default. (research/listening-and-stt-2026.md H8)
+_MODEL_FILE = "smart-turn-v3.2-cpu.onnx"
 
 _SESSION = None      # cached onnxruntime.InferenceSession
 _MEL_FILTERS = None  # cached (80, 201) slaney mel filterbank
@@ -49,7 +51,7 @@ def _cache_dir() -> str:
 
 
 def _model_path() -> str:
-    """Ensure smart-turn-v3.0.onnx is in ~/.cache/vox/smart-turn/ (download once); return its path."""
+    """Ensure the smart-turn model is in ~/.cache/vox/smart-turn/ (download once); return its path."""
     path = os.path.join(_cache_dir(), _MODEL_FILE)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
@@ -183,13 +185,16 @@ def _to_mono_float(audio, sample_rate: int) -> np.ndarray:
 
 
 def _prepare_input(audio, sample_rate: int) -> np.ndarray:
-    """Replicate pipecat's inference.py: take the last 8 s, do_normalize, log-mel → (1, 80, 800)."""
+    """Replicate pipecat's v3.2 inference: keep the last 8 s, pad zeros at the START
+    (audio_utils.truncate_audio_to_last_n_seconds), then do_normalize over the padded 8 s, then
+    log-mel → (1, 80, 800). Padding on the right (the v3.0 recipe) shows a short turn followed by
+    seconds of fake silence, which reads as "finished" and cut people off mid-thought."""
     a = _to_mono_float(audio, sample_rate)
     if a.size > MAX_SAMPLES:
         a = a[-MAX_SAMPLES:]
+    if a.size < MAX_SAMPLES:
+        a = np.pad(a, (MAX_SAMPLES - a.size, 0))
     a = _zero_mean_unit_var(a)
-    if a.size < MAX_SAMPLES:  # right-pad with zeros to exactly 8 s (padding="max_length")
-        a = np.pad(a, (0, MAX_SAMPLES - a.size))
     feats = _log_mel_features(a.astype(np.float64))
     return feats[None, :, :].astype(np.float32)
 
@@ -200,9 +205,11 @@ def probability_complete(audio, sample_rate: int = SAMPLE_RATE) -> float:
     session = _get_session()
     try:
         feats = _prepare_input(audio, sample_rate)
-        logit = session.run(None, {"input_features": feats})[0]
-        logit = float(np.asarray(logit).reshape(-1)[0])
-        return 1.0 / (1.0 + float(np.exp(-logit)))
+        out = session.run(None, {"input_features": feats})[0]
+        # The exported model already ends in a sigmoid: its output (named "logits") IS the
+        # probability, and pipecat reads it straight off. Applying another sigmoid squashed every
+        # score into 0.50–0.73, so every pause looked "complete" (the old "~0.73 even on a pause").
+        return float(np.clip(np.asarray(out).reshape(-1)[0], 0.0, 1.0))
     except SmartTurnUnavailable:
         raise
     except Exception as exc:

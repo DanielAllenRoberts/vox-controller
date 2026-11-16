@@ -25,10 +25,10 @@ Voice-upgrade loop 3 — KILLABLE STREAMING TTS (Kokoro path only):
 """
 
 import os
-import queue
+import re
 import subprocess
 import tempfile
-import threading
+import time
 import wave
 
 from vox import speech_lock
@@ -63,13 +63,65 @@ def _persona_voice(field: str) -> str:
     return ""
 
 
+_RECENT_SPEECH: list[dict] = []  # what Vox said lately: [{text, start, end}], for the echo guard
+
+
+# Units the voices read letter by letter ("16 m m"): spoken as words (logged issue 3a049a57). Only a
+# number followed by the unit, so "mm" in a word or "MB" in a sentence about files is left alone.
+_UNITS = [
+    (r"°\s?C\b", " degrees Celsius"), (r"°\s?F\b", " degrees Fahrenheit"), (r"°", " degrees"),
+    (r"km/h\b", " kilometres per hour"), (r"mph\b", " miles per hour"), (r"m/s\b", " metres per second"),
+    (r"mm\b", " millimetres"), (r"cm\b", " centimetres"), (r"km\b", " kilometres"), (r"m\b", " metres"),
+    (r"kg\b", " kilograms"), (r"g\b", " grams"), (r"ml\b", " millilitres"), (r"l\b", " litres"),
+    (r"hPa\b", " hectopascals"), (r"mb\b", " millibars"), (r"KB\b", " kilobytes"), (r"MB\b", " megabytes"),
+    (r"GB\b", " gigabytes"), (r"TB\b", " terabytes"), (r"%", " percent"),
+]
+# Case-sensitive on purpose: "5 MB" is megabytes, "5 mb" millibars.
+_UNIT_RE = [(re.compile(r"(?<=\d)\s?" + pat), word) for pat, word in _UNITS]
+
+
+def speakable(text: str) -> str:
+    """Text as it should be SAID: numbers' units spelled out."""
+    out = text
+    for rx, word in _UNIT_RE:
+        out = rx.sub(word, out)
+    return out
+
+
 def speak(text: str) -> None:
     if not _setting("tts_enabled", CONFIG.tts_enabled) or not text.strip():
         return
+    text = speakable(text)
     # Wait for any agent that's already talking — Vox and each MCP server are separate processes
     # and would otherwise speak over each other (see vox/speech_lock.py).
     with speech_lock.hold("vox"):
-        _speak_now(text)
+        entry = {"text": text, "start": time.monotonic(), "end": None}
+        _RECENT_SPEECH.append(entry)
+        del _RECENT_SPEECH[:-5]
+        try:
+            _speak_now(text)
+        finally:
+            entry["end"] = time.monotonic()
+
+
+def is_echo(heard: str, window: float = 4.0) -> bool:
+    """Is `heard` just Vox hearing ITSELF (its reply coming back through the speakers into the mic)?
+    True when it was captured while Vox was speaking or within `window` seconds after, and most of its
+    words are words Vox just said. That loop made Vox answer its own voice (logged issue aa508d85)."""
+    import re as _re
+    words = _re.findall(r"[a-z0-9']+", (heard or "").lower())
+    # At least 4 words and 80% overlap: an echo replays a long run of the reply, while a person
+    # answering it ("yes, search for it") reuses a few of its words and must still be heard.
+    if len(words) < 4:
+        return False
+    now = time.monotonic()
+    for e in reversed(_RECENT_SPEECH):
+        if e["end"] is not None and now - e["end"] > window:
+            continue
+        said = set(_re.findall(r"[a-z0-9']+", e["text"].lower()))
+        if sum(w in said for w in words) / len(words) >= 0.8:
+            return True
+    return False
 
 
 def _speak_now(text: str) -> None:
@@ -141,6 +193,18 @@ def stop_speaking() -> None:
             player.stop()
         except Exception:
             pass
+    proc = _SAY_PROC  # the `say` engine too, so the stop button works whichever voice is in use
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def is_speaking() -> bool:
+    """True while a reply is playing (either engine)."""
+    proc = _SAY_PROC
+    return _ACTIVE_PLAYER is not None or (proc is not None and proc.poll() is None)
 
 
 def _speak_say(text: str, voice=None, rate=None) -> None:
@@ -157,10 +221,18 @@ def _speak_say(text: str, voice=None, rate=None) -> None:
     if rate:
         cmd += ["-r", str(rate)]
     cmd.append(text)
+    global _SAY_PROC
     try:
-        subprocess.run(cmd, capture_output=True, timeout=_say_timeout(text, rate))
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _SAY_PROC = proc
+        try:
+            proc.wait(timeout=_say_timeout(text, rate))
+        except subprocess.TimeoutExpired:
+            proc.kill()
     except Exception:
         pass  # never let a TTS hiccup (or hang) break the loop
+    finally:
+        _SAY_PROC = None
 
 
 def _say_timeout(text: str, rate=None) -> float:
@@ -219,7 +291,19 @@ def _get_kokoro():
     from kokoro_onnx import Kokoro  # deferred: only imported on the kokoro path
     model_path = _ensure_file(_KOKORO_MODEL_URL, "kokoro-v1.0.onnx")
     voices_path = _ensure_file(_KOKORO_VOICES_URL, "voices-v1.0.bin")
-    _KOKORO = Kokoro(model_path, voices_path)
+    threads = CONFIG.kokoro_threads
+    if threads > 0:
+        # Kokoro(...) builds its InferenceSession with default options = one thread per core (all 10
+        # on an M4, E-cores included), so TTS fought STT and barge-in for the whole machine. Measured
+        # on a 1.8 s reply: default 0.61 s wall / 2.9 CPU-s vs 4 threads 0.54 s / 2.1 CPU-s.
+        import onnxruntime as rt
+        so = rt.SessionOptions()
+        so.intra_op_num_threads = threads
+        so.inter_op_num_threads = 1  # one sequential graph; inter-op threads would only idle-spin
+        sess = rt.InferenceSession(model_path, sess_options=so, providers=["CPUExecutionProvider"])
+        _KOKORO = Kokoro.from_session(sess, voices_path)
+    else:
+        _KOKORO = Kokoro(model_path, voices_path)
     return _KOKORO
 
 
@@ -270,7 +354,8 @@ def _speak_kokoro(text: str, voice=None, speed=None) -> bool:
 # through a sounddevice OutputStream fed by a bounded queue — so audio starts after the first
 # sentence and stop() halts playback + drops the unplayed queue within a few hundred ms.
 
-_ACTIVE_PLAYER = None  # the _StreamingPlayer currently speaking (for stop_speaking()); None when idle
+_ACTIVE_PLAYER = None  # the _AfplayPlayer currently speaking (for stop_speaking()); None when idle
+_SAY_PROC: "subprocess.Popen | None" = None  # the `say` process currently speaking, if any
 
 # Sentence/clause boundary punctuation. Splitting on these lets the FIRST chunk start playing while
 # later chunks are still synthesizing (lower latency) and makes the reply killable between chunks.
@@ -311,135 +396,15 @@ def _close_quietly(stream) -> None:
         pass
 
 
-class _StreamingPlayer:
-    """Synthesizes Kokoro chunks on a worker thread and plays them through one sounddevice
-    OutputStream fed by a bounded float32 queue. `play()` blocks until the whole reply has played
-    (preserving speak()'s contract); `stop()` sets a stop event that aborts the stream and clears
-    the queue so play() returns within a few hundred ms (one block of audio)."""
-
-    def __init__(self, kokoro, voice: str, speed: float, sample_rate: int):
-        self._kokoro = kokoro
-        self._voice = voice
-        self._speed = speed
-        self._sr = sample_rate
-        self._q: "queue.Queue" = queue.Queue(maxsize=64)  # float32 PCM blocks; None = end-of-stream
-        self._stop = threading.Event()
-        self._done = threading.Event()
-
-    def stop(self) -> None:
-        """Halt playback immediately and drop the unplayed queue."""
-        self._stop.set()
-        try:  # drain whatever is buffered so the stream finishes its current block and ends
-            while True:
-                self._q.get_nowait()
-        except queue.Empty:
-            pass
-
-    def play(self, chunks: list[str], seed=None) -> None:
-        """Drive the OutputStream over the synthesized queue, blocking until done or stopped.
-        `seed` (optional float32 PCM) is the audio for chunks[0] already synthesized by the caller
-        (so the first chunk isn't synthesized twice) — it's queued first, then the worker handles
-        any `chunks` that follow."""
-        import time
-        import numpy as np
-        import sounddevice as sd
-
-        if seed is not None and seed.size:
-            for i in range(0, seed.size, 2048):
-                self._q.put(seed[i:i + 2048])
-
-        synth = threading.Thread(target=self._synth_worker, args=(chunks,), daemon=True)
-        synth.start()
-
-        buf = np.zeros(0, dtype=np.float32)
-        eos = False  # end-of-stream sentinel has been seen → stop once `buf` is fully drained
-
-        def callback(outdata, frames, time_info, status):
-            nonlocal buf, eos
-            if self._stop.is_set():
-                raise sd.CallbackStop()
-            # Top up `buf` from the queue until we have a full block (or hit end-of-stream).
-            while buf.size < frames:
-                try:
-                    item = self._q.get_nowait()
-                except queue.Empty:
-                    break
-                if item is None:  # end-of-stream sentinel: remember it, play out whatever remains
-                    eos = True
-                    break
-                buf = np.concatenate([buf, item])
-            n = min(frames, buf.size)
-            outdata[:n, 0] = buf[:n]
-            if n < frames:
-                outdata[n:, 0] = 0.0  # underrun / tail → silence, keep stream alive for more chunks
-            buf = buf[n:]
-            # Once the sentinel was seen AND the buffer is fully drained, the reply is finished.
-            # (The old code consumed the sentinel on a partial last block and then never stopped, so
-            #  finished_callback never fired and play() hung forever — the daemon-freeze bug.)
-            if eos and buf.size == 0:
-                raise sd.CallbackStop()
-
-        stream = sd.OutputStream(samplerate=self._sr, channels=1, dtype="float32",
-                                 blocksize=1024, callback=callback,
-                                 finished_callback=self._done.set)
-        stream.start()
-        try:
-            deadline = time.monotonic() + 60.0  # absolute backstop: never hang the daemon (spoken replies are short)
-            # Block until playback finishes (end-of-stream reached) or stop() fires.
-            while not self._done.wait(timeout=0.05):
-                if self._stop.is_set() or time.monotonic() > deadline:
-                    break
-        finally:
-            self._stop.set()  # ensure the synth worker exits even if playback ended early
-            # Tear the stream down WITHOUT Pa_StopStream. `with sd.OutputStream(...)` used to do the
-            # teardown, but its __exit__ calls stop() — which WAITS for the buffers to drain and
-            # deadlocks on an audio-device change (opening Spotify, a Bluetooth/headphone switch).
-            # That wedged the whole voice loop with no audio and no log line, past every backstop
-            # above, and left the process needing a kill. Same CoreAudio trap MicStream documents:
-            # abort() is immediate, and close() runs off the loop so even a stuck close can't freeze
-            # the daemon (a leaked stream object is cheap next to a dead assistant).
-            try:
-                stream.abort()  # Pa_AbortStream — returns at once, doesn't drain
-            except Exception:
-                pass
-            threading.Thread(target=_close_quietly, args=(stream,), daemon=True).start()
-            synth.join(timeout=2.0)
-
-    def _synth_worker(self, chunks: list[str]) -> None:
-        """Synthesize each chunk and push its PCM onto the queue; a None sentinel marks the end.
-        Stops early if stop() fired so we don't synthesize audio nobody will hear."""
-        import numpy as np
-        try:
-            for chunk in chunks:
-                if self._stop.is_set():
-                    break
-                samples, _sr = self._kokoro.create(chunk, voice=self._voice, speed=self._speed)
-                pcm = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
-                if pcm.size == 0:
-                    continue
-                # Feed in queue-sized pieces, bailing out fast if stop() fires mid-chunk.
-                for i in range(0, pcm.size, 2048):
-                    if self._stop.is_set():
-                        return
-                    self._q.put(pcm[i:i + 2048])
-        finally:
-            # End-of-stream sentinel — BLOCKING put (with a timeout) so it's never dropped when the
-            # queue is full. (put_nowait could drop it on a full queue, losing the sentinel → play()
-            # would hang until the backstop deadline on long replies.) The player drains continuously,
-            # so a slot frees in ~one audio block; the timeout is only a safety net.
-            try:
-                self._q.put(None, timeout=5.0)
-            except queue.Full:
-                pass
-
-
 def _speak_kokoro_streaming(text: str, voice=None, speed=None) -> bool:
-    """Streaming, killable Kokoro playback (loop 3). Synthesizes the reply sentence-by-sentence and
-    plays through a sounddevice OutputStream so audio starts after the first sentence and
-    stop_speaking() can cut it mid-reply. Blocks until the reply finishes or is stopped. `voice`/
-    `speed` None → resolve from the active persona / settings; a provided value overrides (used by
-    speak_with for the MCP). Returns True if it handled playback (including an early stop); raises
-    on any failure so the caller can fall back to the simple blocking kokoro path, then to `say`."""
+    """Interruptible Kokoro playback: one sentence at a time, each through `afplay`, with the next
+    sentence synthesized while the current one plays. stop_speaking() kills the playing sentence and
+    drops the rest.
+
+    It used to be a sounddevice OutputStream. Two problems: PortAudio freezes its device list at
+    startup, so after switching from the Mac's speakers to headphones Vox kept talking through the
+    old device (logged issue 8c19add9); and its stream-finish detection hung in the field. afplay
+    starts fresh on the CURRENT output device for every sentence and is just a process to kill."""
     global _ACTIVE_PLAYER
     import numpy as np
 
@@ -449,20 +414,78 @@ def _speak_kokoro_streaming(text: str, voice=None, speed=None) -> bool:
     if speed is None:
         speed = float(_setting("kokoro_speed", CONFIG.kokoro_speed))
     speed = float(speed)
-
     chunks = _split_chunks(text)
     if not chunks:
         return True
 
-    # Synthesize the first chunk up front: it gives us Kokoro's real sample rate (so the
-    # OutputStream isn't hard-coded to 24 kHz) AND becomes the seed so we don't synthesize it twice.
-    samples, sample_rate = kokoro.create(chunks[0], voice=voice, speed=speed)
-    seed = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
-
-    player = _StreamingPlayer(kokoro, voice, speed, int(sample_rate))
+    player = _AfplayPlayer()
     _ACTIVE_PLAYER = player
     try:
-        player.play(chunks[1:], seed=seed)  # worker synthesizes the rest; seed plays first
+        def synth(chunk):
+            samples, rate = kokoro.create(chunk, voice=voice, speed=speed)
+            pcm = (np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0) * 32767.0).astype("<i2")
+            return _write_wav(pcm, int(rate)), pcm.size / float(rate or 24000)
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(1) as pool:
+            nxt = pool.submit(synth, chunks[0])
+            for i in range(len(chunks)):
+                wav, seconds = nxt.result()
+                if i + 1 < len(chunks) and not player.stopped:
+                    nxt = pool.submit(synth, chunks[i + 1])  # synthesize ahead while this one plays
+                try:
+                    if not player.stopped:
+                        player.play(wav, seconds)
+                finally:
+                    _rm(wav)
+                if player.stopped:
+                    if i + 1 < len(chunks):
+                        try:
+                            _rm(nxt.result()[0])
+                        except Exception:
+                            pass
+                    break
         return True
     finally:
         _ACTIVE_PLAYER = None
+
+
+class _AfplayPlayer:
+    """Plays one wav at a time through afplay; stop() kills it and prevents further playback."""
+
+    def __init__(self):
+        self.stopped = False
+        self._proc: subprocess.Popen | None = None
+
+    def play(self, wav: str, seconds: float) -> None:
+        self._proc = subprocess.Popen(["afplay", wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + seconds + 10.0  # never wait forever on a wedged device
+        while self._proc.poll() is None:
+            if self.stopped or time.monotonic() > deadline:
+                self._proc.terminate()
+                break
+            time.sleep(0.03)
+
+    def stop(self) -> None:
+        self.stopped = True
+        p = self._proc
+        if p is not None and p.poll() is None:
+            p.terminate()
+
+
+def _write_wav(pcm16, rate: int) -> str:
+    fd, path = tempfile.mkstemp(prefix="vox_kokoro_", suffix=".wav")
+    os.close(fd)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm16.tobytes())
+    return path
+
+
+def _rm(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass

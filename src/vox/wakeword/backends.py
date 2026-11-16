@@ -9,7 +9,8 @@ Pick via `config.wake_backend`. See docs/plan/modes.md.
 
 import re
 
-from vox.audio import capture_utterance
+from vox import runtime
+from vox.audio import _setting, capture_utterance, voiced_ms
 from vox.wakeword.openwakeword_detector import OpenWakeWordDetector
 
 
@@ -23,6 +24,13 @@ def phrase_match(t: str, phrases) -> bool:
     drops the inter-word space ("quit vox" heard as "quitvox") by comparing space-stripped too."""
     t2 = t.replace(" ", "")
     return any(p in t or p.replace(" ", "") in t2 for p in phrases)
+
+
+# Words at least one of which appears in every idle wake phrase and "vox, …" one-shot. "vox" is
+# kept with the spellings Vosk actually produces for it; the measured best set (see
+# research/listening-and-stt-2026.md R2).
+_WAKE_KEYWORDS = ("vox", "vaux", "vocks", "fox", "box", "control", "dashboard", "restart", "reboot",
+                  "hey", "quit", "take", "exit")
 
 
 class WhisperWakeBackend:
@@ -50,7 +58,56 @@ class WhisperWakeBackend:
                 max_seconds=getattr(self._cfg, "idle_max_utterance_seconds", self._cfg.max_utterance_seconds))
             if audio is None:
                 continue
+            voiced = None
+            gate = _setting("idle_speech_gate", self._cfg.idle_speech_gate)
+            if not runtime.is_typed(audio) and (gate or self._cfg.debug):
+                voiced = voiced_ms(audio)
+                try:  # a stray dashboard value must not take down the idle loop
+                    min_ms = int(float(_setting("idle_speech_gate_ms", self._cfg.idle_speech_gate_ms)))
+                except (TypeError, ValueError):
+                    min_ms = self._cfg.idle_speech_gate_ms
+                if gate and voiced < min_ms:
+                    # Too little voice to hold a wake phrase: skip the ~1.4 CPU-s Whisper pass.
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit(f"  [debug] idle gate: skipped (voiced {voiced}ms < {min_ms}ms)")
+                    continue
+            if (not runtime.is_typed(audio) and not runtime.last_capture_ptt
+                    and _setting("fast_wake", getattr(self._cfg, "fast_wake", True))):
+                # Fast wake: is the WHOLE utterance a wake phrase? A Vosk grammar of only those
+                # phrases answers in ~5 ms, so "hey vox" wakes without the ~0.6 s Whisper pass (the
+                # user measured ~1.5 s from "hey vox" to the ready sound). Measured: 73% of wake
+                # clips caught here, 0 false wakes on 195 ambient sentences and fillers. A miss just
+                # falls through to Whisper below, so nothing gets worse.
+                label = self._fast_wake(audio)
+                if label is not None:
+                    if mic is not None:
+                        mic.flush()
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit(f"  [debug] idle fast wake (vosk) → {label}")
+                    return label
+            if (not runtime.is_typed(audio) and not runtime.last_capture_ptt
+                    and _setting("idle_wake_precheck", getattr(self._cfg, "idle_wake_precheck", False))):
+                # A ~3 ms Vosk keyword check before the ~1.4 CPU-s Whisper pass: idle Whisper ran on
+                # every sound and threw 99% of it away. Measured on synthetic voices: skips 58/60 of
+                # the user's real ambient sentences and all filler, but drops 7/75 wakes Whisper
+                # would have caught (all fast "vox open …" one-shots). Hence off by default until
+                # it's measured on the user's own recordings (Voice Lab).
+                try:
+                    from vox.stt import vosk_recognizer
+                    heard = vosk_recognizer.spot_keywords(audio, _WAKE_KEYWORDS, self._cfg.sample_rate)
+                except Exception:
+                    heard = None  # Vosk unavailable → behave exactly as before
+                if heard is not None and not heard:
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit("  [debug] idle precheck: no wake word → skipped Whisper")
+                    continue
             text = self._transcriber.transcribe(audio, hotwords=self._cfg.command_hotwords)
+            if not runtime.is_typed(audio):
+                from vox import tts
+                if tts.is_echo(text):  # Vox's own reply heard back through the speakers
+                    if self._cfg.debug and self._out is not None:
+                        self._out.emit(f"  [debug] idle ignored own voice: {text!r}")
+                    continue
             # Passing/ambient audio that piled up in the mic buffer WHILE we were transcribing is
             # stale — drop it so idle stays synced to LIVE audio instead of working through a growing
             # backlog. In a talky room that backlog would otherwise lag, accumulate, and pile on
@@ -59,15 +116,45 @@ class WhisperWakeBackend:
                 mic.flush()
             label = self.match(text)
             cmd = None if label is not None else self._oneshot(text)
+            if label is None and cmd is None and (runtime.is_typed(audio) or runtime.last_capture_ptt):
+                cmd = text.strip()  # typed or hold-to-talk from idle: no need to say "vox" first
             if self._cfg.debug and self._out is not None and text.strip():
                 # Skip silence captures (empty transcription) — they're pure noise. Real
                 # transcriptions (incl. no-match mishears) still log.
                 tag = label or (f"do:{cmd}" if cmd else "(no match — stayed idle)")
-                self._out.emit(f"  [debug] idle heard: {text!r} → {tag}")
+                vtag = f" · voiced={voiced}ms" if voiced is not None else ""
+                self._out.emit(f"  [debug] idle heard: {text!r} → {tag}{vtag}")
+            if label == "assistant":
+                runtime.wake_remainder = self._after_wake(text)
             if label is not None:
                 return label
             if cmd:
                 return "do:" + cmd
+
+    def _after_wake(self, text: str) -> str:
+        """What came after the wake phrase in the same breath: "hey vox what time is it" → "what
+        time is it". It used to be thrown away, so the question had to be asked twice."""
+        t = normalize(text)
+        for _label, phrases in self._label_phrases:
+            for p in phrases:
+                i = t.find(p)
+                if i >= 0:
+                    rest = t[i + len(p):].strip()
+                    rest = rest.split(p)[0].strip()   # "hey vox X hey vox X" → "X"
+                    return rest if len(rest.split()) >= 2 else ""
+        return ""
+
+    def _fast_wake(self, audio) -> str | None:
+        """The wake label if Vosk confidently hears exactly one wake phrase, else None."""
+        try:
+            from vox.stt import vosk_recognizer
+            phrases = [p for _label, ps in self._label_phrases for p in ps]
+            r = vosk_recognizer.recognize(audio, phrases, self._cfg.sample_rate)
+        except Exception:
+            return None
+        if not r or r["conf"] < 0.6:
+            return None
+        return self.match(r["text"])
 
     def _oneshot(self, text: str) -> str | None:
         # "Vox, <anything>" from idle → run it once, routed through the FULL shared dispatch
@@ -95,6 +182,11 @@ class OpenWakeWordBackend:
         # mic accepted for interface parity with WhisperWakeBackend; openWakeWord drains frames
         # continuously and per-frame, so there's no transcription backlog to flush.
         for frame in frames:
+            typed = runtime.take()
+            if typed is not None:
+                return "do:" + typed.text
+            if runtime.paused:
+                continue
             fired = self._detector.fired(frame)
             if fired is not None:
                 self._detector.reset()

@@ -35,17 +35,17 @@ human result string for the voice layer to speak, or None when nothing matched.
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import re
 import threading
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from vox.config import CONFIG
 
-# Runtime store lives under data/ (gitignored). This file is
-# src/vox/scheduler.py → parents[2] is the repo root.
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+# Runtime store lives under data/ (gitignored) — see vox/paths.py.
+_DATA_DIR = DATA_DIR
 _STORE = _DATA_DIR / "reminders.json"
 
 _LOCK = threading.RLock()
@@ -59,7 +59,7 @@ _WEEKDAYS = {
     "friday": 4, "saturday": 5, "sunday": 6,
 }
 
-VALID_KINDS = ("timer", "alarm", "reminder")
+VALID_KINDS = ("timer", "alarm", "reminder", "routine")   # routine: a request Vox carries out (vox.routines)
 VALID_RECURRENCE = (None, "daily", "weekdays", "weekly")
 
 # Interval recurrence ("every 30 minutes") is stored as the string "every:<seconds>",
@@ -112,6 +112,7 @@ def _clean_job(j) -> dict | None:
         "recurrence": rec,
         "created_at": j.get("created_at") or _iso(_now()),
         "enabled": bool(j.get("enabled", True)),
+        **({"held": True} if j.get("held") else {}),   # waiting for the user to be back (#60)
     }
 
 
@@ -167,6 +168,13 @@ def _announce(job: dict, *, prefix: str = "") -> None:
     a one-shot that fired late on startup."""
     from vox import sounds, tts
     kind = job.get("kind")
+    if kind == "routine":  # a request to carry out, not a line to read out
+        try:
+            from vox import routines
+            routines.run_in_background(job)
+        except Exception:
+            pass
+        return
     text = (job.get("text") or "").strip()
     spoken = ""
     if kind == "reminder":
@@ -578,6 +586,8 @@ def _confirm(kind: str, body: str, fire: datetime, recurrence: str | None) -> st
     every = _recurrence_phrase(recurrence)
     label = kind if kind in VALID_KINDS else "reminder"
     tail = f" to {body}" if body else ""
+    if kind == "routine":
+        tail = f": {body}" if body else ""
     return f"{label.capitalize()} set for {when}{day}{every}{tail}."
 
 
@@ -645,8 +655,35 @@ class _SchedulerThread(threading.Thread):
                 pass  # a bad tick must never take down the thread / daemon
 
 
+_HOLD_MAX = timedelta(hours=12)   # past this a held reminder is said anyway (or dropped by catch-up)
+
+
+def _should_hold(job: dict, now: datetime) -> bool:
+    if job.get("kind") not in ("reminder", "routine"):
+        return False
+    try:
+        from vox.web import settings_store
+        if settings_store.get("reminders_wait_for_you") is False:
+            return False
+    except Exception:
+        pass
+    fire = _parse_iso(job.get("fire_at"))
+    if fire is not None and now - fire > _HOLD_MAX:
+        return False
+    try:
+        from vox import presence
+        return presence.away()
+    except Exception:
+        return False
+
+
 def _tick() -> None:
     """Fire every due+enabled job; roll recurring ones, delete fired one-shots."""
+    try:  # once a day after 03:00: the overnight memory tidy (vox.dream), in its own thread
+        from vox import dream
+        dream.maybe_run()
+    except Exception:
+        pass
     now = _now()
     with _LOCK:
         jobs = _load()
@@ -657,7 +694,14 @@ def _tick() -> None:
             fire = _parse_iso(job["fire_at"])
             if fire is None or fire > now:
                 continue
-            _announce(job)
+            # Reminders and routines wait until you're at the Mac (ideas #60): said to an empty
+            # room they're simply lost. Alarms and timers are meant to go off regardless.
+            if _should_hold(job, now):
+                if not job.get("held"):
+                    job["held"] = True
+                    changed = True
+                continue
+            _announce(job, prefix="While you were away: " if job.pop("held", False) else "")
             if job.get("recurrence"):
                 nxt = _advance(fire, job["recurrence"])
                 while nxt <= now:  # don't replay missed recurrences; catch up to the future
@@ -698,6 +742,9 @@ def _catch_up() -> None:
                 changed = True
                 continue
             # overdue one-shot
+            if job.get("held") and now - fire < _HOLD_MAX:   # still waiting for the user: keep it
+                keep.append(job)
+                continue
             if job.get("enabled", True) and now - fire < _CATCHUP_WINDOW:
                 _announce(job, prefix="While you were away — ")
             changed = True  # dropped (fired-late or stale) either way

@@ -21,10 +21,15 @@ Design notes:
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
+import json
+import re
 import sqlite3
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+_DATA_DIR = DATA_DIR
 DEFAULT_DB = _DATA_DIR / "board.db"
 
 DEFAULT_BOARD = "Workspace"
@@ -63,6 +68,15 @@ CREATE TABLE IF NOT EXISTS card (
     updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_card_list ON card(list_id);
+-- Recently deleted cards, so a delete can be undone ("put them back"). The whole card as JSON plus
+-- where it was. Pruned to the newest TRASH_KEEP.
+CREATE TABLE IF NOT EXISTS card_trash (
+    id          INTEGER PRIMARY KEY,
+    card_json   TEXT    NOT NULL,
+    list_id     INTEGER,
+    list_name   TEXT    NOT NULL DEFAULT '',
+    deleted_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -78,8 +92,21 @@ def connect(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after v1. ALTER TABLE ADD COLUMN keeps existing boards intact.
+_CARD_COLUMNS = (
+    ("due", "TEXT"),                                   # "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM", local time
+    ("checklist", "TEXT NOT NULL DEFAULT '[]'"),       # JSON [{"text": str, "done": bool}]
+    ("archived", "INTEGER NOT NULL DEFAULT 0"),
+    ("reminder_id", "TEXT"),                           # the scheduler job that announces the due date
+)
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(card)")}
+    for col, decl in _CARD_COLUMNS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE card ADD COLUMN {col} {decl}")
     conn.commit()
 
 
@@ -158,6 +185,8 @@ def find_card(conn: sqlite3.Connection, needle: str | int,
     then a substring, then the closest fuzzy match (mis-hears are the norm here, same reason the
     click matcher is fuzzy). Ambiguity resolves to the shortest matching title, which is the most
     specific one. Returns the card dict, or None."""
+    if isinstance(needle, str) and needle.strip().startswith("#") and needle.strip()[1:].isdigit():
+        needle = needle.strip()[1:]   # "#14", the way the board block and short-term memory name cards
     if isinstance(needle, int) or (isinstance(needle, str) and needle.strip().isdigit()):
         return _card_row(conn, int(needle))
     text = _strip_noise(needle)
@@ -268,7 +297,7 @@ def add_list(conn: sqlite3.Connection, name: str, board: str | int | None = None
 
 
 def add_card(conn: sqlite3.Connection, list_name: str, title: str, body: str = "",
-             tags: str = "", board: str | int | None = None) -> dict:
+             tags: str = "", board: str | int | None = None, due: str | None = None) -> dict:
     """Add a card to the end of a column (resolved by name). The primary agent write.
     Raises ValueError if the title is blank or the list can't be resolved."""
     if not (isinstance(title, str) and title.strip()):
@@ -282,13 +311,23 @@ def add_card(conn: sqlite3.Connection, list_name: str, title: str, body: str = "
         (list_id, title.strip(), (body or "").strip(), _norm_tags(tags), pos))
     _touch_board(conn, _board_id_of_list(conn, list_id))
     conn.commit()
+    if due:
+        return update_card(conn, cur.lastrowid, due=due)
     return _card_row(conn, cur.lastrowid)
 
 
 def update_card(conn: sqlite3.Connection, card_id: int, *, title: str | None = None,
-                body: str | None = None, tags: str | None = None) -> dict | None:
-    """Edit a card's title/body/tags in place. Returns the updated card, or None if not found."""
+                body: str | None = None, tags: str | None = None, due: str | None = None,
+                checklist: list | None = None, archived: bool | None = None) -> dict | None:
+    """Edit a card in place. ``due=""`` clears the deadline. Returns the updated card, or None if
+    not found. Changing the title, deadline or archive state re-syncs the card's reminder."""
     sets, params = [], []
+    if due is not None:
+        sets.append("due = ?"); params.append(normalize_due(due))
+    if checklist is not None:
+        sets.append("checklist = ?"); params.append(json.dumps(_norm_checklist(checklist)))
+    if archived is not None:
+        sets.append("archived = ?"); params.append(1 if archived else 0)
     if title is not None:
         if not title.strip():
             raise ValueError("title cannot be blank")
@@ -305,6 +344,8 @@ def update_card(conn: sqlite3.Connection, card_id: int, *, title: str | None = N
     if cur.rowcount == 0:
         return None
     conn.commit()
+    if title is not None or due is not None or archived is not None:
+        _sync_reminder(conn, card_id)
     return _card_row(conn, card_id)
 
 
@@ -332,10 +373,65 @@ def move_card(conn: sqlite3.Connection, card_id: int, to_list: str | int,
     return _card_row(conn, card_id)
 
 
+TRASH_KEEP = 200
+
+
 def delete_card(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Delete a card. It goes to ``card_trash`` first, so ``restore_card`` can bring it back."""
+    row = conn.execute("SELECT * FROM card WHERE id = ?", (card_id,)).fetchone()
+    if row is not None:
+        _cancel_reminder(row["reminder_id"] if "reminder_id" in row.keys() else None)
+        lst = _list_row(conn, row["list_id"]) or {}
+        conn.execute("INSERT INTO card_trash (card_json, list_id, list_name) VALUES (?,?,?)",
+                     (json.dumps(_card_dict(row)), row["list_id"], lst.get("name", "")))
+        conn.execute("DELETE FROM card_trash WHERE id NOT IN "
+                     "(SELECT id FROM card_trash ORDER BY id DESC LIMIT ?)", (TRASH_KEEP,))
     cur = conn.execute("DELETE FROM card WHERE id = ?", (card_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def trash(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Recently deleted cards, newest first: {"trashId", "title", "list", "deletedAt", "card"}."""
+    out = []
+    for r in conn.execute("SELECT * FROM card_trash ORDER BY id DESC LIMIT ?", (int(limit),)):
+        card = json.loads(r["card_json"])
+        out.append({"trashId": r["id"], "title": card.get("title", ""), "list": r["list_name"],
+                    "deletedAt": r["deleted_at"], "card": card})
+    return out
+
+
+def restore_card(conn: sqlite3.Connection, needle: str | int) -> dict | None:
+    """Bring back a deleted card: the most recently deleted one whose title matches ``needle``
+    (exact, then contains), or by trash id. Back into its old column (or the board's first column
+    if that's gone) with its notes, tags, deadline and checklist. None if nothing matches."""
+    rows = trash(conn, TRASH_KEEP)
+    want = str(needle).strip().lower().lstrip("#")
+    hit = None
+    if isinstance(needle, int) or want.isdigit():
+        hit = next((r for r in rows if r["trashId"] == int(want)), None)
+    hit = hit or next((r for r in rows if r["title"].strip().lower() == want), None)
+    hit = hit or next((r for r in rows if want and want in r["title"].lower()), None)
+    if hit is None:
+        return None
+    card = hit["card"]
+    list_id = hit["card"].get("listId")
+    if conn.execute("SELECT 1 FROM board_list WHERE id = ?", (list_id,)).fetchone() is None:
+        first = conn.execute("SELECT id FROM board_list ORDER BY board_id, position LIMIT 1").fetchone()
+        if first is None:
+            return None
+        list_id = first["id"]
+    pos = _next_position(conn, "card", "list_id", list_id)
+    cur = conn.execute(
+        "INSERT INTO card (list_id, title, body, tags, position, checklist) VALUES (?,?,?,?,?,?)",
+        (list_id, card.get("title", ""), card.get("body", ""), _norm_tags(card.get("tags")), pos,
+         json.dumps(card.get("checklist") or [])))
+    conn.execute("DELETE FROM card_trash WHERE id = ?", (hit["trashId"],))
+    _touch_board(conn, _board_id_of_list(conn, list_id))
+    conn.commit()
+    if card.get("due"):
+        return update_card(conn, cur.lastrowid, due=card["due"])   # also re-arms its reminder
+    return _card_row(conn, cur.lastrowid)
 
 
 # --- read API ------------------------------------------------------------------------------------
@@ -362,14 +458,160 @@ def _list_row(conn: sqlite3.Connection, list_id: int) -> dict | None:
 
 
 def _card_dict(r: sqlite3.Row) -> dict:
+    keys = r.keys()
+    try:
+        checklist = json.loads(r["checklist"]) if "checklist" in keys else []
+    except (TypeError, ValueError):
+        checklist = []
     return {
         "id": r["id"], "listId": r["list_id"], "title": r["title"], "body": r["body"],
         "tags": [t.strip() for t in r["tags"].split(",") if t.strip()],
         "position": r["position"], "createdAt": r["created_at"], "updatedAt": r["updated_at"],
+        "due": r["due"] if "due" in keys else None,
+        "checklist": checklist,
+        "archived": bool(r["archived"]) if "archived" in keys else False,
     }
 
 
-def board_snapshot(conn: sqlite3.Connection, board: str | int | None = None) -> dict:
+# --- deadlines, checklists, reminders ------------------------------------------------------------
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+REMINDER_HOUR = 9  # a date-only deadline is announced at 9:00 that morning
+
+
+def normalize_due(value: str | None, today: date | None = None) -> str | None:
+    """A deadline as "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM", or None to clear it. Accepts ISO, plus the
+    words people say: today, tomorrow, a weekday ("friday" = the next one), "next week", "in 3 days".
+    Raises ValueError for anything else."""
+    v = (value or "").strip().lower().rstrip(".")
+    if not v or v in ("none", "no", "clear", "remove"):
+        return None
+    today = today or date.today()
+    v = re.sub(r"^(?:on|by|due|for)\s+", "", v)
+    if v == "today":
+        return today.isoformat()
+    if v == "tomorrow":
+        return (today + timedelta(days=1)).isoformat()
+    if v in ("next week", "in a week"):
+        return (today + timedelta(days=7)).isoformat()
+    m = re.fullmatch(r"in (\d+) (day|week)s?", v)
+    if m:
+        n = int(m.group(1)) * (7 if m.group(2) == "week" else 1)
+        return (today + timedelta(days=n)).isoformat()
+    m = re.fullmatch(r"(?:this |next )?(" + "|".join(_WEEKDAYS) + r")", v)
+    if m:
+        ahead = (_WEEKDAYS.index(m.group(1)) - today.weekday()) % 7 or 7  # the next one, never today
+        return (today + timedelta(days=ahead)).isoformat()
+    try:
+        if "t" in v or " " in v:
+            return datetime.fromisoformat(v.replace(" ", "T")).strftime("%Y-%m-%dT%H:%M")
+        return date.fromisoformat(v).isoformat()
+    except ValueError:
+        raise ValueError(f"I couldn't read {value!r} as a date") from None
+
+
+def due_datetime(due: str | None) -> datetime | None:
+    """When a deadline's reminder goes off: its time, or 9:00 on a date-only deadline."""
+    if not due:
+        return None
+    try:
+        if "T" in due:
+            return datetime.fromisoformat(due)
+        return datetime.combine(date.fromisoformat(due), time(REMINDER_HOUR))
+    except ValueError:
+        return None
+
+
+def _norm_checklist(items) -> list[dict]:
+    out = []
+    for it in items or []:
+        if isinstance(it, str):
+            text, done = it, False
+        elif isinstance(it, dict):
+            text, done = str(it.get("text", "")), bool(it.get("done", False))
+        else:
+            continue
+        if text.strip():
+            out.append({"text": text.strip(), "done": done})
+    return out
+
+
+def _cancel_reminder(job_id) -> None:
+    if not job_id:
+        return
+    try:
+        from vox import scheduler
+        scheduler.cancel_job(job_id)
+    except Exception:
+        pass
+
+
+def _sync_reminder(conn: sqlite3.Connection, card_id: int) -> None:
+    """Keep one reminder per card with a future deadline: replace it when the deadline or title
+    changes, drop it when the deadline is cleared, already past, or the card is archived."""
+    r = conn.execute("SELECT title, due, archived, reminder_id FROM card WHERE id = ?", (card_id,)).fetchone()
+    if r is None:
+        return
+    _cancel_reminder(r["reminder_id"])
+    new_id = None
+    when = due_datetime(r["due"])
+    if when is not None and when > datetime.now() and not r["archived"]:
+        try:
+            from vox import scheduler
+            what = "now" if "T" in (r["due"] or "") else "today"
+            new_id = scheduler.create_job("reminder", f"{r['title']}, which is due {what}", fire_at=when)["id"]
+        except Exception:
+            new_id = None
+    conn.execute("UPDATE card SET reminder_id = ? WHERE id = ?", (new_id, card_id))
+    conn.commit()
+
+
+def due_cards(conn: sqlite3.Connection, days: int = 7, today: date | None = None) -> list[dict]:
+    """Open cards due within ``days`` (overdue ones included), soonest first, with their list."""
+    limit = ((today or date.today()) + timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT card.*, board_list.name AS list_name FROM card "
+        "JOIN board_list ON card.list_id = board_list.id "
+        "WHERE card.archived = 0 AND card.due IS NOT NULL AND substr(card.due, 1, 10) <= ? "
+        "ORDER BY card.due", (limit,)).fetchall()
+    out = []
+    for r in rows:
+        d = _card_dict(r)
+        d["list"] = r["list_name"]
+        out.append(d)
+    return out
+
+
+def bulk(conn: sqlite3.Connection, ops: list[dict]) -> list[dict]:
+    """Several changes in one call, in order: [{"op": "add"|"move"|"delete"|"archive"|"update", …}].
+    Each result is {"ok": True, "card": …} or {"ok": False, "error": …}; one failure doesn't stop
+    the rest."""
+    results = []
+    for op in ops or []:
+        kind = str(op.get("op", "")).lower()
+        try:
+            if kind == "add":
+                card = add_card(conn, str(op.get("list", "")), str(op.get("title", "")),
+                                str(op.get("body", "") or ""), op.get("tags") or "", op.get("board"), op.get("due"))
+            elif kind == "move":
+                card = move_card(conn, int(op["card"]), op.get("toList"), op.get("position"), op.get("board"))
+            elif kind == "delete":
+                card = {"id": int(op["card"])} if delete_card(conn, int(op["card"])) else None
+            elif kind == "archive":
+                card = update_card(conn, int(op["card"]), archived=bool(op.get("archived", True)))
+            elif kind == "update":
+                fields = {k: op[k] for k in ("title", "body", "tags", "due", "checklist", "archived") if k in op}
+                card = update_card(conn, int(op["card"]), **fields)
+            else:
+                raise ValueError(f"unknown op {kind!r}")
+            results.append({"ok": True, "card": card} if card is not None else {"ok": False, "error": "card or list not found"})
+        except (ValueError, KeyError, TypeError) as exc:
+            results.append({"ok": False, "error": str(exc)})
+    return results
+
+
+def board_snapshot(conn: sqlite3.Connection, board: str | int | None = None,
+                   archived: bool = False) -> dict:
     """A whole board as nested lists→cards (camelCase), for the dashboard AND agent read. Loads all
     cards in one query (no N+1)."""
     board_id = resolve_board(conn, board)
@@ -382,8 +624,8 @@ def board_snapshot(conn: sqlite3.Connection, board: str | int | None = None) -> 
     cards_by_list: dict[int, list] = {lid: [] for lid in list_ids}
     if list_ids:
         rows = conn.execute(
-            f"SELECT * FROM card WHERE list_id IN ({','.join('?' * len(list_ids))}) "
-            "ORDER BY position, id", tuple(list_ids)).fetchall()
+            f"SELECT * FROM card WHERE list_id IN ({','.join('?' * len(list_ids))}) AND archived = ? "
+            "ORDER BY position, id", (*list_ids, 1 if archived else 0)).fetchall()
         for r in rows:
             cards_by_list.setdefault(r["list_id"], []).append(_card_dict(r))
     return {

@@ -27,12 +27,13 @@ the max stops waiting and speaks.
 
 from __future__ import annotations
 
+from vox.paths import DATA_DIR
+
 import contextlib
 import os
 import re
 import threading
 import time
-from pathlib import Path
 
 from vox.config import CONFIG
 
@@ -41,8 +42,7 @@ try:
 except ImportError:  # non-POSIX: every lock operation degrades to "speak immediately"
     fcntl = None  # type: ignore[assignment]
 
-# src/vox/speech_lock.py → parents[2] is the repo root, matching settings_store's convention.
-_LOCK_PATH = Path(__file__).resolve().parents[2] / "data" / "speaking.lock"
+_LOCK_PATH = DATA_DIR / "speaking.lock"
 
 # Lock-file line: "<label> (pid 1234) since <unix seconds>". Human-readable on purpose — `cat
 # data/speaking.lock` should still answer "who is talking?" — with the start time appended so a

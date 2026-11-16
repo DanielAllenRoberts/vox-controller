@@ -68,3 +68,24 @@ The mic captured background noise (no speech) and Whisper **hallucinated** text 
 ## The principle this points to
 
 **Whenever a deterministic action is low-confidence or unmatched → escalate to the assistant.** This is the bridge between CONTROL mode (fast, deterministic) and ASSISTANT mode (LLM reasoning), and it's what makes the system feel smart rather than brittle. (See the tiered cascade in `overview.md`.)
+
+## 2026-11-11 — Command-learning trial: it's learning mis-hears and fragments, not phrasings
+
+Pulled from `grep "\[learn\]" vox.log` and `GET /api/commands/learning` while the trial runs
+(`learning_mode = auto`, `learning_min_hits = 1`).
+
+- **A mis-hear got learned twice, pointing somewhere different each time.** "open cloud" (Whisper's
+  version of "open Claude") was saved once → cloud.google.com and once → iCloud Drive (#51). "That's
+  not what I meant" correctly disabled #51, so the correction path works — but the root cause is the
+  mis-hear. **Better fix:** a vocabulary entry (cloud → Claude after "open"), not learning around it.
+- **A one-word fragment is one sighting from being learned.** Candidate #11: "win" → previous window
+  (in Claude). Only the "words differ from the target → wait for a second sighting" rule holds it back.
+  **Knob:** raise `learning_min_hits` to 2, or refuse single-word phrases outright.
+- **Rambling sentences became aliases.** "click next song i don't know why its so slow my cpu is
+  running at like 200" joined the learned Spotify "next" command. The later 13-word cap catches this
+  one; shorter rambles still get through.
+- **Doubled phrases** ("open arc open arc", "open obsidian open obsidian") were learned in earlier
+  sessions; they've since aged out of the learned list.
+- **Idle noise isn't leaking in:** an hour of background video ("thanks for watching!", a 60-word run
+  of "the") produced no candidates.
+

@@ -16,6 +16,34 @@ class MicStreamDead(Exception):
     the mic) instead of wedging silently in ``queue.get`` — the "freezes after a while" bug."""
 
 
+class NoInputDevice(Exception):
+    """Raised by ``open_mic_stream`` when no microphone can be opened at all — not the configured one
+    and not the system default (a Mac mini with its AirPods switched off has NO input). The daemon
+    catches this and waits for a mic to appear instead of dying at startup."""
+
+
+# Most audio the mic queue holds before dropping the OLDEST frame. The loop flushes after every reply
+# and idle transcription, so normal use never gets near this; it only bites when the consumer stalls
+# (CPU starvation, issues O15/O17), where an unbounded queue grew ~32 KB/s and then got replayed as
+# stale "speech". 30 s of 80 ms frames is ~1 MB.
+_MAX_QUEUE_SECONDS = 30.0
+
+
+def _put_latest(q: "queue.Queue[np.ndarray]", frame: np.ndarray) -> None:
+    """Queue `frame` from the audio thread without ever blocking it: when full, drop the oldest."""
+    try:
+        q.put_nowait(frame)
+    except queue.Full:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(frame)
+        except queue.Full:
+            pass
+
+
 class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
@@ -26,7 +54,8 @@ class MicStream:
         self._device = device
         self._on_log = on_log                    # surface recovery events to vox.log, not just stdout
         self._stall_restart_seconds = stall_restart_seconds
-        self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._queue: "queue.Queue[np.ndarray]" = queue.Queue(
+            maxsize=int(_MAX_QUEUE_SECONDS * sample_rate / frame_samples))
         self._stall_since: float | None = None   # monotonic time the current stall began (None = healthy)
         self._ever_healthy = False               # have we EVER received a frame? (guards restart loops)
         self._recovering = False                 # a background re-open is in flight
@@ -53,7 +82,7 @@ class MicStream:
 
     def _callback(self, indata, frames, time_info, status) -> None:
         # indata: shape (frame_samples, 1) int16 — copy out of the driver buffer.
-        self._queue.put(indata[:, 0].copy())
+        _put_latest(self._queue, indata[:, 0].copy())
 
     def frames(self):
         """Generator yielding one int16 frame at a time. Healthy streams deliver a frame every
@@ -119,6 +148,51 @@ class MicStream:
         finally:
             self._recovering = False
 
+    def switch_device(self, device) -> None:
+        """Listen to another microphone from now on (the menu bar's mic picker), without restarting.
+        Runs off the main loop like ``_recover``. If the new mic won't open, it goes back to the
+        one that was working and says so."""
+        threading.Thread(target=self._switch, args=(device,), daemon=True).start()
+
+    def _switch(self, device) -> None:
+        while self._recovering:          # let an in-flight re-open finish first
+            time.sleep(0.05)
+        self._recovering = True
+        try:
+            previous = self._device
+            old, self._stream = self._stream, None
+            try:
+                if old is not None:
+                    old.abort()
+                    old.close()
+            except Exception:
+                pass
+            try:
+                sd._terminate(); sd._initialize()  # pick up AirPods etc. connected since start-up
+            except Exception:
+                pass
+            for dev in ([device, previous] if device != previous else [device]):
+                try:
+                    self._device = dev
+                    stream = self._make_stream()
+                    stream.start()
+                    self._stream = stream
+                    self._stall_since = None
+                    try:
+                        name = sd.query_devices(dev, kind="input")["name"]
+                    except Exception:
+                        name = str(dev)
+                    if dev == device:
+                        self._log(f"🎙️  mic switched to {name!r}"
+                                  + (" (system default)" if dev is None else ""))
+                    else:
+                        self._log(f"🎙️  kept {name!r}")
+                    return
+                except Exception as exc:
+                    self._log(f"⚠️  couldn't open mic {dev!r} ({exc})")
+        finally:
+            self._recovering = False
+
     def flush(self) -> None:
         """Drop buffered frames (e.g. audio captured while Vox was speaking) so the next read
         starts fresh — stops Vox from hearing and re-processing its own TTS."""
@@ -169,7 +243,8 @@ class VPIOMicStream:
         # Lazy import — only on the AEC path. Any ImportError propagates to the caller's fallback.
         import AVFoundation as AV
 
-        self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._queue: "queue.Queue[np.ndarray]" = queue.Queue(
+            maxsize=int(_MAX_QUEUE_SECONDS * sample_rate / frame_samples))
         # Carries leftover int16 samples between tap callbacks so we can emit exact frame_samples frames.
         self._residual = np.empty(0, dtype=np.int16)
         self._residual_lock = __import__("threading").Lock()
@@ -262,7 +337,7 @@ class VPIOMicStream:
             buf = np.concatenate((self._residual, i16)) if self._residual.size else i16
             n_full = buf.size // fs
             for k in range(n_full):
-                self._queue.put(buf[k * fs:(k + 1) * fs].copy())
+                _put_latest(self._queue, buf[k * fs:(k + 1) * fs].copy())
             self._residual = buf[n_full * fs:].copy()
 
     def frames(self):
@@ -349,8 +424,28 @@ def resolve_device(value):
     return int(text) if text.lstrip("-").isdigit() else text
 
 
+_ACTIVE = None   # the mic stream the daemon is listening on (for switching mics live)
+
+
+def apply_input_device(value) -> bool:
+    """Switch the running daemon to the microphone in ``value`` (a name, or "" for the system
+    default) straight away. False when it can't be done live (no stream yet, or the echo-cancelling
+    backend), in which case the setting still applies at the next start."""
+    stream = _ACTIVE
+    if stream is None or not hasattr(stream, "switch_device"):
+        return False
+    stream.switch_device(resolve_device(value))
+    return True
+
+
 def open_mic_stream(cfg, out=None):
     """Open the mic backend chosen by config, with a hard fallback to the sounddevice MicStream.
+
+    Tries the configured microphone first, then the system default. A saved mic that isn't here
+    right now (AirPods switched off, a dock unplugged) must NOT stop Vox launching: it falls back to
+    the default and says so loudly. The setting is kept, so the next restart with the device present
+    uses it again. If NOTHING can be opened, raises ``NoInputDevice`` so the daemon can wait for a
+    mic instead of crashing with a sounddevice traceback.
 
     When `cfg.audio_aec` is true, try the native VoiceProcessingIO backend (system AEC). On ANY
     failure — PyObjC missing, mic permission denied, engine/tap/convert error — log a warning and
@@ -362,14 +457,29 @@ def open_mic_stream(cfg, out=None):
 
     Returns an UNSTARTED stream; the caller enters it as a context manager exactly like MicStream.
     """
-    device = resolve_device(_setting("input_device", cfg.input_device))
+    say = out.emit if out is not None else print
+    configured = resolve_device(_setting("input_device", cfg.input_device))
+    last_exc = None
+    for device in ([configured, None] if configured is not None else [None]):
+        try:
+            name = sd.query_devices(device, kind="input")["name"]
+            stream = _open_mic_backend(cfg, out, device, name)
+        except Exception as exc:
+            last_exc = exc
+            if device is not None:
+                say(f"⚠️  configured mic {device!r} unavailable ({exc}) — using the system default "
+                    f"instead. Pick another in the dashboard → Settings → Voice → Microphone.")
+            continue
+        global _ACTIVE
+        _ACTIVE = stream
+        return stream
+    raise NoInputDevice(f"no microphone could be opened ({last_exc})")
+
+
+def _open_mic_backend(cfg, out, device, name: str):
     # ALWAYS name the device, including the system-default case — that is the one that silently
     # changes under you. A headphone connecting can move the default onto AirPods mid-session, and
     # nothing in the log said so; Vox just stopped hearing anything and looked frozen.
-    try:
-        name = sd.query_devices(device, kind="input")["name"]
-    except Exception:
-        name = "unknown"
     origin = "configured" if device is not None else "SYSTEM DEFAULT (can change under you)"
     print(f"🎙️  mic: {name!r} — {origin}")
     if _setting("audio_aec", cfg.audio_aec):
@@ -386,6 +496,16 @@ def open_mic_stream(cfg, out=None):
 
 def rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+
+
+def voiced_ms(audio: np.ndarray) -> int:
+    """Milliseconds of `audio` (16 kHz int16) that Silero VAD rates as speech (prob >= 0.5, the
+    threshold faster-whisper's own vad_filter uses). Reuses faster-whisper's cached single-threaded
+    Silero session, so it costs ~14 ms CPU for an 8 s capture."""
+    from faster_whisper.vad import get_vad_model
+    a = audio.astype(np.float32) / 32768.0
+    a = np.pad(a, (0, 512 - a.shape[0] % 512))  # Silero scores 512-sample (32 ms) windows
+    return int((get_vad_model()(a) >= 0.5).sum()) * 32
 
 
 def _setting(key: str, fallback):
@@ -445,11 +565,24 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
     min_silent = max(1, int(_setting("min_endpointing_delay", cfg.min_endpointing_delay) * sr / fs))
     max_silent = max(min_silent, int(_setting("max_endpointing_delay", cfg.max_endpointing_delay) * sr / fs))
 
+    from vox import runtime  # typed input + pause (ideas #68)
+
     pre_roll = deque(maxlen=cfg.preroll_frames)
     waited = 0
+    ptt = False  # hold-to-talk (ideas #69.1): the key, not the volume, decides start and end
+    runtime.last_capture_ptt = False
     while True:
         frame = next(frames)
-        if rms(frame) >= cfg.speech_rms:
+        typed = runtime.take()
+        if typed is not None:
+            return typed
+        if runtime.ptt_down():
+            ptt = True
+            # The user holds the key for as long as they talk: no 15 s utterance cap (it split long
+            # sentences in two, with a click mid-way). runtime.PTT_MAX_HOLD is the only safety net.
+            max_frames = int(runtime.PTT_MAX_HOLD * sr / fs)
+            break
+        if not runtime.paused and rms(frame) >= cfg.speech_rms:
             break
         pre_roll.append(frame)
         waited += 1
@@ -459,9 +592,16 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
     collected = list(pre_roll) + [frame]
     silent = 0
     next_check = min_silent  # next trailing-silence frame-count at which to consult smart-turn
+    runtime.last_capture_ptt = ptt
     while len(collected) < max_frames:
         frame = next(frames)
         collected.append(frame)
+        if ptt:
+            # Releasing the key IS the end of the turn: no silence wait, and pausing to think
+            # mid-sentence can't cut you off.
+            if not runtime.ptt_down():
+                break
+            continue
         if rms(frame) < end_rms:
             silent += 1
             if smart_on:

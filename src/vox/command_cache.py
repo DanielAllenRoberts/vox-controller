@@ -142,7 +142,7 @@ def refresh() -> None:
 
 
 def resolve(text: str, *, app: str | None = None, domain: str | None = None,
-            actions_only: bool = False) -> dict | None:
+            actions_only: bool = False, text_context: bool = False) -> dict | None:
     """In-memory resolution (no DB): the focused app's commands (higher priority) first, then the
     global + mode/system set. Mirrors ``command_store.resolve``'s exact→contains→regex order. Returns
     a result dict (intent / arg / param / label / context / phrase / match_type) or ``None``.
@@ -151,10 +151,15 @@ def resolve(text: str, *, app: str | None = None, domain: str | None = None,
     only run app/site actions, leaving the control plane to the loop's hardcoded floor (§8a).
     ``domain`` (site context) is accepted for interface parity but not matched yet — site contexts
     aren't seeded and the focus watcher tracks the app, not the tab. That's the next extension.
+
+    ``text_context`` is the stricter matcher auto dictation uses while a text field has focus, where
+    a wrong hit fires a command on words you meant to TYPE (see ``_text_context_pool``).
     """
     t = command_store.normalize(text)
     if not t:
         return None
+    if text_context:
+        return _resolve_text_context(t, app, actions_only)
     # Collect EVERY match, then rank once (command_store.rank_matches) — never "first row wins".
     # See docs/plan/command-learning/04: with learned rows in the mix, first-match-wins makes a
     # collision resolve to whichever row SQLite happened to return first.
@@ -197,6 +202,75 @@ def active_phrases(app: str | None = None) -> list[str]:
                     seen.add(t.lower())
                     out.append(t)
     return out
+
+
+# --- text-context (auto dictation) matching ------------------------------------------------------
+# Every mature dictation product makes the command decision on a WHOLE-utterance match (Dragon,
+# Voice Control, Talon's ^…$ — docs/plan/research/command-vs-dictation.md §2). The normal resolver is
+# looser on purpose: 150 of the 151 seeded phrases are `contains` with 3 slack words, so "please close
+# tab now" fires close-tab. Fine when everything you say is meant for Vox; wrong in a text field,
+# where that sentence is something to type.
+
+_TEXT_CONTEXT_MAX_WORDS = 5  # a command phrase longer than this reads as prose (see the learning notes)
+
+
+def _probation_uses() -> int:
+    try:
+        return int(command_store._learn_setting("learning_probation_uses", 2))
+    except Exception:
+        return 2
+
+
+def _on_probation(cmd: dict, uses: int) -> bool:
+    """A learned command that hasn't yet been used enough times to be trusted (the same threshold
+    ``command_store.decay`` judges it by). The trial log shows learned phrases built from rants and
+    lead-ins ("no that didn't really work click on the team folder"), so an unproven one must not be
+    able to swallow dictation."""
+    return cmd.get("source") == "learned" and int(cmd.get("hit_count") or 0) < uses
+
+
+# Filtered pools, rebuilt only when the underlying pool list is replaced (refresh() swaps in new
+# lists) or the probation threshold changes, not on every utterance typed into a text field.
+_TEXT_POOL_CACHE: dict = {}
+
+
+def _text_context_pool(pool: list[dict], actions_only: bool) -> list[dict]:
+    """``pool`` with every phrase that can't be a whole-utterance command removed: regex phrases,
+    phrases over _TEXT_CONTEXT_MAX_WORDS words, and all of a probationary learned command. What's left
+    is re-marked `exact`, so the existing matcher compares the WHOLE utterance to it."""
+    uses = _probation_uses()
+    key = (id(pool), actions_only)
+    hit = _TEXT_POOL_CACHE.get(key)
+    if hit is not None and hit[0] is pool and hit[1] == (len(pool), uses):
+        return hit[2]
+    out = []
+    for c in pool:
+        if actions_only and c["intent"] not in _ACTION_INTENTS:
+            continue
+        if _on_probation(c, uses):
+            continue
+        phrases = [{**p, "match_type": "exact"} for p in c.get("phrases", [])
+                   if p.get("match_type") != "regex"
+                   and 0 < len(command_store.normalize(p.get("text") or "").split()) <= _TEXT_CONTEXT_MAX_WORDS]
+        if phrases:
+            out.append({**c, "phrases": phrases})
+    if len(_TEXT_POOL_CACHE) > 64:
+        _TEXT_POOL_CACHE.clear()
+    _TEXT_POOL_CACHE[key] = (pool, (len(pool), uses), out)
+    return out
+
+
+def _resolve_text_context(t: str, app: str | None, actions_only: bool) -> dict | None:
+    matches: list[dict] = []
+    pools: list[list[dict]] = []
+    if app and app in _APP_CACHE:
+        pools.append(_APP_CACHE[app])
+    pools.append(_BASE)
+    for pool in pools:
+        for c in _text_context_pool(pool, actions_only):
+            matches += command_store.collect_matches(
+                [c], t, c.get("_ctx_kind") or "global", c.get("_ctx_value"))
+    return command_store.rank_matches(matches)
 
 
 # --- internals -----------------------------------------------------------------------------------

@@ -40,7 +40,7 @@ A named-agent conversation is two directions. **You already built one of them.**
 | Direction | What it is | Status |
 |---|---|---|
 | **Agent → you (speak-back)** | The CLI talks to you out loud | ✅ **Exists** — `vox-speak` MCP (`speak`/`announce_done`). Now with a pre-speech chime. |
-| **You → agent (routing)** | Your voice goes into one specific CLI | 🚧 The **new** piece. But the *router hook* already exists (see below). |
+| **You → agent (routing)** | Your voice goes into one specific CLI | ✅ **Built 2026-11-11** — not via tmux: `agents.send()` delivers through Claude Code's cross-session messaging (a headless `claude -p` with only `SendMessage`). "Tell David to …" → the CEO → `team.message()`. See `research/agent-messaging.md` and `session-2026-11-11-buildlog.md`. |
 
 The router hook: Vox's idle listener already anchors a name at the **first word** of an utterance
 and routes the rest — that's how "Vox, open Safari" works today

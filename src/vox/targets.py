@@ -179,9 +179,80 @@ def visible_targets(limit: int = 400):
     return items
 
 
-def click_label(target: str):
+def matching(label: str, limit: int = 400):
+    """The visible targets whose label matches ``label`` (exact, else containing it), renumbered
+    from 0 so the overlay and ``click_index`` use the same numbers. None if unavailable. For "no,
+    the other one" after a click that hit the wrong one of several same-named controls."""
+    global _LAST
+    items = visible_targets(limit=limit)
+    if not items:
+        return None
+    want = (label or "").strip().lower()
+    if not want:
+        return []
+    owners = list(_LAST)
+    picked = [i for i, it in enumerate(items) if it["label"].strip().lower() == want]
+    if len(picked) < 2:
+        picked = [i for i, it in enumerate(items) if want in it["label"].strip().lower()]
+    _LAST = [owners[i] for i in picked]
+    return [{**items[i], "index": n} for n, i in enumerate(picked)]
+
+
+def _on_screen(it) -> bool:
+    """Is the target's centre on an attached display? AX keeps frames for things scrolled out of
+    view, and a chooser badge drawn off-screen is worse than no chooser."""
+    try:
+        import Quartz
+        err, ids, n = Quartz.CGGetActiveDisplayList(16, None, None)
+        cx, cy = it["x"] + it["w"] / 2.0, it["y"] + it["h"] / 2.0
+        for d in (ids or ())[:n]:
+            b = Quartz.CGDisplayBounds(d)
+            if b.origin.x <= cx < b.origin.x + b.size.width and b.origin.y <= cy < b.origin.y + b.size.height:
+                return True
+        return False
+    except Exception:
+        return True  # can't tell → don't hide it
+
+
+def distinct_exact(items, label: str, on_screen=_on_screen) -> list[int]:
+    """Indexes into ``items`` whose label is exactly ``label`` (case-insensitive), visible, and not
+    overlapping an earlier pick — a button and the text inside it are one control, not two."""
+    want = (label or "").strip().lower()
+    picked: list[int] = []
+    for i, it in enumerate(items):
+        fr = (it["x"], it["y"], it["w"], it["h"])
+        if it["label"].strip().lower() != want or not ax.tangible(fr) or not on_screen(it):
+            continue
+        if any(ax.overlaps(fr, (items[j]["x"], items[j]["y"], items[j]["w"], items[j]["h"]))
+               for j in picked):
+            continue
+        picked.append(i)
+    return picked
+
+
+def offer_choices(label: str):
+    """Several controls share this label — number just those and wait for the user to say which
+    (Apple Voice Control's "Click Options" flow). Returns how many were numbered, or None when there
+    turn out to be fewer than two visible ones (the caller then clicks the single match as usual)."""
+    global _LAST
+    items = visible_targets()
+    if not items:
+        return None
+    owners = list(_LAST)
+    picked = distinct_exact(items, label)
+    if len(picked) < 2:
+        return None
+    from vox import overlay
+    overlay.show([{**items[i], "index": n} for n, i in enumerate(picked)])
+    _LAST = [owners[i] for i in picked]
+    return len(picked)
+
+
+def click_label(target: str, ask_if_ambiguous: bool = False):
     """Click a page element by what it's called, when a browser is focused. ``("clicked", label)``,
-    or None to let the caller fall back to the AX path (which still owns browser chrome).
+    or None to let the caller fall back to the AX path (which still owns browser chrome). With
+    ``ask_if_ambiguous``, two or more separate exact matches return ``("ambiguous", label)`` and
+    nothing is clicked.
 
     Needed because the by-label click (``actions.click_element``) searches the AX tree: on a page
     whose web AX tree has collapsed there is nothing to find, even though the element is plainly
@@ -197,6 +268,11 @@ def click_label(target: str):
     if not page or not page.get("items"):
         return None
     items = page["items"]
+    if ask_if_ambiguous:
+        boxes = [{"label": it["l"], "x": it["x"], "y": it["y"], "w": it["w"], "h": it["h"]} for it in items]
+        exact = distinct_exact(boxes, t, on_screen=lambda _it: True)  # page coords; DOM lists the viewport
+        if len(exact) >= 2:
+            return ("ambiguous", items[exact[0]]["l"])
     hit = next((i for i, it in enumerate(items) if it["l"].strip().lower() == t), None)
     if hit is None:  # substring, shortest label wins — the tightest match, not the first on the page
         cands = [i for i, it in enumerate(items) if t in it["l"].strip().lower()]

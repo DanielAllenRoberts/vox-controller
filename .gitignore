@@ -56,3 +56,10 @@ node_modules/
 
 # graphify knowledge-graph output (regenerable, can go stale)
 graphify-out/
+
+# Vox.app build output (SwiftPM + bundle assembly)
+app/.build*/
+app/build/
+
+# Vox key store (also under data/, listed again in case the data folder moves)
+secrets.db
