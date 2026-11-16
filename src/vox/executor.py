@@ -1123,7 +1123,12 @@ def execute(text: str, history=None) -> tuple[bool, str]:
             # find the target verbatim do we fall back to listing the screen + letting the brain
             # pick (slower). A click REFUSED because focus left that app is not a miss — retrying it
             # would just click whatever is in front now, so say so instead.
-            result = actions.click_element(target)
+            result = actions.click_element(target, ask_if_ambiguous=True)
+            if result.startswith(actions.WHICH_ONE):
+                # Several controls share that name and they're numbered on screen now — the
+                # user's next word is the number. Silent, like "show clickable".
+                assistant._dbg("[executor]", f"decision=CLICK target={target!r} → {result!r}")
+                return True, result
             if not (result.lower().startswith("clicked")
                     or result.startswith(actions.FOCUS_MOVED)):
                 result = _click_fuzzy(target)

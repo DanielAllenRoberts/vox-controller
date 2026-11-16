@@ -1460,6 +1460,21 @@ it.
 where reports can land as cards), E (the notification bubble for the report), #66 (the `schedule`
 MCP tool).
 
+## 72. Borrow from Apple Voice Control — overlays, disambiguation, phrase editing
+
+> **Status:** 🚧 in progress on `voice-control-ideas` (2026-11-11, uncommitted). Built: ambiguous
+> clicks number the matches (closes most of issue O12) and **"show names"**. Full comparison, ranked
+> list and per-iteration notes: [`apple-voice-control-comparison.md`](apple-voice-control-comparison.md).
+
+**Vision:** take what Voice Control does well — one-shot numbered overlays, numbering only the
+matches when a name is ambiguous, "show names", near-miss command hints, "make this speakable" —
+and skip where it's weak (rigid grammar, editing that only works on its own dictation, flaky web
+numbers, no learning), which is where Vox already wins.
+
+**Next, in order:** "double-click / right-click N" · phrase-addressed editing on the field's real AX
+text ("select X", "replace X with Y", "delete X") · near-miss hints · "what can I say here" · "make
+this speakable" → TEACH · continuous numbers with fade · "start drag N … drop M".
+
 ## Sequencing note
 
 > **Update:** the two foundations this rested on — the **assistant / LLM (M4)** and **voice output / TTS (M2)** — are both now **BUILT** (tiered small/big brains; macOS `say` + neural Kokoro with per-persona voices). Most of the magic above is unblocked. Near-term queue: #41 (persona editing, in progress) → #42 (LLM self-edits its persona) → #43 (live conversation viewer) → #28's "dream" consolidation. **2026-09-11: #66 built (vox-control MCP); next up is #68 — the menu bar item + typing to Vox.**

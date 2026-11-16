@@ -5,10 +5,9 @@ From ``docs/plan/named-agents.md`` (idea #39): you run several CLIs at once and 
 is that **agents name themselves**: rather than a central config guessing which terminal is which,
 the agent calls ``register_agent("David")`` on its own MCP server, which knows its own process.
 
-This module is only the identity half — the registry file and its accessors. The routing half
-(getting your voice back *into* David's session via ``tmux send-keys``) is stage 1 of that doc and
-isn't built; the pane id is captured here anyway because it costs nothing now and is exactly what
-that stage needs.
+This module holds the registry file and its accessors, and the routing half: ``send()`` gets your
+voice back *into* David's session through Claude Code's own cross-session messaging (no tmux needed —
+see the section at the bottom). The pane id is still captured; it costs nothing.
 
 Each MCP server is spawned per client, so one process = one agent, and ``$TMUX_PANE`` is inherited
 from the CLI that launched it.
@@ -129,3 +128,99 @@ def unregister(name: str) -> bool:
     del data[key]
     _write(data)
     return True
+
+
+# --- talking back: deliver a message into a registered agent's terminal session ------------------
+#
+# Claude Code sessions on one Mac can message each other (``ListAgents`` / ``SendMessage``, over a
+# per-session Unix socket that never leaves the machine). An idle session wakes and starts a turn; a
+# busy one reads it between tool calls. The socket's wire format isn't documented, so rather than
+# speak it ourselves Vox runs a throwaway headless ``claude -p`` whose only tool is SendMessage.
+# No tmux, no typing into the terminal, no focus steal. ~10 s per message.
+#
+# The registry knows the agent's MCP-server pid; the session is the ``claude`` process above it,
+# and ``claude agents --json`` names that session (e.g. "myproject-05").
+
+def _claude_bin() -> str | None:
+    import shutil
+    path = shutil.which("claude")
+    if path:
+        return path
+    home = os.path.expanduser("~/.local/bin/claude")  # the native installer; the daemon's PATH may lack it
+    return home if os.path.exists(home) else None
+
+
+def _claude_pid(pid: int) -> int | None:
+    """The ``claude`` process that ``pid`` (an agent's MCP server) runs under, walking up parents."""
+    import subprocess
+    for _ in range(8):
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=3).stdout.strip()
+        except Exception:
+            return None
+        ppid, _, comm = out.partition(" ")
+        if not ppid.isdigit():
+            return None
+        if os.path.basename(comm.strip()) == "claude":
+            return pid
+        pid = int(ppid)
+        if pid <= 1:
+            return None
+    return None
+
+
+def session_for(name: str) -> dict | None:
+    """The live Claude Code session behind a registered agent: ``claude agents --json``'s entry
+    (``name``, ``status``, ``sessionId``, ``pid``), or None if it's gone or can't be found."""
+    import subprocess
+    entry = get(name)
+    exe = _claude_bin()
+    if not entry or not exe:
+        return None
+    cpid = _claude_pid(int(entry.get("pid") or 0))
+    if not cpid:
+        return None
+    try:
+        out = subprocess.run([exe, "agents", "--json"], capture_output=True, text=True, timeout=15,
+                             stdin=subprocess.DEVNULL).stdout
+        return next((s for s in json.loads(out) if s.get("pid") == cpid and s.get("name")), None)
+    except Exception:
+        return None
+
+
+def send(name: str, text: str, timeout: float = 90) -> tuple[bool, str]:
+    """Deliver ``text`` from the user into registered agent ``name``'s terminal session.
+    Returns (delivered, what to tell the user). Never raises."""
+    import subprocess
+    entry = get(name)
+    if not entry:
+        return False, f"There's no registered agent called {name!r}."
+    shown = entry.get("name", name)
+    session = session_for(name)
+    if session is None:
+        return False, f"I can't find {shown}'s Claude Code session any more. Is it still open?"
+    body = (text or "").strip().replace("</msg>", "</ msg>")
+    if not body:
+        return False, f"What should I tell {shown}?"
+    prompt = (f'Use the SendMessage tool exactly once to send the text between the <msg> tags to the '
+              f'session named "{session["name"]}". Send it verbatim: do not summarise, shorten, '
+              f'reword or add anything. Then reply with the single word SENT, or FAILED and the reason.\n'
+              f'<msg>Message from the user, sent by voice through Vox:\n\n{body}</msg>')
+    from vox.assistant import SUBSCRIPTION_ENV
+    try:
+        r = subprocess.run(
+            [_claude_bin() or "claude", "-p", prompt, "--allowedTools", "SendMessage", "--model", "haiku",
+             "--strict-mcp-config", "--setting-sources", "", "--name", "vox"],
+            capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+            cwd=str(DATA_DIR), env={**os.environ, **SUBSCRIPTION_ENV})
+    except subprocess.TimeoutExpired:
+        return False, f"Sending to {shown} timed out."
+    except Exception as e:
+        return False, f"I couldn't send to {shown}: {e}"
+    if "SENT" in (r.stdout or "") and "FAILED" not in (r.stdout or ""):
+        state = session.get("status") or ""
+        when = "It's mid-task, so it'll read it between steps." if state == "busy" else ""
+        return True, f"Sent to {shown}. {when}".strip()
+    why = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+    return False, f"I couldn't get that to {shown}: {why[-1][:160] if why else 'no reply'}"

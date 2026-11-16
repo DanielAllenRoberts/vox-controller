@@ -478,6 +478,7 @@ def check_fast_lane_drift(cfg, out=None) -> list[str]:
         handled_elsewhere |= {p.lower() for p in (getattr(cfg, attr, ()) or ())}
     try:
         handled_elsewhere |= {p.lower() for p in dispatch._SHOW_CLICKABLE_PHRASES}
+        handled_elsewhere |= {p.lower() for p in dispatch._SHOW_NAMES_PHRASES}
         handled_elsewhere |= {p.lower() for p in dispatch._HIDE_CLICKABLE_PHRASES}
     except Exception:
         pass
@@ -522,7 +523,8 @@ def _fast_lane_extra_phrases(cfg) -> list[str]:
     # half was listed here, so "hide clickable" fell through to Whisper, which clips the short word
     # to "hi"/"high" — and those reached the LLM. Seen repeatedly in vox.log.
     try:
-        out += list(dispatch._SHOW_CLICKABLE_PHRASES) + list(dispatch._HIDE_CLICKABLE_PHRASES)
+        out += (list(dispatch._SHOW_CLICKABLE_PHRASES) + list(dispatch._SHOW_NAMES_PHRASES)
+                + list(dispatch._HIDE_CLICKABLE_PHRASES))
     except Exception:
         pass
     # Reload lives in the code parser, so active_phrases() (which reads the DB) doesn't include it.

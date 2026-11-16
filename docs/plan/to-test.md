@@ -6,6 +6,25 @@ happened underneath. Newest items go at the top of each section.
 **Before any voice test:** restart the daemon (or quit and reopen Vox.app once it exists). The
 daemon runs the code it was started with.
 
+## From the Voice Control loop (`voice-control-ideas`, 2026-11-11 →)
+See [`apple-voice-control-comparison.md`](apple-voice-control-comparison.md).
+
+- [ ] **Message a terminal agent by voice** (fixed 2026-11-11 after a registered agent couldn't be reached): with
+  a Claude Code session that has called `register_agent("David")`, say "tell David to …". Vox should
+  say "Sent to David." within ~10 s and the message appears in that session from a sender named
+  `vox`, verbatim. A session that has since closed → "I can't find David's Claude Code session".
+- [ ] **Pasting long notes** into Vox no longer answers "You have no timers…" (the timer/reminder
+  shortcuts now need whole words in a short sentence), and the **Conversation page doesn't freeze**
+  on them: long messages start collapsed with "Show more". Quit and reopen Vox.app first (rebuilt).
+- [ ] **"Show names"** in Slack or Cursor: badges read "14 Something" on dark plates; names in a crowded
+  toolbar step down rather than cover each other. "14" clicks it; "click <a name you can see>" works;
+  "hide names" clears them. "Show numbers" still draws plain blue numbers.
+- [ ] **Ambiguous clicks ask:** on a page or app with two controls called the same thing (two "Reply"
+  buttons in Mail/Gmail, two "Send"s), say "click reply" → numbers appear on just those two and the
+  bubble says "Which one? … say a number". Say "2" → the second one is clicked. A name that's unique
+  still clicks straight away; "click send" when the buttons are "Send now" / "Send later" still
+  clicks without asking.
+
 ## From the app-overhaul session (2026-11-06 →)
 
 ### Vox.app: the new native app (start here)

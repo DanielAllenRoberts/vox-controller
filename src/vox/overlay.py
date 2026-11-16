@@ -36,16 +36,20 @@ def is_active() -> bool:
     return _proc is not None and _proc.poll() is None
 
 
-def show(items) -> int:
+def show(items, names: bool = False) -> int:
     """Spawn the helper to draw a numbered badge over each element in ``items`` (dicts with
     index/x/y/w/h from ax.targets_with_frames). Numbers are 1-based (badge N ↔ items[N-1]). Replaces
-    any existing overlay. Returns the count. Raises OverlayUnavailable if the helper can't be spawned."""
+    any existing overlay. Returns the count. Raises OverlayUnavailable if the helper can't be spawned.
+
+    ``names``: Apple Voice Control's "Show names" — each badge also carries the control's label, so
+    you can see what Vox will answer to ("click Export") as well as its number."""
     global _proc
     if not items:
         raise OverlayUnavailable("nothing to show")
     hide()  # never stack two overlays
     payload = [{"n": it["index"] + 1, "x": float(it["x"]), "y": float(it["y"]),
-                "w": float(it["w"]), "h": float(it["h"])} for it in items]
+                "w": float(it["w"]), "h": float(it["h"]),
+                **({"label": _short(it.get("label", ""))} if names else {})} for it in items]
     fd, path = tempfile.mkstemp(suffix=".json", prefix="vox_overlay_")
     try:
         with os.fdopen(fd, "w") as f:
@@ -56,6 +60,24 @@ def show(items) -> int:
     except Exception as exc:
         raise OverlayUnavailable(f"couldn't spawn overlay helper: {exc}") from exc
     return len(payload)
+
+
+def _short(label: str, limit: int = 28) -> str:
+    """One line, at most ``limit`` characters — a name badge must not blanket its neighbours."""
+    one = " ".join((label or "").split())
+    return one if len(one) <= limit else one[: limit - 1].rstrip() + "…"
+
+
+def _nudge(rect, placed, step: float = 19.0, tries: int = 3):
+    """(x, y, w, h) moved down (Cocoa y decreases) until it clears every rect in ``placed`` — at most
+    ``tries`` rows, then it stays where it is. Name badges are wider than the controls they label,
+    so neighbours in a menu bar or toolbar would otherwise cover each other's names."""
+    x, y, w, h = rect
+    for _ in range(tries):
+        if not any(x < px + pw and px < x + w and y < py + ph and py < y + h for px, py, pw, ph in placed):
+            break
+        y -= step
+    return (x, y, w, h)
 
 
 def hide() -> None:
@@ -158,10 +180,12 @@ def _build_window(AppKit, screen_frame):
     return win
 
 
-def _make_badge(AppKit, num: int, x: float, y: float):
-    """One numbered badge — an NSTextField with a rounded blue layer (x/y are Cocoa bottom-left)."""
+def _make_badge(AppKit, num: int, x: float, y: float, label: str = ""):
+    """One numbered badge — an NSTextField with a rounded blue layer (x/y are Cocoa bottom-left).
+    With a ``label`` ("show names") it reads "14 Export", sized to fit, on a dark plate so it's
+    told apart from a plain number badge at a glance."""
     tf = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(x, y, 26.0, 18.0))
-    tf.setStringValue_(str(num))
+    tf.setStringValue_(f"{num} {label}" if label else str(num))
     tf.setEditable_(False)
     tf.setSelectable_(False)
     tf.setBordered_(False)
@@ -179,6 +203,12 @@ def _make_badge(AppKit, num: int, x: float, y: float):
     layer.setCornerRadius_(4.0)
     layer.setBorderWidth_(1.0)
     layer.setBorderColor_(AppKit.NSColor.whiteColor().CGColor())
+    if label:
+        tf.setFont_(AppKit.NSFont.boldSystemFontOfSize_(10))
+        tf.sizeToFit()
+        fit = tf.frame().size.width
+        tf.setFrame_(AppKit.NSMakeRect(x, y, fit + 8.0, 18.0))
+        layer.setBackgroundColor_(AppKit.NSColor.colorWithWhite_alpha_(0.12, 0.88).CGColor())
     return tf
 
 
@@ -210,6 +240,7 @@ def _run_helper(path: str, ttl: float = 45.0) -> None:
     # displays with a negative origin renders unreliably and scatters badges to a corner.) Each window
     # sits at its own screen's frame; a badge is placed in the window of the display it falls on.
     windows = [(_build_window(AppKit, s.frame()), s.frame()) for s in screens]
+    placed: dict = {}  # per window: name-badge rects already drawn (see _nudge)
     for b in badges:
         # AX (global, top-left origin) → Cocoa (global, bottom-left) via the primary height.
         gx = float(b["x"])
@@ -221,8 +252,14 @@ def _run_helper(path: str, ttl: float = 45.0) -> None:
             if (sf.origin.x <= ecx < sf.origin.x + sf.size.width
                     and sf.origin.y <= ecy < sf.origin.y + sf.size.height):
                 # Badge at the element's top-left, in THIS display's local (window) coords.
-                win.contentView().addSubview_(
-                    _make_badge(AppKit, int(b["n"]), gx - sf.origin.x, gy - sf.origin.y))
+                badge = _make_badge(AppKit, int(b["n"]), gx - sf.origin.x, gy - sf.origin.y,
+                                    b.get("label", ""))
+                if b.get("label"):
+                    f = badge.frame()
+                    r = _nudge((f.origin.x, f.origin.y, f.size.width, f.size.height), placed.setdefault(id(win), []))
+                    badge.setFrame_(AppKit.NSMakeRect(*r))
+                    placed[id(win)].append(r)
+                win.contentView().addSubview_(badge)
                 break
     for win, _sf in windows:
         win.orderFrontRegardless()

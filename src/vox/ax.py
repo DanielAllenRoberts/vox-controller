@@ -442,11 +442,16 @@ def press_menu(target: str):
     return ("pressed" if ok else "press_failed", item)
 
 
-def click(target: str):
+def click(target: str, ask_if_ambiguous: bool = False):
     """Find a control labelled `target` in the target app and AXPress the nearest pressable element.
     Returns ("clicked", label) / ("not_found", None) / ("press_failed", label) /
     ("focus_changed", app_now), or None if native AX is unavailable (caller should fall back to
     AppleScript). Exact label wins over a substring match.
+
+    ``ask_if_ambiguous``: keep walking past the first exact match, and if a second, separate control
+    carries the same label return ("ambiguous", label) WITHOUT pressing anything — the caller numbers
+    the matches and lets the user pick (Apple Voice Control does this for "Click Options" with three
+    Options buttons). Costs at most a full walk, i.e. what a miss already costs.
 
     The app searched is the pinned one when a caller has pinned it (``pinned_to``), and the press is
     refused if that app stopped being frontmost while we were walking its tree — see ``_focus_moved``
@@ -460,10 +465,14 @@ def click(target: str):
     tl = (target or "").strip().lower()
     if not tl:
         return ("not_found", None)
-    found = {"exact": None, "fallback": None, "n": 0}
+    found = {"exact": None, "fallback": None, "n": 0, "frame": None, "dupe": False}
+
+    def done():
+        return (found["exact"] is not None and tangible(found["frame"])
+                and (not ask_if_ambiguous or found["dupe"]))
 
     def walk(el, depth, chain):
-        if found["exact"] or depth > _MAX_DEPTH or found["n"] > _BUDGET:
+        if done() or depth > _MAX_DEPTH or found["n"] > _BUDGET:
             return
         found["n"] += 1
         nm = _name_of(fns, el)
@@ -472,7 +481,14 @@ def click(target: str):
             if low == tl:
                 pe = _pressable(fns, el, chain)
                 if pe is not None:
-                    found["exact"] = (pe, el, nm.strip())  # keep the labelled el for its frame
+                    fr = _frame(fns, el)
+                    if found["exact"] is None or (not tangible(found["frame"]) and tangible(fr)):
+                        # keep the labelled el for its frame. A 1-px sliver (a sticky header
+                        # clipped to nothing — Slack has these) gives way to a real one later on.
+                        found["exact"] = (pe, el, nm.strip())
+                        found["frame"] = fr
+                    elif tangible(fr) and not overlaps(found["frame"], fr):
+                        found["dupe"] = True  # a second, separate control with the same label
                     return
             elif found["fallback"] is None and tl in low:
                 pe = _pressable(fns, el, chain)
@@ -482,13 +498,15 @@ def click(target: str):
         child_chain = chain + [el]
         for k in kids:
             walk(k, depth + 1, child_chain)
-            if found["exact"]:
+            if done():
                 return
 
     try:
         walk(root, 0, [])
     except Exception:
         return None
+    if found["dupe"]:
+        return ("ambiguous", found["exact"][2])
     hit = found["exact"] or found["fallback"]
     if hit is None:
         return ("not_found", None)
@@ -571,6 +589,21 @@ def _axpair(fns, axval, type_const):
         return (float(pt.x), float(pt.y)) if ok else None
     except Exception:
         return None
+
+
+def overlaps(a, b) -> bool:
+    """Do two (x, y, w, h) frames overlap? A missing frame counts as overlapping, so an element we
+    can't place is never treated as a separate second match (that would show a pointless chooser)."""
+    if a is None or b is None:
+        return True
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def tangible(frame) -> bool:
+    """Big enough to be something a person sees and means. Slack keeps clipped sticky headers in
+    the tree at 1 px tall; counting those turned one "Jump to date" into two. A missing frame is
+    given the benefit of the doubt (AXPress still works on it)."""
+    return frame is None or (frame[2] >= 4 and frame[3] >= 4)
 
 
 def _frame(fns, el):

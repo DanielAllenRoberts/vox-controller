@@ -50,17 +50,31 @@ struct ConversationView: View {
 
 private struct Bubble: View {
     var turn: Turn
+    @State private var expanded = false
+
+    /// A pasted page of notes (~3,000 characters, 2026-11-11) froze the whole app: a row that tall in
+    /// a bottom-anchored LazyVStack kept SwiftUI re-placing rows forever (100% CPU on the main thread,
+    /// `LazySubviewPlacements` in the sample). Long turns start collapsed; "Show more" opens one.
+    private var isLong: Bool { turn.text.count > 600 || turn.text.filter(\.isNewline).count > 10 }
 
     var body: some View {
         HStack {
             if turn.isUser { Spacer(minLength: 80) }
-            Text(turn.text)
-                .textSelection(.enabled)
-                .padding(.horizontal, 13).padding(.vertical, 8)
-                .foregroundStyle(turn.isUser ? Color.white : Color.primary)
-                .background(turn.isUser ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(.quaternary),
-                            in: RoundedRectangle(cornerRadius: 17, style: .continuous))
-                .help(turn.kind.map { "Handled as: \($0)" } ?? "")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(turn.text)
+                    .lineLimit(isLong && !expanded ? 8 : nil)
+                    .textSelection(.enabled)
+                if isLong {
+                    Button(expanded ? "Show less" : "Show more") { expanded.toggle() }
+                        .buttonStyle(.plain).font(.caption.weight(.semibold))
+                        .foregroundStyle(turn.isUser ? Color.white.opacity(0.85) : Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 13).padding(.vertical, 8)
+            .foregroundStyle(turn.isUser ? Color.white : Color.primary)
+            .background(turn.isUser ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(.quaternary),
+                        in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .help(turn.kind.map { "Handled as: \($0)" } ?? "")
             if !turn.isUser { Spacer(minLength: 80) }
         }
     }

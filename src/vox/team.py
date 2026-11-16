@@ -96,7 +96,7 @@ def _update(name: str, **fields) -> dict | None:
 def status() -> list[dict]:
     """Every agent: name, folder, status (idle/working/waiting/stopped/error/terminal), task, last update.
     Includes the user's own Claude Code sessions that registered with Vox (``vox.agents``) as
-    status "terminal": shown, but Vox can't message them yet."""
+    status "terminal": Vox messages them through Claude Code's cross-session messaging."""
     with _LOCK:
         out = _load()["agents"]
     pend = {p["agent"]: p["what"] for p in _approvals}
@@ -441,8 +441,10 @@ def message(name: str, text: str, wait: float = 90) -> str:
     if a is None:
         return f"There's no agent called {name!r}."
     if a.get("external"):
-        return (f"{a['name']} runs in your terminal ({a.get('folder', '')}), so I can't message it yet. "
-                f"I can start a Vox agent in that folder instead.")
+        # One of the user's own Claude Code sessions that registered with Vox — deliver it into
+        # that session with Claude Code's cross-session messaging (vox.agents.send).
+        from vox import agents as registry
+        return registry.send(a["name"], text)[1]
     if busy(a["name"]):
         _inbox.setdefault(a["name"], []).append(text)
         upd = a.get("last_update") or "no update yet"

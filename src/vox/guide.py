@@ -60,9 +60,9 @@ GUIDE: list[tuple[str, str, list[dict]]] = [
     ("Clicking and the screen", "cursorarrow.click", [
         {"title": "Click by name", "what": "Press a button, link or sidebar item by what it says.",
          "say": ["Click Send", "Click the search box", "Click Downloads"],
-         "how": "If the name doesn't match exactly, Vox picks the closest one, and asks \"Did you mean …?\" when unsure. If nothing has that name, it looks at the screen. Clicked the wrong one of several with the same name? Say \"no, the other one\" and pick its number."},
-        {"title": "Numbered click badges", "what": "Puts a number on everything clickable so you can click by number.",
-         "say": ["Show clickable", "Click 12", "Hide"]},
+         "how": "If the name doesn't match exactly, Vox picks the closest one, and asks \"Did you mean …?\" when unsure. If nothing has that name, it looks at the screen. If several things have exactly that name, Vox numbers just those and you say which."},
+        {"title": "Numbered click badges", "what": "Puts a number on everything clickable so you can click by number. \"Show names\" adds each one's name, so you can see what to say.",
+         "say": ["Show clickable", "Show names", "Click 12", "Hide"]},
         {"title": "Point at things", "what": "Draws a ring around something on screen without clicking it.",
          "say": ["Point at the export button", "Circle the save button"]},
         {"title": "Scroll, keys, right-click, drag", "what": "The rest of the mouse and keyboard.",

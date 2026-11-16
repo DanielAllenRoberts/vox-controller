@@ -153,7 +153,7 @@ def run_intent(name: str, arg: str, _text: str | None = None) -> str:
         "profile": _profile, "profile_move": _profile_move, "app_cycle": _app_cycle,
         "sidebar": _sidebar, "close_tab": lambda _: close_tab(),
         "reload": _reload,
-        "click": click_element,
+        "click": lambda a: click_element(a, ask_if_ambiguous=True),
         "scroll": _scroll, "press": _press,
         "right_click": _right_click, "double_click": _double_click,
         "drag": _drag, "set_value": _set_value,
@@ -912,7 +912,12 @@ def focus_target() -> tuple[int, str] | None:
     return focus_watch.last() or ax.frontmost_verified() or ax.frontmost()
 
 
-def click_element(target: str) -> str:
+# Result prefix when "click X" matched several separate controls called X and Vox numbered them on
+# screen instead of guessing (Apple Voice Control's flow). Not a failure — nothing should escalate.
+WHICH_ONE = "Which one?"
+
+
+def click_element(target: str, ask_if_ambiguous: bool = False) -> str:
     """Find a control labelled `target` in the target app's accessibility tree and click it
     (AXPress the nearest pressable element). Uses the fast native AX engine (``vox.ax``, ~77 ms even
     on a miss) so it can't freeze the voice loop; falls back to the AppleScript walk only if native
@@ -921,7 +926,11 @@ def click_element(target: str) -> str:
     "Target app" is pinned up front (``focus_target``) and held for the whole find-and-press, so the
     click goes to the app the user was looking at when they spoke rather than to whatever happens to
     be frontmost by the time we press (issue O18). An outer pin — the executor sets one before its
-    LLM round-trip — wins, since it was taken closer to the utterance."""
+    LLM round-trip — wins, since it was taken closer to the utterance.
+
+    ``ask_if_ambiguous`` (the user's own voice commands, not the screen agent or MCP): when several
+    separate controls carry exactly that label, number them and return a ``WHICH_ONE`` prompt
+    instead of clicking whichever the walk reached first."""
     t = (target or "").strip().replace("\\", " ").replace('"', " ")
     if not t:
         return "Click what? Try 'click Submit'."
@@ -929,7 +938,7 @@ def click_element(target: str) -> str:
     from vox import ax
     aim = None if ax.pinned() else focus_target()  # an outer pin already answered this
     with ax.pinned_to(*(aim or (0, ""))) as pin:
-        result = _click_pinned(t, target, pin[1] if pin else "")
+        result = _click_pinned(t, target, pin[1] if pin else "", ask_if_ambiguous)
     if result.startswith("Clicked"):
         global LAST_CLICK
         LAST_CLICK = (t, time.time())   # for "no, the other one" (dispatch)
@@ -940,7 +949,17 @@ def click_element(target: str) -> str:
 LAST_CLICK: tuple[str, float] | None = None
 
 
-def _click_pinned(t: str, target: str, want: str) -> str:
+def _which_one(t: str, label: str) -> str | None:
+    """Number the controls called ``label`` and ask which; None if fewer than two are visible."""
+    try:
+        from vox import targets
+        n = targets.offer_choices(label or t)
+    except Exception:
+        n = None
+    return f"{WHICH_ONE} There are {n} called '{label or t}' — say a number." if n else None
+
+
+def _click_pinned(t: str, target: str, want: str, ask: bool = False) -> str:
     """The body of ``click_element``, run with the target app already pinned."""
     # On a web page, ask the PAGE first. The browser's web AX tree is only intermittently exposed
     # (collapsed in 20% of samples — see vox/webdom.py), so an AX miss here means "the tree is down"
@@ -948,7 +967,12 @@ def _click_pinned(t: str, target: str, want: str) -> str:
     # browser chrome and every native app still take the AX path below unchanged.
     try:
         from vox import targets
-        web = targets.click_label(t)
+        web = targets.click_label(t, ask_if_ambiguous=ask)
+        if web is not None and web[0] == "ambiguous":
+            msg = _which_one(t, web[1])
+            if msg:
+                return msg
+            web = targets.click_label(t)  # couldn't number them on screen → click as before
     except Exception:
         web = None
     if web is not None:
@@ -958,7 +982,12 @@ def _click_pinned(t: str, target: str, want: str) -> str:
     # timeout), so we do NOT retry on the slow AppleScript path.
     try:
         from vox import ax
-        res = ax.click(t)
+        res = ax.click(t, ask_if_ambiguous=ask)
+        if res is not None and res[0] == "ambiguous":
+            msg = _which_one(t, res[1])
+            if msg:
+                return msg
+            res = ax.click(t)  # couldn't number them on screen → click the first, as before
     except Exception:
         res = None
     if res is not None:
