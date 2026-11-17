@@ -72,13 +72,15 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 
 | | |
 |---|---|
-| Sees | Four options: Keep my current setup · Fast and cheap (DeepSeek plus Claude API) · Claude via API · Claude subscription. |
-| Today | 🟡 Works for people who already have the right accounts. |
-| Gap G6 | "Keep my current setup" means nothing to a new user. On a fresh install the defaults are DeepSeek (needs a key they don't have) plus the Claude subscription (needs Claude Code). Hide it on a fresh install, or make it pick a working default. |
-| Gap G7 | No OpenAI/ChatGPT option, though the engine supports `openai` and `chatgpt` providers. Many people have an OpenAI key or a ChatGPT plan rather than Anthropic. |
-| Gap G8 | "Claude subscription" says "Install it from claude.com/code, then run `claude` once". A zero-knowledge user can't act on that. Give them a button that opens the install page, and a "Check again" that re-runs the sign-in check. |
-| Gap G9 | No "where do I get a key?" link next to each key field (console.anthropic.com, platform.deepseek.com, platform.openai.com). |
-| Gap G10 | No way to say "I have no AI account". Vox still does a lot without a brain (the command database and the Vosk fast lane). Say so, and let them continue. |
+| Sees | Claude subscription · Claude via API · ChatGPT models via API · Fast and cheap (DeepSeek plus Claude). "Keep my current setup" only appears if the brains already set up answer a test. |
+| Does | Picks one. Pastes a key (with a **Get a key** link beside it), or signs in to Claude. |
+| Today | ✅ Reworked 2026-11-17. |
+| G6 ✅ | A fresh install's defaults (DeepSeek plus Claude Code) need accounts a new user doesn't have. Vox now tests the current setup quietly first. If it doesn't answer, "Keep my current setup" stays hidden and Claude subscription is selected, with no red error for a setup they never chose. |
+| G7 ✅ | **ChatGPT models via API**: an OpenAI key. The models are read from the account (its newest `gpt-N…-mini` for everyday replies, the newest full model for hard ones) rather than hard-coded. The copy says a ChatGPT plan doesn't cover it. |
+| G8 ✅ | **Claude subscription** no longer needs Claude Code installed. The engine's Agent SDK ships its own `claude`, which shares the sign-in. **Sign in to Claude…** opens a Terminal window running `claude auth login --claudeai` (through a `.command` file, so no Automation permission), then **Check Again**. |
+| G9 ✅ | A **Get a key** link beside every key field (Anthropic, OpenAI, DeepSeek). |
+| G10 ✅ | "No AI account? Choose Set Up Later: Vox's built-in commands work without one." |
+| Not tested live | Pressing Sign in to Claude: this Mac is already signed in, and signing in again would replace that login. The script it writes was checked by reading it. Choosing ChatGPT with a real OpenAI key: no OpenAI key on this Mac. |
 
 ### 9. Pick a voice
 
@@ -117,12 +119,9 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 ## Open gaps, in order
 
 1. **G3: publish the first release** (user's call), then merge so the README's install line resolves.
-2. **G6, G10: fresh-install brain choice that can't strand them.**
-3. **G8, G9: help links for keys and Claude Code.**
-4. **G7: OpenAI/ChatGPT preset.**
-5. **G4, G11, G14: copy and fallback fixes.**
-6. **G13, G12: nice to have.**
-7. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
+2. **G4, G11, G14: copy and fallback fixes.**
+3. **G13, G12: nice to have.**
+4. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
 
 ## Progress log
 
@@ -144,3 +143,7 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
   it (bundled `uv`, `sync --frozen --no-dev`, managed Python 3.12) and `import vox, faster_whisper,
   sounddevice` passed. Not tested: opening the installed copy, since a second Vox would fight the
   running one over the mic and port 8765.
+- **2026-11-17**: **G6–G10 done** (brain step). Checked with `Vox --snapshot` in three states:
+  checking the current setup; subscription selected and not signed in (Sign in and Check Again
+  buttons); Fast and cheap with two key fields. All three fit the fixed 620-point window. The copy
+  was cut twice to make that true.
