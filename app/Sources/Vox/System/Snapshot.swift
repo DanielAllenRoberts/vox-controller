@@ -55,6 +55,7 @@ enum Snapshotter {
                                                    checklist: [ChecklistItem(text: "Draft it", done: true), ChecklistItem(text: "Send it", done: false)]),
                                    onSave: { _ in }, onArchive: {}, onDelete: {}).environment(model))
             }, CGSize(width: 480, height: 640)))
+            shots.append(("connections-composio-sheet", { AnyView(AddConnectionSheet(preset: .composio) { _ in }.environment(model)) }, CGSize(width: 500, height: 420)))
             shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 370)))
 
             for (name, view, size) in shots where only.map({ name.contains($0) }) ?? true {

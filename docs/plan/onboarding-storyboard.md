@@ -88,14 +88,14 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 |---|---|
 | Today | ✅ Kokoro voices with previews. |
 | G11 ✅ | With no engine there are no voices to play, `say` ones included (previews go through the engine). It now says so and points to Settings → Voice for later, and Vox keeps using the Mac's own voice. |
-| Gap G12 | No mention of ElevenLabs (the key store knows `ELEVENLABS_API_KEY`). Optional, low priority. |
+| G12 (closed) | ElevenLabs isn't one of Vox's voice engines (only `say` and Kokoro are), so offering it here would be a new feature, not an onboarding fix. Left out. |
 
 ### 10. Connect your apps
 
 | | |
 |---|---|
 | Today | ✅ Mac Calendar, MCP servers (Composio etc.), Spotify. |
-| Gap G13 | 🟡 "Add an MCP server by URL or command" assumes they know what MCP is. One-click presets (Composio, Notion) with "what this lets Vox do" would help. |
+| G13 ✅ | **Connect Your Apps with Composio…** (Gmail, Calendar, Slack, Notion and hundreds more) opens a guided sheet: an Open Composio link, two numbered steps, paste the URL, and example requests. The section is now "Apps and services (MCP servers)", and the full form is **Add Another Server…**. No presets for Notion or Linear's own hosted servers: they sign in with OAuth, which Vox's headless connection can't complete. The same pane is in Settings → Connections. |
 
 ### 11. A little about you
 
@@ -119,8 +119,7 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 ## Open gaps, in order
 
 1. **G3: publish the first release** (user's call), then merge so the README's install line resolves.
-2. **G13, G12: nice to have.**
-3. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
+2. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
 
 ## Progress log
 
@@ -147,3 +146,7 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
   buttons); Fast and cheap with two key fields. All three fit the fixed 620-point window. The copy
   was cut twice to make that true.
 - **2026-11-17**: **G4, G11, G14 done.** Checked with `Vox --snapshot` (engine, voice and done steps).
+- **2026-11-17**: **G13 done, G12 closed.** Composio sheet and the connections step checked with
+  `Vox --snapshot` (a new `connections-composio-sheet` shot, and the step against the live engine).
+  Final pass: every onboarding step snapshotted, all `tests/` pass. **Loop stopped.** The two open
+  gaps need the user: publish the first release (G3) and Apple Developer ID signing (G15).
