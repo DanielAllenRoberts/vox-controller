@@ -6,7 +6,7 @@ import SwiftUI
 /// permissions, so by the time they reach the Engine step it's usually done. Screen Recording isn't
 /// asked for here; it's optional and Settings → Permissions offers it when wanted.
 struct OnboardingView: View {
-    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, brain, voice, connections, aboutYou, tryIt, done }
+    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, micCheck, brain, voice, connections, aboutYou, tryIt, done }
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismissWindow) private var dismissWindow
@@ -16,6 +16,9 @@ struct OnboardingView: View {
     @State private var installer = Installer()
     @State private var brain = BrainSetup()
     @State var aboutYou = AboutYouSetup()
+    /// `--snapshot` only: a fixed mic reading, since no engine is polled there.
+    var meterPreview: MicLevel?
+    @State private var heardSpeech = false
     @State private var tryItSince = Date()
 
     var body: some View {
@@ -28,11 +31,12 @@ struct OnboardingView: View {
                 case .microphone: PermissionStep(kind: .microphone, perms: perms)
                 case .accessibility: PermissionStep(kind: .accessibility, perms: perms)
                 case .engine: EngineStep(installer: installer)
+                case .micCheck: MicCheckStep(heard: $heardSpeech, preview: meterPreview)
                 case .brain: BrainStep(setup: brain)
                 case .voice: VoiceStep()
                 case .connections: ConnectionsStep(perms: perms)
                 case .aboutYou: AboutYouStep(setup: aboutYou)
-                case .tryIt: TryItStep(perms: perms)
+                case .tryIt: TryItStep(perms: perms, meterPreview: meterPreview)
                 case .done: DoneStep(perms: perms)
                 }
             }
@@ -97,6 +101,7 @@ struct OnboardingView: View {
         case .microphone where perms.status(.microphone) != .granted: "Skip for Now"
         case .accessibility where perms.status(.accessibility) != .granted: "Skip for Now"
         case .engine where !model.engine.isRunning: "Skip for Now"
+        case .micCheck where !heardSpeech: "Skip"
         case .brain where !brain.passed: "Set Up Later"
         case .aboutYou: "Skip"
         case .connections: "Skip"
@@ -316,6 +321,38 @@ private struct EngineStep: View {
         model.engine.location.kind == .checkout
             ? "Starting the engine from your source checkout."
             : "Installing a private copy of Python and the speech libraries. Nothing else on your Mac is changed."
+    }
+}
+
+// MARK: Mic check
+
+/// Proves the microphone works before anything depends on it: a live level bar, and the microphone
+/// picker right there for when the bar stays flat (the wrong input, or AirPods asleep).
+private struct MicCheckStep: View {
+    @Environment(AppModel.self) private var model
+    @Binding var heard: Bool
+    var preview: MicLevel?
+
+    var body: some View {
+        StepLayout(symbol: heard ? "checkmark.circle.fill" : "mic.and.signal.meter", tint: heard ? .green : .accentColor,
+                   title: heard ? "Vox can hear you" : "Test your microphone",
+                   message: heard ? "The bar moves when you talk. Press Continue."
+                                  : "Say a few words, like \u{201C}testing, one, two, three\u{201D}. The bar should jump past the line.") {
+            VStack(spacing: 18) {
+                MicLevelMeter(preview: preview, heardSpeech: $heard)
+                    .frame(maxWidth: 380)
+                if model.engine.isRunning || preview != nil {
+                    MicPicker().frame(maxWidth: 380)
+                    if !heard {
+                        Text("Bar not moving? Pick another microphone above, or check it isn't muted. You can also skip this and talk to Vox by typing.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                } else {
+                    Text("The speech engine isn't running yet. Go back a step to see why, or skip this for now.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+            }
+        }
     }
 }
 
@@ -786,6 +823,7 @@ private struct AboutYouStep: View {
 private struct TryItStep: View {
     @Environment(AppModel.self) private var model
     var perms: Permissions
+    var meterPreview: MicLevel?
     @State private var since = Date()
 
     /// The first thing said (or typed) since this step appeared, and Vox's answer to it.
@@ -804,8 +842,8 @@ private struct TryItStep: View {
                        ?? (canHear ? "Say \u{201C}Hey Vox, what time is it?\u{201D}" : "Vox can't hear you yet, but you can type to it.")) {
             VStack(spacing: 10) {
                 if heard == nil {
-                    if canHear {
-                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Listening…").foregroundStyle(.secondary) }
+                    if canHear || meterPreview != nil {
+                        MicLevelMeter(preview: meterPreview).frame(maxWidth: 380)
                         Text("Can't talk right now? Type instead:").font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                     }
                     if model.engine.isRunning { AskField(compact: true) }

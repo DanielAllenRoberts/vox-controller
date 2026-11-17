@@ -463,6 +463,24 @@ def create_app() -> FastAPI:
         runtime.set_paused(bool(body.get("paused")))
         return {"ok": True, "paused": runtime.paused}
 
+    # --- Live mic level (onboarding's mic check + the dashboard meter) ---
+    @app.get("/api/mic/level")
+    def get_mic_level() -> dict:
+        """How loud the mic Vox has open is right now, on a 0-1 scale shared by every meter, plus where
+        the speech threshold sits on that scale. ``live`` is false when no audio is arriving."""
+        import math
+        from .. import audio
+
+        def scale(r: float) -> float:   # -60 dBFS (silence) … -10 dBFS (shouting) → 0 … 1
+            db = 20 * math.log10(max(r, 1.0) / 32768)
+            return round(min(1.0, max(0.0, (db + 60) / 50)), 3)
+
+        lv = audio.level()
+        threshold = float(settings_store.get("speech_rms") or CONFIG.speech_rms)
+        live = lv["age"] is not None and lv["age"] < 1.5
+        return {"live": live, "level": scale(lv["rms"]) if live else 0.0,
+                "threshold": scale(threshold), "rms": round(lv["rms"], 1)}
+
     # --- Setup: API keys + a brain test (used by the app's onboarding) ---
     def _secret_names() -> list[str]:
         return sorted({CONFIG.anthropic_key_env, CONFIG.llm_api_key_env, CONFIG.local_ai_key_env,

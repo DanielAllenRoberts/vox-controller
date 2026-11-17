@@ -47,7 +47,7 @@ enum Snapshotter {
                 shots.append(("settings-\(tab.rawValue)", { AnyView(SettingsTabHost(tab: tab).environment(model)) }, CGSize(width: 620, height: 600)))
             }
             for step in OnboardingView.Step.allCases {
-                shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step, aboutYou: .sample).environment(model)) }, CGSize(width: 640, height: 620)))
+                shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step, aboutYou: .sample, meterPreview: MicLevel(live: true, level: 0.58, threshold: 0.27)).environment(model)) }, CGSize(width: 640, height: 620)))
             }
             shots.append(("board-card-editor", {
                 AnyView(CardEditor(card: BoardCard(id: 1, listId: 1, title: "Send the Acme invoice", body: "Net 30, attach the timesheet.",

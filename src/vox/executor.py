@@ -901,6 +901,10 @@ def _start_agent(task: str) -> tuple[bool, str]:
     return True, "On it — say stop or press escape to cancel."
 
 
+# Words that ask to type by voice, mis-hears included ("dot typing", "start typ", "take dictation").
+_ASKS_TO_TYPE = re.compile(r"\b(?:typ|dictat|transcri|write|writing|keyboard)", re.IGNORECASE)
+
+
 def execute(text: str, history=None) -> tuple[bool, str]:
     """Try to fulfil an uncertain command with the small brain.
 
@@ -1036,6 +1040,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         assistant._dbg("[executor]", f"decision=POINT target={target!r} → {result!r}")
         return result.startswith("There's"), result
     if upper.startswith("DICTATE"):  # user wants to type by voice → tell the loop to enter dictation
+        if not _ASKS_TO_TYPE.search(text or ""):
+            # Dictation types everything said next, so entering it by mistake is costly: on 17 Nov a
+            # mis-heard "Hey Vox, open Claude" ("i think lord") came back DICTATE, likely because
+            # "start typing" sat in the recent conversation, and the next four commands were typed
+            # into the terminal. Only go in when the words themselves ask to type.
+            assistant._dbg("[executor]", f"decision=DICTATE refused: {text!r} doesn't ask to type")
+            return False, "Sorry, I didn't catch that. Say it again?"
         assistant._dbg("[executor]", "decision=DICTATE → enter dictation mode")
         return True, ENTER_DICTATION
     if upper.startswith("TYPE:"):

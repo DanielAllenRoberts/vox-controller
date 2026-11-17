@@ -12,6 +12,7 @@ struct HomeView: View {
                 HStack(alignment: .top, spacing: Metrics.gap) {
                     RecentCard().frame(maxWidth: .infinity)
                     VStack(spacing: Metrics.gap) {
+                        MicCard()
                         QuickSettingsCard()
                         BrainsCard()
                     }
@@ -191,6 +192,20 @@ private struct RecentCard: View {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// What the microphone is hearing right now, and which microphone it is: the first thing to check
+/// when Vox seems not to respond.
+private struct MicCard: View {
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Microphone").font(.headline)
+                MicLevelMeter()
+                MicPicker()
             }
         }
     }

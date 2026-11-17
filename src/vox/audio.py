@@ -29,8 +29,21 @@ class NoInputDevice(Exception):
 _MAX_QUEUE_SECONDS = 30.0
 
 
+# The latest mic loudness, for the live level meter (onboarding's mic check, the dashboard). Updated
+# for every frame either backend produces, whether or not Vox is listening for commands, so the bar
+# shows what Vox actually hears from the mic it actually opened.
+_level = {"rms": 0.0, "at": 0.0}
+
+
+def level() -> dict:
+    """{"rms": float, "age": seconds since the last frame}. A large age means no audio is arriving."""
+    return {"rms": _level["rms"], "age": time.monotonic() - _level["at"] if _level["at"] else None}
+
+
 def _put_latest(q: "queue.Queue[np.ndarray]", frame: np.ndarray) -> None:
     """Queue `frame` from the audio thread without ever blocking it: when full, drop the oldest."""
+    _level["rms"] = rms(frame)
+    _level["at"] = time.monotonic()
     try:
         q.put_nowait(frame)
     except queue.Full:
