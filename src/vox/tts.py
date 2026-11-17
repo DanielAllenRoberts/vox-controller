@@ -141,9 +141,22 @@ def _speak_now(text: str) -> None:
         try:
             if _speak_kokoro(text):
                 return  # synth-whole-then-afplay Kokoro path (robust; can't be cut mid-utterance)
-        except Exception:
-            pass  # any Kokoro failure → fall through to the always-available `say` path
+        except Exception as e:
+            _warn_kokoro_fallback(e)  # any Kokoro failure → fall through to the always-available `say` path
     _speak_say(text)
+
+
+_KOKORO_WARNED = False
+
+
+def _warn_kokoro_fallback(e: Exception) -> None:
+    """Say ONCE why Kokoro fell back to `say`. The fallback is silent by design so the daemon never
+    breaks, but that also hid a failed model download (no CA certificates) behind the macOS voice."""
+    global _KOKORO_WARNED
+    if _KOKORO_WARNED:
+        return
+    _KOKORO_WARNED = True
+    print(f"⚠ Kokoro voice unavailable, using macOS `say` instead: {type(e).__name__}: {e}", flush=True)
 
 
 def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
