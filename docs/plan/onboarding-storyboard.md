@@ -20,8 +20,7 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 |---|---|
 | Sees | The GitHub README. |
 | Does | Looks for a download button or one line to paste. |
-| Today | ❌ The README's "Getting started" begins with `app/build.sh`, which needs a clone, the Xcode Command Line Tools and Swift. The terminal route needs `uv`. Nothing to download. |
-| Gap G1 | A one-line install at the top of the README: `curl -fsSL https://raw.githubusercontent.com/DanielAllenRoberts/vox-controller/main/install.sh \| bash` |
+| Today | 🟡 Built: an **Install** section at the top of the README with the one line, `curl -fsSL https://raw.githubusercontent.com/DanielAllenRoberts/vox-controller/main/install.sh \| bash`, plus how to uninstall. It only works once this branch is on `main` and a release exists (G3). |
 
 ### 2. Runs the one-line install
 
@@ -29,10 +28,9 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 |---|---|
 | Sees | Terminal output: what's being downloaded, where it's going, how big. |
 | Does | Waits about a minute. |
-| Today | ❌ No `install.sh`, no published build. |
-| Gap G2 | `install.sh`: checks macOS version and Apple Silicon, downloads the latest `Vox.zip` from GitHub Releases, unzips it to `/Applications` (or `~/Applications` without admin rights), and opens it. Files curl downloads aren't quarantined, so the unsigned app opens without the "can't be checked for malicious software" wall a browser download hits. |
-| Gap G3 | A release to download: `scripts/release.sh` runs `app/build.sh --bundle-engine`, zips `Vox.app` and uploads it with `gh release create`. Publishing needs the user's go-ahead: it's a push. |
-| Assumes | They have about 2 GB free (app plus private Python plus speech models). The script should check and say so. |
+| Today | ✅ `install.sh` (G2): checks Apple Silicon, macOS 14+ and 3 GB free, downloads `Vox.zip` from the latest GitHub release, puts Vox.app in `/Applications` (or `~/Applications` if that isn't writable), and opens it. An update closes only the copy it's replacing. curl downloads aren't quarantined, so the unsigned app opens without Gatekeeper's "could not verify" block. |
+| Today | 🟡 `scripts/release.sh` (G3) builds the 23 MB `app/build/Vox.zip` (engine source plus `uv`), refusing if `src/`, `mcp/` or the lockfile have uncommitted changes. `--publish` creates the GitHub release. **Not published yet: needs the user's go-ahead.** |
+| Gap G15 | Vox.app is ad-hoc signed. That's fine through curl, but a browser download of the zip is quarantined and blocked. A Developer ID plus notarisation would fix it (Apple Developer account, $99 a year). Until then the README only offers the curl line. |
 
 ### 3. First launch: Welcome
 
@@ -118,12 +116,13 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 
 ## Open gaps, in order
 
-1. **G1–G3: one-line install plus a release.** Without this nobody outside can start. Highest value.
+1. **G3: publish the first release** (user's call), then merge so the README's install line resolves.
 2. **G6, G10: fresh-install brain choice that can't strand them.**
 3. **G8, G9: help links for keys and Claude Code.**
 4. **G7: OpenAI/ChatGPT preset.**
 5. **G4, G11, G14: copy and fallback fixes.**
 6. **G13, G12: nice to have.**
+7. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
 
 ## Progress log
 
@@ -137,3 +136,11 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
   now only starts when the words themselves ask to type (`executor._ASKS_TO_TYPE`). Test:
   `tests/test_dictate_guard.py`. Still open: a way out of dictation that doesn't rely on knowing to
   say "stop typing", e.g. "Vox, open Claude" while dictating runs as a command.
+- **2026-11-17**: **G1, G2 built; G3 ready but not published.** `install.sh` and `scripts/release.sh`
+  added, with the install line at the top of the README. Checked: `release.sh` builds a 23 MB zip.
+  `install.sh` with `VOX_ZIP_URL=file://…` installs into a scratch folder, keeps a valid signature
+  and leaves no quarantine flag. Running it twice updates in place, and a bad URL or a missing
+  release fails with a plain message. The bundled engine was installed the way first launch does
+  it (bundled `uv`, `sync --frozen --no-dev`, managed Python 3.12) and `import vox, faster_whisper,
+  sounddevice` passed. Not tested: opening the installed copy, since a second Vox would fight the
+  running one over the mic and port 8765.
