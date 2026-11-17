@@ -298,7 +298,15 @@ private struct EngineStep: View {
                             Button("Try Again") { model.boot() }
                         } else {
                             ProgressView().controlSize(.small)
-                            Text("Loading speech models. The first start can take a minute.").font(.callout).foregroundStyle(.secondary)
+                            // The first start downloads the speech models (Whisper, the voices: about
+                            // 0.6 GB) with no progress of its own, so at least show time passing.
+                            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                                let secs = max(0, Int(ctx.date.timeIntervalSince(model.engine.since)))
+                                Text("Starting the speech engine\u{2026} \(secs / 60):\(String(format: "%02d", secs % 60))")
+                                    .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                            Text("The first start downloads the speech models (about 0.6 GB). On a slow connection that takes a few minutes. Later starts take seconds.")
+                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }
                     }
                 }
@@ -741,7 +749,8 @@ private struct VoiceStep: View {
         StepLayout(symbol: "speaker.wave.2.fill", title: "Pick a voice",
                    message: "This is how Vox answers you. Press play to hear each one.", compact: true) {
             if voices.isEmpty {
-                Text("Voices appear once the engine is running.").foregroundStyle(.secondary)
+                Text("The voices appear once the speech engine is running. Press Continue to carry on, and pick a voice later in Settings \u{2192} Voice.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
             } else {
                 ScrollView {
                     VStack(spacing: 6) {
@@ -966,6 +975,7 @@ private struct DoneStep: View {
                 Bullet(symbol: "command", text: "\u{201C}Take control\u{201D} to give commands. \u{201C}Stand down\u{201D} to stop.")
                 Bullet(symbol: "bubble.left", text: "\u{201C}Hey Vox\u{201D} to ask a question or chat.")
                 Bullet(symbol: "keyboard", text: "\u{201C}Start typing\u{201D} to dictate into any text field.")
+                Bullet(symbol: "option", text: "Or hold the right \u{2325} Option key, talk, and let go. No wake word needed.")
             }
         }
     }

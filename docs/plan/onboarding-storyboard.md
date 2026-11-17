@@ -58,7 +58,7 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 | | |
 |---|---|
 | Today | ✅ Progress bar, details log, Try Again. |
-| Gap G4 | 🟡 The first start downloads the Whisper and Kokoro models too. On a slow connection, "Loading speech models. The first start can take a minute" can be much longer than a minute, with no progress. The copy should say it's downloading, and roughly how much. |
+| G4 ✅ | The first start also downloads the speech models, with no progress of its own. The step now shows a running clock ("Starting the speech engine… 1:12") and says the first start downloads about 0.6 GB, which takes a few minutes on a slow connection. |
 
 ### 7. Test your microphone (new)
 
@@ -87,7 +87,7 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 | | |
 |---|---|
 | Today | ✅ Kokoro voices with previews. |
-| Gap G11 | 🟡 "Voices appear once the engine is running" is a dead end if the engine failed. Fall back to the macOS `say` voices. |
+| G11 ✅ | With no engine there are no voices to play, `say` ones included (previews go through the engine). It now says so and points to Settings → Voice for later, and Vox keeps using the Mac's own voice. |
 | Gap G12 | No mention of ElevenLabs (the key store knows `ELEVENLABS_API_KEY`). Optional, low priority. |
 
 ### 10. Connect your apps
@@ -114,14 +114,13 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
 | | |
 |---|---|
 | Today | ✅ Teaches "take control", "Hey Vox", "start typing". |
-| Gap G14 | 🟡 Doesn't mention hold Right ⌥ to talk, which is the most reliable way in. |
+| G14 ✅ | Now also says "Or hold the right ⌥ Option key, talk, and let go. No wake word needed." |
 
 ## Open gaps, in order
 
 1. **G3: publish the first release** (user's call), then merge so the README's install line resolves.
-2. **G4, G11, G14: copy and fallback fixes.**
-3. **G13, G12: nice to have.**
-4. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
+2. **G13, G12: nice to have.**
+3. **G15: Developer ID signing and notarisation** (needs an Apple Developer account).
 
 ## Progress log
 
@@ -147,3 +146,4 @@ may have a ChatGPT or Claude subscription, or no AI account at all.
   checking the current setup; subscription selected and not signed in (Sign in and Check Again
   buttons); Fast and cheap with two key fields. All three fit the fixed 620-point window. The copy
   was cut twice to make that true.
+- **2026-11-17**: **G4, G11, G14 done.** Checked with `Vox --snapshot` (engine, voice and done steps).
