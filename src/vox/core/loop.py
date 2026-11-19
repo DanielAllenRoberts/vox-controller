@@ -13,7 +13,6 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 
 
 from vox import actions, assistant, auto_dictation, dispatch, executor, sounds, tts
@@ -139,9 +138,7 @@ def _start_focus_watch(cfg, out, on_change=None) -> None:
             out.emit(f"  [focus] not started: {exc}")
 
 
-# Set by Vox.app when it launched this engine. The app replaces the browser dashboard, so "open
-# dashboard" brings the app forward instead of opening a tab.
-_IN_APP = os.environ.get("VOX_APP") == "1"
+# Vox.app replaced the browser dashboard, so "open dashboard" brings the app forward.
 _APP_BUNDLE_ID = "app.vox.mac"
 
 
@@ -170,27 +167,10 @@ def _start_volume_watch(out) -> None:
 
 
 def _open_dashboard(cfg, out) -> None:
-    """Open the dashboard in its own window (Arc opens external localhost links as a standalone
-    'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
-    stacks. Closing is non-disruptive — actions.close_dashboard presses the window's close button
-    via accessibility (no Space-switch). Guarded so a failure can't break the wake loop."""
-    if _IN_APP:
-        subprocess.run(["open", "-b", _APP_BUNDLE_ID], capture_output=True, text=True)
-        out.emit("🖥  Showing Vox")
-        return
-    url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
-    try:
-        if actions._focus_dashboard(url):  # reuse the existing dashboard window/tab
-            out.emit("🖥  Dashboard already open — focused it.")
-            return
-        subprocess.run(["open", url], capture_output=True, text=True)  # own window (Arc → Little Arc)
-        out.emit(f"🖥  Opening dashboard → {url}")
-    except Exception:
-        try:  # last-resort fallback to the system default browser
-            webbrowser.open(url)
-            out.emit(f"🖥  Opening dashboard → {url}")
-        except Exception as exc:
-            out.emit(f"  [dashboard] couldn't open browser: {exc}")
+    """"Open dashboard" shows Vox.app (it replaced the browser dashboard). Guarded so a failure
+    can't break the wake loop."""
+    r = subprocess.run(["open", "-b", _APP_BUNDLE_ID], capture_output=True, text=True)
+    out.emit("🖥  Showing Vox" if r.returncode == 0 else "🖥  Vox.app isn't installed, so there's no window to show.")
 
 
 def _open_mic_or_wait(cfg, out):
@@ -211,12 +191,6 @@ def _open_mic_or_wait(cfg, out):
                          f"   {cfg.assistant_name} is up (dashboard, scheduler, MCP) but can't hear. "
                          f"Connect a microphone or pick one in Settings → Voice → Microphone — "
                          f"listening starts the moment one appears.")
-                url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}/settings#voice"
-                if not _IN_APP:  # the app already shows "can't hear" in its status
-                    try:
-                        subprocess.run(["open", url], capture_output=True, text=True)
-                    except Exception:
-                        webbrowser.open(url)
             time.sleep(5)
             try:
                 sd._terminate(); sd._initialize()  # re-enumerate — PortAudio's device list is frozen at init

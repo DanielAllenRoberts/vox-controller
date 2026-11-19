@@ -1,8 +1,7 @@
-"""FastAPI bridge for the Vox dashboard.
+"""FastAPI bridge between the Vox daemon and Vox.app.
 
-Foundation skeleton (dashboard iteration 1). Serves the REST API under ``/api``,
-a WebSocket at ``/api/usage/stream``, and the built frontend (``dashboard/dist``)
-as static files at ``/`` with SPA fallback. See ``docs/dashboard/CONTRACT.md``.
+Serves the REST API under ``/api`` and its WebSockets. See ``docs/dashboard/CONTRACT.md``.
+(The React web dashboard this used to serve at ``/`` was removed; Vox.app replaced it.)
 
 Design guarantees:
 - **The voice daemon must never break because of the dashboard.** ``create_app``
@@ -31,7 +30,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 
 from ..config import CONFIG
 from ..paths import DATA_DIR
@@ -72,17 +70,11 @@ def _version() -> str:
     except Exception:
         return "dev"
 
-# Built frontend lives at <repo>/dashboard/dist. This file is
-# src/vox/web/server.py → parents[3] is the repo root.
+# This file is src/vox/web/server.py → parents[3] is the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_DIST_DIR = _REPO_ROOT / "dashboard" / "dist"
 
-# Vite dev server origin (CONTRACT) — allowed for CORS so the dashboard can talk
-# to this bridge while developed with `npm run dev`.
-_DEV_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+# No browser origin may call this API (the web dashboard is gone; Vox.app isn't a browser).
+_DEV_ORIGINS: list[str] = []
 
 
 def _brain(prefix: str) -> dict:
@@ -1641,9 +1633,6 @@ def create_app() -> FastAPI:
         except Exception as exc:  # snapshot() shouldn't raise, but never 500
             return {"error": f"diagnostics read failed: {exc}"}
 
-    # --- Static dashboard + SPA fallback ---
-    _mount_static(app)
-
     return app
 
 
@@ -2181,49 +2170,6 @@ def _handbook() -> list:
     out = [by_title.pop(t) for t in order if t in by_title]
     out += list(by_title.values())
     return out
-
-
-def _mount_static(app: FastAPI) -> None:
-    """Serve ``dashboard/dist`` at ``/`` with SPA fallback, if it's been built.
-
-    Mounted last so ``/api/*`` routes always win. If the frontend isn't built
-    yet, a friendly placeholder is served at ``/`` instead of a 404 wall.
-    """
-    if _DIST_DIR.is_dir():
-        assets = _DIST_DIR / "assets"
-        if assets.is_dir():
-            app.mount("/assets", StaticFiles(directory=assets), name="assets")
-
-        # index.html must NEVER be browser-cached — it references the content-hashed JS bundle, so a
-        # stale index.html keeps loading an old bundle after a rebuild (the "I rebuilt but the
-        # dashboard didn't change until a hard-refresh" gremlin). The hashed /assets are immutable
-        # and cache freely.
-        _NO_CACHE = {"Cache-Control": "no-cache, max-age=0"}
-
-        @app.get("/{full_path:path}")
-        def spa(full_path: str):
-            # Serve a real file if it exists, else fall back to index.html so the
-            # client-side router handles the route.
-            candidate = _DIST_DIR / full_path
-            if full_path and candidate.is_file():
-                if candidate.name == "index.html":
-                    return FileResponse(candidate, headers=_NO_CACHE)
-                return FileResponse(candidate)
-            index = _DIST_DIR / "index.html"
-            if index.is_file():
-                return FileResponse(index, headers=_NO_CACHE)
-            return JSONResponse({"error": "dashboard not built"}, status_code=404)
-    else:
-        @app.get("/")
-        def placeholder():
-            return JSONResponse(
-                {
-                    "status": "ok",
-                    "message": "Vox bridge running. Build the dashboard "
-                    "(dashboard/ → npm run build) to serve the UI here.",
-                    "api": "/api/status",
-                }
-            )
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:

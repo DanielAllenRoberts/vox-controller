@@ -74,13 +74,13 @@ class Config:
     # "Vox, …" or a yes. Off by default while it's tried out. docs/plan/research/command-vs-dictation.md
     auto_dictation: bool = False
 
-    # --- Dashboard (Vox Control Center) --- a local web UI served by an embedded FastAPI
-    # bridge (vox.web.server), opened hands-free by an "open dashboard" wake phrase. Entirely
-    # additive: if the web package is missing or errors, the voice daemon keeps running.
+    # --- Dashboard --- the local API (vox.web.server) that Vox.app talks to; "open dashboard"
+    # shows Vox.app. (The React web UI it once served was removed.) Entirely additive: if the web
+    # package is missing or errors, the voice daemon keeps running.
     dashboard_enabled: bool = True
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
-    # Idle wake phrases (substring-matched) that open the dashboard in the browser.
+    # Idle wake phrases (substring-matched) that show Vox.app.
     open_dashboard_phrases: tuple[str, ...] = (
         "open dashboard", "open the dashboard", "show dashboard",
         "launch dashboard", "open vox dashboard",
