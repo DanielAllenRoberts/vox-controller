@@ -74,6 +74,9 @@ struct APIClient {
 
     /// URL for the live conversation websocket.
     var conversationStream: URL { URL(string: "ws://127.0.0.1:\(port)/api/conversation/stream")! }
+
+    /// URL for the corner indicator's live events (listening / heard / mode changed).
+    var hudStream: URL { URL(string: "ws://127.0.0.1:\(port)/api/hud/stream")! }
 }
 
 /// Decodes any (or no) response body. Used where only success matters.

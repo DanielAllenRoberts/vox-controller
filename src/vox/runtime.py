@@ -9,6 +9,8 @@ Two things live here:
   learning, the conversation feed) with no second code path to drift.
 * **Mode / pause.** The loop publishes which mode it's in, so ``/api/status`` and the menu bar
   can show it. ``paused`` stops the mic being treated as speech. Typed input still works while paused.
+* **The on-screen indicator feed.** ``hud(...)`` pushes "listening" / "heard" / "state" events to
+  Vox.app the instant they happen, so it can show what Vox is hearing. Nothing is stored.
 """
 
 from __future__ import annotations
@@ -67,8 +69,11 @@ paused = False
 def set_mode(mode: str) -> None:
     global _mode, _mode_since
     with _lock:
-        if mode != _mode:
+        changed = mode != _mode
+        if changed:
             _mode, _mode_since = mode, time.time()
+    if changed:
+        hud("state")
 
 
 def mode() -> tuple[str, float]:
@@ -105,6 +110,40 @@ def ptt_down() -> bool:
 def set_paused(value: bool) -> None:
     global paused
     paused = bool(value)
+    hud("state")
+
+
+# --- on-screen indicator feed -------------------------------------------------------------------
+# Vox.app's corner indicator subscribes over /api/hud/stream. Events: {"type": "listening", "on"}
+# while an utterance is being captured, {"type": "heard", "text", "ignored"} with what was
+# recognised, and {"type": "state"} when the mode or pause changes (the app re-reads /api/status).
+# Each subscriber is (event loop, asyncio queue); the voice loop publishes from its own thread.
+_hud_subs: list = []
+
+
+def hud_subscribe(loop, q) -> None:
+    _hud_subs.append((loop, q))
+
+
+def hud_unsubscribe(q) -> None:
+    _hud_subs[:] = [s for s in _hud_subs if s[1] is not q]
+
+
+def _hud_put(q, event: dict) -> None:
+    try:
+        q.put_nowait(event)
+    except Exception:  # a full queue drops the event; the indicator is never worth blocking for
+        pass
+
+
+def hud(kind: str, **fields) -> None:
+    """Publish an indicator event. Never raises: the voice loop must not depend on anyone watching."""
+    event = {"type": kind, **fields}
+    for loop, q in list(_hud_subs):
+        try:
+            loop.call_soon_threadsafe(_hud_put, q, event)
+        except Exception:
+            pass
 
 
 # --- stop button --------------------------------------------------------------------------------

@@ -99,6 +99,8 @@ FEATURES: list[tuple[str, str, str, str, str]] = [
      "'open Notion Calendar' opens Notion Calendar, not Notion.", "code"),
     ("ptt-no-cutoff", "Vox.app", "Hold-to-talk never cuts you off",
      "Hold Right ⌥ and talk for 30+ seconds: no click mid-way; it sends when you let go.", "code"),
+    ("hud", "Vox.app", "See what Vox hears",
+     "Hold Right ⌥ and speak: a pill in the top-right corner says 'Listening…', then shows the words Vox recognised. Say 'take control': it stays up showing the mode until you say 'stand down'. Turn it off in Settings → Listening.", "code"),
     ("voice-settings", "Control", "Change settings by voice",
      "'reply silently from now on' → no spoken replies; 'speak replies again' → back. Also 'use a deeper voice', 'stop learning commands'. Asking to change the brain is refused.", "claude"),
     ("web-weather", "Voice & speed", "Weather",

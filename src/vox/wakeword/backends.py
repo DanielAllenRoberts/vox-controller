@@ -118,6 +118,10 @@ class WhisperWakeBackend:
             cmd = None if label is not None else self._oneshot(text)
             if label is None and cmd is None and (runtime.is_typed(audio) or runtime.last_capture_ptt):
                 cmd = text.strip()  # typed or hold-to-talk from idle: no need to say "vox" first
+            if text.strip() and not runtime.is_typed(audio):
+                # The on-screen indicator shows idle speech too (dimmed when it wasn't for Vox), so a
+                # mis-heard wake phrase is visible instead of looking like Vox ignored you.
+                runtime.hud("heard", text=text.strip(), ignored=label is None and not cmd)
             if self._cfg.debug and self._out is not None and text.strip():
                 # Skip silence captures (empty transcription) — they're pure noise. Real
                 # transcriptions (incl. no-match mishears) still log.

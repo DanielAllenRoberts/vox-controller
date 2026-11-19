@@ -789,6 +789,22 @@ def create_app() -> FastAPI:
         finally:
             mod.unsubscribe(queue)
 
+    @app.websocket("/api/hud/stream")
+    async def hud_stream(ws: WebSocket) -> None:
+        """Live events for Vox.app's on-screen indicator (see vox.runtime.hud). Nothing is stored."""
+        from vox import runtime
+        await ws.accept()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        runtime.hud_subscribe(asyncio.get_running_loop(), queue)
+        try:
+            await ws.send_json({"type": "state"})
+            while True:
+                await ws.send_json(await queue.get())
+        except Exception:  # disconnect, or anything else: just stop
+            pass
+        finally:
+            runtime.hud_unsubscribe(queue)
+
     # --- Personalities (guarded) ---
     @app.get("/api/personalities")
     def get_personalities() -> dict:

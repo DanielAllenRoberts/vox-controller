@@ -359,6 +359,8 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     if text and tts.is_echo(text):
         out.emit(f"  🔁 ignored {text!r}: that's my own voice coming back through the speakers")
         return ""
+    if text.strip():
+        runtime.hud("heard", text=text.strip())
     return text
 
 
@@ -562,6 +564,7 @@ def _recognize(audio, cfg, transcriber, out, hotwords: str = "") -> str:
                             f"(Whisper was skipped — if you didn't say this, it was force-aligned)")
                 if cfg.debug:
                     out.emit(f"  [debug] heard (vosk): {r['text']!r}")
+                runtime.hud("heard", text=r["text"])
                 return r["text"]
             if log:
                 log(f"  [vosk] {'low conf ' + str(r['conf']) if r else 'no match [unk]'} → Whisper lane")
@@ -1182,6 +1185,9 @@ def _dictation_mode(frames, cfg, transcriber, out, mic=None, return_to=None):
         # Check the control phrases BEFORE paying for Whisper — "stop typing" is the phrase you say
         # most in dictation and it was the slowest to land.
         ctrl = _dictation_control(audio, cfg)
+        if ctrl:
+            from vox import runtime
+            runtime.hud("heard", text=ctrl)
         if ctrl in ("stop typing", "stop dictation", "stop dictating"):
             sounds.play(cfg.sound_dictate_stop)
             _flush(mic, settle=_CHIME_SETTLE_SECONDS)
