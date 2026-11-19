@@ -56,16 +56,17 @@ enum Snapshotter {
                                    onSave: { _ in }, onArchive: {}, onDelete: {}).environment(model))
             }, CGSize(width: 480, height: 640)))
             shots.append(("connections-composio-sheet", { AnyView(AddConnectionSheet(preset: .composio) { _ in }.environment(model)) }, CGSize(width: 500, height: 420)))
-            let hud: [(String, String, String?, Bool)] = [("control-heard", "control", "\u{201C}next tab\u{201D}", false),
-                                                          ("dictation-listening", "dictation", "Listening…", false),
-                                                          ("idle-ignored", "idle", "\u{201C}thanks for watching\u{201D}", true),
-                                                          ("assistant", "assistant", nil, false)]
-            for (name, mode, text, dim) in hud {
+            // (name, mode, text, has ■, speech paused or nil for no pause button)
+            let hud: [(String, String, String?, Bool, Bool?)] = [("control-heard", "control", "\u{201C}next tab\u{201D}", true, nil),
+                                                                 ("assistant-speaking", "assistant", "Speaking…", true, false),
+                                                                 ("agent-paused", "idle", "Speech paused", true, true),
+                                                                 ("mode-flash", "idle", nil, false, nil)]
+            for (name, mode, text, stop, paused) in hud {
                 var s = model.engine.status
                 s?.mode = mode
                 let p = VoxPresence.from(engine: .running(owned: true), status: s)
                 shots.append(("hud-\(name)", {
-                    AnyView(HUDPill(presence: p, text: text, dim: dim).padding(12)
+                    AnyView(HUDPill(presence: p, text: text, onStop: stop ? {} : nil, speechPaused: paused).padding(12)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).background(.gray))
                 }, CGSize(width: 380, height: 120)))
             }

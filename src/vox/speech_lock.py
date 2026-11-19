@@ -44,6 +44,58 @@ except ImportError:  # non-POSIX: every lock operation degrades to "speak immedi
 
 _LOCK_PATH = DATA_DIR / "speaking.lock"
 
+# --- pause / stop, for every speaker at once ------------------------------------------------------
+# The same files-under-data trick as the lock: Vox and each agent's MCP server are separate
+# processes, so "pause speaking" and "stop speaking" are two small files that whoever is playing
+# audio checks many times a second (vox.tts). Pausing kills the audio and the speaker waits; on
+# resume it carries on from the sentence it was in. Nothing new starts while paused.
+_PAUSE_PATH = DATA_DIR / "speech.pause"   # "1 <unix seconds>" paused since, "0 <unix seconds>" resumed at
+_STOP_PATH = DATA_DIR / "speech.stop"     # "<unix seconds>" of the last stop request
+# A pause nobody lifts must not mute Vox for good (a crashed app, a forgotten button): after this
+# long, speech carries on by itself.
+PAUSE_MAX = 600.0
+
+
+def _pause_state() -> tuple[bool, float]:
+    """``(paused, when it last changed)``."""
+    try:
+        flag, _, ts = _PAUSE_PATH.read_text(encoding="utf-8").partition(" ")
+        return flag == "1", float(ts)
+    except Exception:
+        return False, 0.0
+
+
+def paused() -> bool:
+    on, since = _pause_state()
+    return on and time.time() - since < PAUSE_MAX
+
+
+def set_paused(value: bool) -> None:
+    try:
+        _PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PAUSE_PATH.write_text(f"{1 if value else 0} {time.time():.3f}", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def request_stop() -> None:
+    """Stop whoever is speaking, in any process, and drop what they had left to say."""
+    try:
+        _STOP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _STOP_PATH.write_text(f"{time.time():.3f}", encoding="utf-8")
+    except Exception:
+        pass
+    if paused():
+        set_paused(False)
+
+
+def stopped_since(t: float) -> bool:
+    """True if a stop was requested after wall-clock time ``t`` (when the caller began speaking)."""
+    try:
+        return float(_STOP_PATH.read_text(encoding="utf-8")) >= t
+    except Exception:
+        return False
+
 # Lock-file line: "<label> (pid 1234) since <unix seconds>". Human-readable on purpose — `cat
 # data/speaking.lock` should still answer "who is talking?" — with the start time appended so a
 # waiter can tell a long utterance from a wedged process.
@@ -171,7 +223,9 @@ def hold(label: str = "vox", timeout: float | None = None):
                 locked = True
                 break
             except OSError:
-                if time.monotonic() >= deadline or _held_too_long(max_hold):
+                if paused():
+                    deadline += 0.05  # a paused speaker isn't a slow one: don't run out of patience
+                elif time.monotonic() >= deadline or _held_too_long(max_hold):
                     break
                 time.sleep(0.05)  # short poll: speech is a human-timescale queue
         if locked:
@@ -197,9 +251,17 @@ def hold(label: str = "vox", timeout: float | None = None):
                 # phrase — while a stuck holder is unbounded and degrades everyone, which is the
                 # same call the wait timeout already makes: one overlap beats a mute assistant.
                 # Keep speech_queue_max_hold comfortably longer than the longest real utterance.
-                timer = threading.Timer(max_hold, release)
-                timer.daemon = True
-                timer.start()
+                timer = threading.Event()  # set = the block finished, stand the watchdog down
+
+                def _watchdog(done=timer, left=max_hold):
+                    while left > 0:
+                        if done.wait(0.5):
+                            return
+                        if not paused():  # time spent paused is not time spent wedged
+                            left -= 0.5
+                    release()
+
+                threading.Thread(target=_watchdog, daemon=True).start()
     except Exception:
         fh = None  # no lock available on this platform/filesystem → don't block speech
 
@@ -207,7 +269,7 @@ def hold(label: str = "vox", timeout: float | None = None):
         yield locked
     finally:
         if timer is not None:
-            timer.cancel()
+            timer.set()
         if release is not None:
             release()
         if fh is not None:
@@ -223,6 +285,10 @@ def _held_too_long(max_hold: float) -> bool:
     if max_hold <= 0:
         return False
     _, _, started = _read_state()
+    on, changed = _pause_state()
+    if on and paused():
+        return False
+    started = max(started, changed) if started else started  # a hold that was paused restarts its clock
     return bool(started) and (time.time() - started) > max_hold + _STALE_GRACE
 
 

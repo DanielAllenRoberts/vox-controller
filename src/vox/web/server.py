@@ -441,9 +441,21 @@ def create_app() -> FastAPI:
         if err is not None:
             return err
         from vox import runtime
-        stopped = runtime.request_stop()
+        stopped = runtime.request_stop(sleep=bool((_body or {}).get("sleep")))
         print(f"⏹ Stop button{': ' + ', '.join(stopped) if stopped else ' (nothing was running)'}", flush=True)
         return {"ok": True, "stopped": stopped}
+
+    @app.post("/api/speech")
+    async def post_speech(request: Request):
+        """Pause / resume speaking ({"paused": true}), for Vox and for agents speaking through the
+        MCP. A paused speaker carries on from the sentence it was in. Returns the speech state."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime, speech_lock
+        speech_lock.set_paused(bool(body.get("paused")))
+        print("⏸ Speech paused" if body.get("paused") else "▶ Speech resumed", flush=True)
+        return {"ok": True, **runtime.speech_state()}
 
     @app.post("/api/listening")
     async def post_listening(request: Request):
@@ -798,8 +810,18 @@ def create_app() -> FastAPI:
         runtime.hud_subscribe(asyncio.get_running_loop(), queue)
         try:
             await ws.send_json({"type": "state"})
+            speech = None
             while True:
-                await ws.send_json(await queue.get())
+                # Speech can come from another process (an agent's MCP server), which can't publish
+                # here, so look a few times a second and report when it changes.
+                now = await asyncio.to_thread(runtime.speech_state)
+                if now != speech:
+                    speech = now
+                    await ws.send_json({"type": "speech", **now})
+                try:
+                    await ws.send_json(await asyncio.wait_for(queue.get(), timeout=0.25))
+                except asyncio.TimeoutError:
+                    pass
         except Exception:  # disconnect, or anything else: just stop
             pass
         finally:

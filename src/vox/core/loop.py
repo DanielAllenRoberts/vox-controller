@@ -24,6 +24,9 @@ from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.backends import make_backend, normalize, phrase_match
 
 
+_LAST_USER_TURN = ""  # what the user last said, so a "couldn't do it" reply is logged against it
+
+
 def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
     """Publish one conversation turn to the live dashboard feed (idea #43). Fully guarded:
     the web package is an additive convenience, so a missing/broken vox.web.conversation must
@@ -38,6 +41,15 @@ def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
     try:  # repeated failures → look for a mis-heard word in the background (vox.mishear)
         from vox import mishear
         mishear.note_turn(role, text)
+    except Exception:
+        pass
+    try:  # Vox saying it couldn't do something is logged with its context, to fix later (vox.issues)
+        global _LAST_USER_TURN
+        from vox import issues
+        if role == "user":
+            _LAST_USER_TURN = str(text)
+        elif _LAST_USER_TURN and issues.is_cant(str(text)):
+            issues.note_cant(_LAST_USER_TURN, str(text))
     except Exception:
         pass
     try:
@@ -751,6 +763,9 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
             audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
             if audio is None:
                 continue  # silence — keep speaking
+            from vox import speech_lock
+            if speech_lock.paused():
+                continue  # speech is paused so you can listen to someone: that talk isn't a barge-in
             text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
             if not text or not _passes_interrupt_gate(audio, text, cfg):
                 continue  # blip / too short → not a real barge-in; let the reply continue

@@ -194,8 +194,12 @@ _SYSTEM = (
     "• If it maps to a command, output just that command line (e.g. close tab).\n"
     "• For TYPE, write the actual finished text (no preamble, no quotes). For EDIT, give only the "
     "instruction — the selected text is fetched and rewritten in a separate step.\n"
-    "• To ask (rarely): CHAT: <short question>. For a real question or something you truly can't "
-    "do: CHAT: <one short spoken sentence>.\n"
+    "• To ask (rarely): CHAT: <short question>. For a real question: CHAT: <one short spoken "
+    "sentence>.\n"
+    "• For something you truly can't do: CANT: <what you would have needed, in a few words: a "
+    "command or tool that doesn't exist, being able to see or read something, or a clearer request> "
+    "| <one short spoken sentence telling the user>. The first part is logged so the gap can be "
+    "fixed; only the second part is spoken.\n"
     "• Only when you're CONFIDENT it's background talk NOT addressed to Vox (overheard "
     "conversation, third-person speech with no request for you) output exactly: IGNORE. A question "
     "— or anything that might be meant for you — is NOT chatter; answer or do it. When unsure, do "
@@ -487,7 +491,7 @@ def _schedule(body: str) -> str | None:
 # The directive prefixes the router answers with. A model sometimes opens with a sentence ("I'll set
 # both the reminder and the follow-up for you.") before them; that sentence isn't a command, and
 # reading it as one lost the whole request (issue dc62c863).
-_DIRECTIVE = re.compile(r"^(?:IGNORE\b|DICTATE\b|(?:CHAT|WEB|MENU|ISSUE|NOTE|SET|LOOK|POINT|CLICK|AGENTS?|"
+_DIRECTIVE = re.compile(r"^(?:IGNORE\b|DICTATE\b|(?:CHAT|CANT|WEB|MENU|ISSUE|NOTE|SET|LOOK|POINT|CLICK|AGENTS?|"
                         r"APPS|SCHEDULE|BOARD|TEACH|TYPE|EDIT)\s*:)", re.I)
 
 
@@ -991,6 +995,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
     if upper.startswith("CHAT:"):
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
+        return False, reply
+    if upper.startswith("CANT:"):  # it can't do this: say so, and log what was missing (vox.issues)
+        missing, _, reply = raw.split(":", 1)[1].partition("|")
+        reply = reply.strip() or missing.strip() or "I can't do that."
+        from vox import issues
+        issues.missing_hint = missing.strip() if "|" in raw else ""
+        assistant._dbg("[executor]", f"decision=CANT (missing: {missing.strip()!r}) → speak {reply!r}")
         return False, reply
     if upper.startswith("WEB:"):
         from vox import web_search

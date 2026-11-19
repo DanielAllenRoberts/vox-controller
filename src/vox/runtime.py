@@ -153,16 +153,32 @@ def hud(kind: str, **fields) -> None:
 _stopped_at = 0.0
 
 
-def request_stop() -> list[str]:
-    """Stop what's in flight. Returns what was actually stopped (for the log and the API reply)."""
+def speech_state() -> dict:
+    """Who is speaking right now, in ANY process (Vox or an agent's MCP server), and whether speech
+    is paused. ``{"who": "" | "vox" | "<agent name>", "paused": bool}``."""
+    who, is_paused = "", False
+    try:
+        from vox import speech_lock, tts
+        is_paused = speech_lock.paused()
+        who = speech_lock.holder().split(" (pid")[0] or ("vox" if tts.is_speaking() else "")
+    except Exception:
+        pass
+    return {"who": who, "paused": is_paused}
+
+
+def request_stop(sleep: bool = False) -> list[str]:
+    """Stop what's in flight. Returns what was actually stopped (for the log and the API reply).
+    ``sleep`` also drops Vox out of whatever mode it's in, back to idle (the on-screen ■ button:
+    "it activated by mistake")."""
     global _stopped_at
     _stopped_at = time.time()
     stopped = []
     try:
-        from vox import tts
-        if tts.is_speaking():
+        from vox import speech_lock, tts
+        if speech_state()["who"]:
             stopped.append("speech")
         tts.stop_speaking()
+        speech_lock.request_stop()  # reaches agents speaking from their own processes, and unpauses
     except Exception:
         pass
     try:
@@ -171,6 +187,13 @@ def request_stop() -> list[str]:
             stopped.append("agent")
     except Exception:
         pass
+    if sleep and mode()[0] in ("control", "assistant", "dictation"):
+        try:  # heard like speech, so each mode leaves the way it does for the spoken phrase
+            from vox.config import CONFIG
+            submit(CONFIG.abort_phrases[0])
+            stopped.append(mode()[0] + " mode")
+        except Exception:
+            pass
     return stopped
 
 

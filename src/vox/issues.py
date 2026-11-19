@@ -1,4 +1,5 @@
-"""Issues the user logs by voice ("log an issue: the circle thing didn't work").
+"""Issues the user logs by voice ("log an issue: the circle thing didn't work"), and the ones Vox
+logs by itself whenever it tells you it couldn't do something (``note_cant``).
 
 Saying it is quicker than writing it down mid-flow, and the moment it happens is when the useful
 context exists: what was on screen, what was just said, what Vox just did. All of that is captured
@@ -9,6 +10,7 @@ Insights → Testing, and read by whoever is fixing things (``GET /api/issues``)
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -56,14 +58,54 @@ def _recent_log(n: int = 25) -> list[str]:
         return []
 
 
-def add(text: str) -> dict:
+def add(text: str, **extra) -> dict:
     entry = {"id": uuid.uuid4().hex[:8], "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-             "text": (text or "").strip(), "status": "open", "context": _context()}
+             "text": (text or "").strip(), "status": "open", **extra, "context": _context()}
     with _LOCK:
         _FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     return entry
+
+
+# --- logged by Vox itself: things it couldn't do ----------------------------------------------
+# Every time Vox answers with "I can't…" / "I couldn't…", that's a gap: a missing command or tool,
+# something it couldn't see, a prompt that led it astray, a brain that didn't answer. Each one is
+# saved with the same context as a spoken issue (what was said, what Vox did, the log around it), so
+# the list can be read later and the gaps closed. Entries carry ``"source": "auto"``.
+_CANT = re.compile(
+    r"^\W*(?:sorry\W+)?(?:i\s+(?:can(?:'|’)?t|cannot|couldn(?:'|’)?t|could not|don(?:'|’)?t know how|"
+    r"don(?:'|’)?t have|wasn(?:'|’)?t able|am not able|(?:'|’)?m not able|am unable)|i(?:'|’)m (?:not able|unable)|"
+    r"couldn(?:'|’)?t|can(?:'|’)?t|unable to|my brain didn(?:'|’)?t answer|that(?:'|’)?s not something i can)\b", re.I)
+
+# What the brain said it would have needed (the first half of its CANT: line), for the next note.
+missing_hint = ""
+_last_cant: tuple[str, float] = ("", 0.0)
+
+
+def is_cant(reply: str) -> bool:
+    return bool(_CANT.match(reply or ""))
+
+
+def note_cant(heard: str, reply: str) -> None:
+    """Log that Vox couldn't do ``heard`` (it answered ``reply``). Returns at once: the context is
+    gathered and written on a background thread so the spoken reply isn't held up. The same request
+    failing again within ten minutes is logged once."""
+    global missing_hint, _last_cant
+    missing, missing_hint = missing_hint, ""
+    key = " ".join((heard or "").lower().split())
+    if not key or (key == _last_cant[0] and time.time() - _last_cant[1] < 600):
+        return
+    _last_cant = (key, time.time())
+
+    def write():
+        try:
+            add(f"Couldn't do: \u201C{heard.strip()}\u201D", source="auto", heard=heard.strip(),
+                reply=(reply or "").strip()[:400], missing=missing)
+        except Exception:
+            pass
+
+    threading.Thread(target=write, daemon=True).start()
 
 
 def _all_raw() -> list[dict]:
