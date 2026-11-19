@@ -77,6 +77,13 @@ Open `app/build/Vox.app` from Finder (not from a terminal, or the terminal gets 
 Accessibility permissions instead of Vox). Requires macOS 14+ and the Xcode Command Line Tools
 (`xcode-select --install`) to build. Hold **Right ⌥** to talk without a wake word.
 
+> **macOS 27 with the Command Line Tools only (no Xcode):** the build fails on the macOS 27 SDK
+> (SwiftUI's macros need Xcode). Build against the older SDK instead:
+> `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk VOX_SWIFT_FLAGS="--build-system native" app/build.sh`.
+> If the build fails with `Undefined symbols … PackageDescription.Package.__allocating_init`, an older
+> CLT left stale `*.private.swiftinterface` files under
+> `/Library/Developer/CommandLineTools/usr/lib/swift/pm/`: move them aside (needs `sudo`) and rebuild.
+
 ### From a terminal (development)
 
 **Requirements:** macOS (Apple Silicon) and [uv](https://docs.astral.sh/uv/). The project pins **Python 3.12** (uv fetches it for you).
