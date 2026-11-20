@@ -89,3 +89,27 @@ Pulled from `grep "\[learn\]" vox.log` and `GET /api/commands/learning` while th
 - **Idle noise isn't leaking in:** an hour of background video ("thanks for watching!", a 60-word run
   of "the") produced no candidates.
 
+
+## 2026-11-17 — Onboarding on a second Mac: Kokoro silently stuck on the macOS voice, and the app wouldn't build
+
+Fresh setup on another machine (macOS 27.2, python.org Python 3.12, Command Line Tools only, no Xcode).
+
+- **Kokoro never downloaded, with no sign of why.** Choosing Kokoro in Settings left Vox on the `say`
+  voice; `~/.cache/vox/kokoro/` stayed empty. **Root cause:** python.org's macOS Python has no CA
+  certificates until its `Install Certificates.command` is run, so `urlretrieve` failed with
+  `CERTIFICATE_VERIFY_FAILED` — and the deliberate silent fallback to `say` hid it completely. The same
+  failure breaks web search, Spotify and Composio (all `urllib`).
+  **Fix:** `vox/__init__.py` points `SSL_CERT_FILE` at certifi's bundle when the interpreter has no CA
+  store of its own; `tts.py` now logs the *first* Kokoro fallback with its reason (still falls back).
+- **Vox.app wouldn't build with the Command Line Tools on macOS 27.** Three stacked problems:
+  1. CLT 26.2 on macOS 27 → `Package.swift` failed to link (`Undefined symbols … Package.__allocating_init`).
+     Updating to CLT 27.2 didn't fix it: stale Swift 5.10 `*.private.swiftinterface` files from a 2024
+     CLT were left under `usr/lib/swift/pm/` (owned by no package) and shadowed the new interfaces.
+     Moving them aside fixed the manifest.
+  2. The macOS 27 SDK makes SwiftUI's `@State` a macro; the `SwiftUIMacros` plugin ships only with
+     Xcode, not the CLT → hundreds of "cannot find '$x' in scope" errors.
+  3. The default (swift-build) build system fails with "Unknown error parsing property list".
+  **Workaround:** build against the CLT's macOS 26.5 SDK with the native build system — `build.sh` now
+  passes `VOX_SWIFT_FLAGS` through (see its header / the README). Installing Xcode avoids 2 and 3.
+- **Status:** ✅ SSL + logging fixed; build workaround documented. Longer term the onboarding could
+  check for a CA store and a usable toolchain up front instead of failing deep inside.

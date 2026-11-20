@@ -6,6 +6,13 @@
 #   app/build.sh --bundle-engine  self-contained app for download: ships the engine source and uv,
 #                                 so first launch installs everything (implies --release)
 #
+# VOX_SWIFT_FLAGS is passed through to `swift build`. Command Line Tools 27.2 (no Xcode) can't build
+# against its own macOS 27 SDK: SwiftUI's @State is a macro there and the SwiftUIMacros plugin only
+# ships with Xcode, and the default build system fails with "Unknown error parsing property list".
+# Build against the older SDK the CLT still carries, with the native build system:
+#   SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+#     VOX_SWIFT_FLAGS="--build-system native" app/build.sh
+#
 # Signing is ad-hoc with a bundle-id designated requirement, so privacy permissions survive
 # rebuilds (see the codesign line at the end). A release for other people needs a Developer ID +
 # notarising.
@@ -24,8 +31,8 @@ for arg in "$@"; do
 done
 
 cd "$here"
-swift build -c "$config"
-bin="$(swift build -c "$config" --show-bin-path)/Vox"
+swift build -c "$config" ${VOX_SWIFT_FLAGS:-}
+bin="$(swift build -c "$config" ${VOX_SWIFT_FLAGS:-} --show-bin-path)/Vox"
 
 app="$here/build/Vox.app"
 rm -rf "$app"
