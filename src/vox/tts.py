@@ -162,7 +162,7 @@ def _warn_kokoro_fallback(e: Exception) -> None:
 
 
 def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
-               rate=None, speed=None, label: str = "") -> None:
+               rate=None, speed=None, label: str = "", before=None) -> None:
     """Speak `text` with EXPLICIT engine/voice overrides, bypassing the active persona's voice and
     the global tts_enabled gate. Used by the vox-speak MCP so the assistant's heads-up voice can be
     DIFFERENT from the system's (and can independently use the neural Kokoro engine). `engine` "" =
@@ -170,10 +170,13 @@ def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None
     `say`, exactly like speak(). Always speaks when asked (it's a deliberate tool call).
 
     `label` names this speaker in the shared speech queue (e.g. a registered agent name), so the
-    lock file says who you're waiting for."""
+    lock file says who you're waiting for. `before` runs once our turn comes, just ahead of the
+    words (the MCP's chime), so it can't sound over whoever is still speaking."""
     if not text.strip():
         return
     with speech_lock.hold(label or "mcp"):
+        if before is not None:
+            before()
         _speak_with_now(text, engine=engine, say_voice=say_voice, kokoro_voice=kokoro_voice,
                         rate=rate, speed=speed)
 

@@ -105,7 +105,6 @@ def _say(text: str, voice: str, rate: int) -> str:
     if _AGENT_NAME:
         text = f"{_AGENT_NAME} here — {text}"
     text = text[:_MAX_CHARS]
-    _play_cue()  # short chime first, so the spoken heads-up doesn't come out of nowhere
     engine, say_voice, kokoro_voice = _mcp_voice()
     # Prefer Vox's own TTS engine (supports the neural Kokoro engine + the independent MCP voice);
     # fall back to a bare `say` if the vox package isn't importable from this process.
@@ -118,10 +117,12 @@ def _say(text: str, voice: str, rate: int) -> str:
             kokoro_voice=kokoro_voice,
             rate=(rate or None),
             label=_AGENT_NAME or "mcp",   # names this speaker in the shared speech queue
+            before=_play_cue,   # short chime first, once it's our turn, so the voice doesn't come out of nowhere
         )
         return f"spoke aloud: {text[:80]!r}"
     except Exception:
         pass  # vox package not importable here → bare `say` fallback below
+    _play_cue()
     if platform.system() != "Darwin" or not shutil.which("say"):
         return "(text-to-speech unavailable: Vox TTS and macOS `say` both unavailable)"
     cmd = ["say"]
@@ -171,12 +172,12 @@ def announce_done(summary: str = "The task is finished.", voice: str = "") -> st
 
 @mcp.tool()
 def notify(text: str, source: str = "", corner: str = "", duration: float = -1) -> str:
-    """Show a SILENT pop-up bubble in a corner of the user's screen — a heads-up with no sound.
+    """Send the user a SILENT macOS notification — a heads-up with no sound.
 
     The quiet alternative to `speak`. Use this instead of speaking when the user has asked to be
     notified silently, is in a meeting or on a call, or when several things are finishing at once
-    and speaking each one would be noise. The bubble is click-through and never steals focus, so it
-    can't interrupt what the user is doing; it fades out on its own.
+    and speaking each one would be noise. It never steals focus. (If Vox can't post a notification
+    it shows a small card in a screen corner instead; `corner` and `duration` apply to that card.)
 
     Args:
         text: The message to show (kept short — it's a glance, not a document; long text is

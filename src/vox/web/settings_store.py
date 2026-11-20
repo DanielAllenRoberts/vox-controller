@@ -479,7 +479,18 @@ _SCHEMA_META: list[dict] = [
         "group": "Behavior",
         "type": "toggle",
         "default": True,
-        "help": "Coding agents say when they finish or need you (a bubble shows either way).",
+        "help": "Coding agents say when they finish or need you (a notification shows either way). "
+                "Vox never reads a command aloud; it says the agent needs your okay.",
+    },
+    {
+        "key": "team_auto_mode",
+        "label": "Agents run on auto",
+        "group": "Behavior",
+        "type": "toggle",
+        "default": True,
+        "help": "Coding agents work without asking, and only stop for a push, a publish, sudo or an "
+                "edit outside their folder. Off: they ask before anything beyond reading, editing "
+                "their folder and plain test or build commands.",
     },
     {
         "key": "spotify_client_id",
@@ -554,7 +565,7 @@ _SCHEMA_META: list[dict] = [
         "label": "Speech queue wait (s)",
         "group": "Notifications",
         "type": "number",
-        "help": "How long to wait for whoever is speaking before going ahead anyway. A deadlock guard, not a queue policy — a silent assistant is worse than one overlap.",
+        "help": "How long to wait in the queue for whoever is speaking before going ahead anyway. A deadlock guard: keep it longer than the max hold below, or a long message gets talked over.",
     },
     {
         "key": "speech_queue_max_hold",

@@ -8,6 +8,10 @@ struct VoxApp: App {
     init() {
         // `Vox --snapshot <dir> [fixtures.json]` renders every screen to PNGs off-screen and exits.
         let args = CommandLine.arguments
+        // `Vox --notify <title> <body>` posts one macOS notification and exits (see Notifier).
+        if let i = args.firstIndex(of: "--notify"), i + 2 < args.count {
+            Notifier.run(title: args[i + 1], body: args[i + 2])
+        }
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
             Snapshotter.run(outDir: args[i + 1], fixtures: i + 2 < args.count ? args[i + 2] : nil)
         }
@@ -43,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Notifier.askPermission()
         if model.onboardingDone { model.boot() } else { model.engine.refreshLocation() }
     }
 

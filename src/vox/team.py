@@ -10,10 +10,12 @@ one project folder, so it reads that project's CLAUDE.md. It keeps its session b
 * ``ceo(request)``: the router's AGENTS: directive. A Claude session with tools over the above
   (list, start, message, stop) works out what the user meant and answers in a sentence or two.
 
-What a worker may do without asking (``_can_use_tool``): read anything; edit files inside its own
-folder; run read-only and test/build commands. Anything else (installing, deleting, pushing, other
-folders) waits for the user: Vox says "The GetPrice agent wants to run `npm install`. Allow it?" and
-the run pauses until "yes"/"no" (``answer``). No screen control.
+Agents run on AUTO (``team_auto_mode``, on by default): a worker does its job without asking, and
+only stops for what leaves the machine or can't be undone (``_NEEDS_OK``: pushing, publishing, sudo)
+or an edit outside its folder. With auto off it asks for everything beyond reading, editing its own
+folder and plain test/build commands. When it does need the user, Vox SAYS only "<agent> needs your
+okay to proceed" (never the command) and the notification and the Agents page show what it is; the
+run pauses until "yes"/"no" (``answer``). No screen control.
 
 State: ``<data>/team.json``; each agent's transcript: ``<data>/team/<name>.jsonl``.
 """
@@ -50,6 +52,10 @@ _SAFE_CMD = re.compile(
     r"cargo\s+(?:test|check|build|clippy)\b|go\s+(?:test|build|vet)\b|swift\s+(?:build|test)\b|"
     r"(?:npx\s+)?tsc\b|ruff\s+check\b|eslint\b)")
 _CHAINING = re.compile(r"[;&`]|\|\||>|<|\$\(")
+# Even on auto these wait for the user: they leave this Mac or can't be taken back.
+_NEEDS_OK = re.compile(r"\bsudo\b|\bgit\s+push\b|\bgh\s+pr\s+merge\b|"
+                       r"\b(?:npm|pnpm|yarn|cargo)\s+publish\b|\btwine\s+upload\b")
+_TEMP_DIRS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 
 
 def _setting(key: str, fallback):
@@ -247,7 +253,8 @@ def _ask_user(agent: str, what: str) -> dict:
     with _LOCK:
         _approvals.append(entry)
     _update(agent, status="waiting")
-    _announce(agent, f"wants to {what}. Should it go ahead?")
+    # The command is for reading (notification, Agents page), never for hearing.
+    _announce(agent, f"wants to {what}. Should it go ahead?", spoken=f"{agent} needs your okay to proceed.")
     return entry
 
 
@@ -272,18 +279,24 @@ def _policy(agent: str, folder: Path):
     async def can_use_tool(tool, inp, _ctx):
         from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
         what = None
+        auto = bool(_setting("team_auto_mode", True))
         if tool in _READ_TOOLS or tool.startswith("mcp__"):
             return PermissionResultAllow()
         if tool in _EDIT_TOOLS:
             path = inp.get("file_path") or inp.get("notebook_path") or ""
-            if _inside(path, folder):
+            if _inside(path, folder) or (auto and any(_inside(path, Path(d)) for d in _TEMP_DIRS)):
                 return PermissionResultAllow()
             what = f"edit {path}, outside its folder"
         elif tool == "Bash":
             cmd = str(inp.get("command", "")).strip()
-            if _SAFE_CMD.match(cmd) and not _CHAINING.search(cmd):
+            if auto:
+                if not _NEEDS_OK.search(cmd):
+                    return PermissionResultAllow()
+            elif _SAFE_CMD.match(cmd) and not _CHAINING.search(cmd):
                 return PermissionResultAllow()
             what = f"run `{cmd[:160]}`"
+        elif auto:
+            return PermissionResultAllow()
         else:
             what = f"use {tool}"
         entry = _ask_user(agent, what)
@@ -301,8 +314,9 @@ def _policy(agent: str, folder: Path):
 
 # --- talking -------------------------------------------------------------------------------------
 
-def _announce(agent: str, text: str) -> None:
-    """Tell the user something from an agent: a bubble, and speech unless replies are muted."""
+def _announce(agent: str, text: str, spoken: str | None = None) -> None:
+    """Tell the user something from an agent: a notification, and speech unless replies are muted.
+    ``spoken`` is what to SAY when it should differ from what is shown."""
     line = f"{agent} {text}" if text.startswith(("wants", "is ", "has ")) else f"{agent}: {text}"
     try:
         from vox import working_memory
@@ -322,7 +336,7 @@ def _announce(agent: str, text: str) -> None:
     if _setting("team_speak_updates", True):
         try:
             from vox import tts
-            tts.speak(line)
+            tts.speak(spoken or line)
         except Exception:
             pass
 
@@ -448,7 +462,7 @@ def message(name: str, text: str, wait: float = 90) -> str:
     if busy(a["name"]):
         _inbox.setdefault(a["name"], []).append(text)
         upd = a.get("last_update") or "no update yet"
-        return f"{a['name']} is working on {a.get('task') or 'its task'}. Latest: {upd[-300:]} (I've passed your message on.)"
+        return f"{a['name']} is working on {a.get('task') or 'its task'}. Latest: {upd[-300:]} (Your message is queued: it reads it when this task finishes, not before.)"
     _spawn(a["name"], text)
     t = _threads.get(a["name"])
     if t:
@@ -495,7 +509,11 @@ _CEO_SYSTEM = (
     "with a clear task; message_agent to ask an agent something or give it new instructions; "
     "stop_agent to stop one. Pick the agent the user means from its name or folder. Then reply with "
     "what Vox should SAY: one to three short spoken sentences, no markdown. When you pass on an agent's "
-    "own answer, say it in first person as that agent ('It's the GetPrice agent: I've fixed…')."
+    "own answer, say it in first person as that agent ('It's the GetPrice agent: I've fixed…'). "
+    "Never read out a shell command or file path; say what it is for in a few plain words. Agents "
+    "already run on auto and only stop for a push, a publish or sudo; you can't change that, it's "
+    "the 'Agents run on auto' setting. Only claim what a tool result confirms: a message to a busy "
+    "agent is queued until its current task ends, so say that, not that it has been acted on."
 )
 
 
