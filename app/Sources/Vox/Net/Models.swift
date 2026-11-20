@@ -76,9 +76,33 @@ struct Turn: Codable, Identifiable, Hashable {
     var text: String
     var brain: String?
     var kind: String?
+    /// The specific speaker when it isn't just you or Vox — a worker agent's name.
+    var source: String?
 
     var isUser: Bool { role == "user" }
+    /// A reply that came from one of the coding agents, not Vox itself.
+    var isAgent: Bool { brain == "agent" || kind == "agent" }
     var date: Date? { ISO8601.parse(ts) }
+
+    /// Who said it, for the label above the bubble.
+    var sourceLabel: String {
+        if isUser { return "You" }
+        if isAgent { return source ?? "Agent" }
+        return "Vox"
+    }
+
+    /// Identity used to group consecutive messages from the same speaker.
+    var speaker: String { isUser ? "you" : (isAgent ? "agent:\(source ?? "")" : "vox") }
+
+    /// The bubble text, minus the "<name>: " the agent feed prefixes onto it — the
+    /// source label already shows who's speaking, so drop the redundant prefix.
+    var displayText: String {
+        guard isAgent, let s = source else { return text }
+        for sep in ["\(s): ", "\(s) "] where text.hasPrefix(sep) {
+            return String(text.dropFirst(sep.count))
+        }
+        return text
+    }
 }
 
 struct SettingOption: Codable, Hashable { var value: String; var label: String }

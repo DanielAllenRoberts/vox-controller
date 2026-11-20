@@ -311,7 +311,7 @@ def _announce(agent: str, text: str) -> None:
         pass
     try:
         from vox.web import conversation
-        conversation.record_turn("assistant", line, brain="agent", kind="agent")
+        conversation.record_turn("assistant", line, brain="agent", kind="agent", source=agent)
     except Exception:
         pass
     try:

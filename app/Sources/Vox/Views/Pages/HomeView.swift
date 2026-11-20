@@ -183,10 +183,12 @@ private struct RecentCard: View {
                 } else {
                     ForEach(recent) { t in
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Image(systemName: t.isUser ? "person.fill" : "waveform")
-                                .font(.caption).foregroundStyle(t.isUser ? Color.secondary : Color.accentColor)
+                            Image(systemName: t.isUser ? "person.fill" : (t.isAgent ? "cpu" : "waveform"))
+                                .font(.caption)
+                                .foregroundStyle(t.isUser ? Color.secondary : (t.isAgent ? Color.orange : Color.accentColor))
                                 .frame(width: 14)
-                            Text(t.text).lineLimit(2).foregroundStyle(t.isUser ? .primary : .secondary)
+                                .help(t.isAgent ? t.sourceLabel : "")
+                            Text(t.displayText).lineLimit(2).foregroundStyle(t.isUser ? .primary : .secondary)
                             Spacer(minLength: 4)
                             Text(t.date?.friendly ?? "").font(.caption).foregroundStyle(.tertiary)
                         }
