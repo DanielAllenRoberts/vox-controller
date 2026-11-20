@@ -29,8 +29,21 @@ class NoInputDevice(Exception):
 _MAX_QUEUE_SECONDS = 30.0
 
 
+# The latest mic loudness, for the live level meter (onboarding's mic check, the dashboard). Updated
+# for every frame either backend produces, whether or not Vox is listening for commands, so the bar
+# shows what Vox actually hears from the mic it actually opened.
+_level = {"rms": 0.0, "at": 0.0}
+
+
+def level() -> dict:
+    """{"rms": float, "age": seconds since the last frame}. A large age means no audio is arriving."""
+    return {"rms": _level["rms"], "age": time.monotonic() - _level["at"] if _level["at"] else None}
+
+
 def _put_latest(q: "queue.Queue[np.ndarray]", frame: np.ndarray) -> None:
     """Queue `frame` from the audio thread without ever blocking it: when full, drop the oldest."""
+    _level["rms"] = rms(frame)
+    _level["at"] = time.monotonic()
     try:
         q.put_nowait(frame)
     except queue.Full:
@@ -535,6 +548,14 @@ def _smart_turn_complete(collected, cfg) -> bool | None:
         return None  # SmartTurnUnavailable or anything else → fall back to fixed silence
 
 
+def _vox_speaking() -> bool:
+    try:
+        from vox import tts
+        return tts.is_speaking()
+    except Exception:
+        return False
+
+
 def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, max_seconds=None):
     """Wait for speech onset (keeping a short pre-roll), then record until trailing
     silence. Returns int16 audio, or None if no speech arrives within listen_timeout.
@@ -589,6 +610,12 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
         if waited >= wait_frames:
             return None
 
+    # The on-screen indicator shows "Listening…" for a deliberate utterance: the talk key, or any
+    # speech while in a mode. Not at idle (every noise in the room starts a capture there), and not
+    # while Vox itself is talking (these captures are then mostly its own voice).
+    show = ptt or (runtime.mode()[0] != "idle" and not _vox_speaking())
+    if show:
+        runtime.hud("listening", on=True)
     collected = list(pre_roll) + [frame]
     silent = 0
     next_check = min_silent  # next trailing-silence frame-count at which to consult smart-turn
@@ -622,4 +649,6 @@ def capture_utterance(frames, cfg, silence_seconds=None, listen_timeout=None, ma
         else:
             silent = 0
             next_check = min_silent  # speech resumed → reset the smart-turn re-check cadence
+    if show:
+        runtime.hud("listening", on=False)
     return np.concatenate(collected)

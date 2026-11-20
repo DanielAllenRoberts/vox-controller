@@ -1,5 +1,9 @@
 # Vox Control Center
 
+> **Removed 2026-11-19.** The React web dashboard described here was deleted; the native Vox.app
+> (`app/`) replaced it. The API it used (`src/vox/web/`) stays, because Vox.app talks to it. These
+> docs are kept as history; the frontend source is in git history before this date.
+
 A local web control center for the **Vox** voice assistant — the macOS hands-free
 voice agent in this repo (`src/vox/`). The dashboard gives you a premium, dark-first
 window into the running voice daemon: live status and diagnostics, token usage and

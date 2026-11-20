@@ -45,9 +45,23 @@ vox-controller/
 └── README.md
 ```
 
-## Getting started
+## Install
 
-### The app (recommended)
+On an Apple Silicon Mac with macOS 14 or later, paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DanielAllenRoberts/vox-controller/main/install.sh | bash
+```
+
+It downloads Vox.app (about 25 MB) into Applications and opens it. The setup window does the rest:
+permissions, a private copy of Python and the speech libraries (about 1 GB, nothing else on your Mac
+is changed), a brain, a voice, a microphone check. No git, Xcode or Python needed.
+
+To remove Vox, drag it from Applications to the Bin and delete `~/Library/Application Support/Vox`.
+
+## Getting started (from source)
+
+### The app
 
 Vox ships as a native macOS app, **Vox.app**. It lives in the menu bar, runs the speech engine for
 you, and walks you through setup on first launch: permissions, choosing a brain, a test phrase. No

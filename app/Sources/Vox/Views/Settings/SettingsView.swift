@@ -25,7 +25,7 @@ struct SettingsView: View {
         case .advanced: AdvancedPane()
         case .general: CatalogPane(tab: t) { AppBehaviourSection() }
         case .connections: ConnectionsPane()
-        case .listening: CatalogPane(tab: t) { HoldToTalkSection() }
+        case .listening: CatalogPane(tab: t) { HoldToTalkSection(); HUDSection() }
         case .brains: CatalogPane(tab: t) { APIKeysSection() }
         default: CatalogPane(tab: t) { EmptyView() }
         }
@@ -261,6 +261,25 @@ private struct HoldToTalkSection: View {
             .onChange(of: on) { _, v in HoldToTalk.enabled = v }
         } header: {
             Text("Hold to talk")
+        }
+    }
+}
+
+private struct HUDSection: View {
+    @State private var on = HUD.enabled
+
+    var body: some View {
+        Section {
+            Toggle(isOn: $on) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Show what Vox hears")
+                    Text("A small indicator in the top-right corner of the screen: which mode Vox is in, and the words it just recognised. It never takes focus, and clicks pass through it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .onChange(of: on) { _, v in HUD.enabled = v }
+        } header: {
+            Text("On-screen indicator")
         }
     }
 }

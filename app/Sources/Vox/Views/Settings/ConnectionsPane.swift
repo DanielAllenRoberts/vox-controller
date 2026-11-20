@@ -8,7 +8,7 @@ struct ConnectionsPane: View {
     @State private var servers: [MCPServer] = []
     @State private var tests: [String: MCPTest] = [:]
     @State private var testing: Set<String> = []
-    @State private var adding = false
+    @State private var adding: AddConnectionSheet.Preset?
     @State private var removing: MCPServer?
     @State private var error: String?
 
@@ -20,12 +20,21 @@ struct ConnectionsPane: View {
                         Text("No connections yet.").foregroundStyle(.secondary)
                     }
                     ForEach(servers) { s in row(s) }
-                    Button("Add Connection…", systemImage: "plus") { adding = true }
+                    if !servers.contains(where: { $0.name == "composio" }) {
+                        Button { adding = .composio } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Label("Connect Your Apps with Composio\u{2026}", systemImage: "plus")
+                                Text("Gmail, Calendar, Slack, Notion and hundreds more.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Button("Add Another Server\u{2026}", systemImage: "plus") { adding = .custom }
                     if let error { Text(error).foregroundStyle(.red).font(.callout) }
                 } header: {
-                    Text("MCP servers")
+                    Text("Apps and services (MCP servers)")
                 } footer: {
-                    Text("Anything with an MCP server: Composio (Gmail, Calendar, Slack, Notion and hundreds more through one link), or a service's own server. Then just ask: \u{201C}any new email from Sam?\u{201D} Vox asks before it sends or changes anything.")
+                    Text("Or any service with its own MCP server. Then just ask: \u{201C}any new email from Sam?\u{201D} Vox asks before it sends or changes anything.")
                         .foregroundStyle(.secondary)
                 }
                 SpotifySection()
@@ -35,8 +44,8 @@ struct ConnectionsPane: View {
         }
         .formStyle(.grouped)
         .task { await load() }
-        .sheet(isPresented: $adding) {
-            AddConnectionSheet { body in Task { await add(body) } }
+        .sheet(item: $adding) { preset in
+            AddConnectionSheet(preset: preset) { body in Task { await add(body) } }
         }
         .confirmationDialog("Remove \u{201C}\(removing?.name ?? "")\u{201D}?", isPresented: .init(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             Button("Remove", role: .destructive) { if let s = removing { Task { await remove(s) } } }
@@ -108,7 +117,12 @@ struct ConnectionsPane: View {
     }
 }
 
-private struct AddConnectionSheet: View {
+struct AddConnectionSheet: View {
+    /// Composio is the guided path: one account, a URL to paste, nothing to install. Custom is the
+    /// full form for any MCP server.
+    enum Preset: String, Identifiable { case composio, custom; var id: String { rawValue } }
+
+    var preset: Preset
     var onAdd: (AddMCPBody) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -123,33 +137,50 @@ private struct AddConnectionSheet: View {
 
     var body: some View {
         Form {
-            Section {
-                TextField("Name", text: $name, prompt: Text("composio"))
-                Picker("Type", selection: $kind) {
-                    Text("URL").tag("http")
-                    Text("URL (SSE)").tag("sse")
-                    Text("Command").tag("stdio")
-                }
-                .pickerStyle(.segmented)
-            }
-            if kind == "stdio" {
+            if preset == .composio {
                 Section {
-                    TextField("Command", text: $command, prompt: Text("npx"))
-                    TextField("Arguments", text: $args, prompt: Text("-y @modelcontextprotocol/server-filesystem ~/Documents"))
-                    TextField("Environment variable", text: $envName, prompt: Text("Optional, e.g. API_KEY"))
-                    if !envName.isEmpty { SecureField("Value", text: $envValue) }
+                    Text("1. Make a free Composio account and create an MCP server with the apps you want Vox to use.")
+                    Link("Open Composio", destination: URL(string: "https://dashboard.composio.dev")!)
+                    Text("2. Copy the server\u{2019}s URL and paste it below. If Composio shows an API key header too, add that as well.")
+                    TextField("URL", text: $url, prompt: Text("https://…/mcp"))
+                    TextField("Header", text: $headerName, prompt: Text("Optional, e.g. x-api-key"))
+                    if !headerName.isEmpty { SecureField("Header value", text: $headerValue) }
+                } header: {
+                    Text("Connect your apps with Composio")
+                } footer: {
+                    Text("Then ask things like \u{201C}any new email from Sam?\u{201D} or \u{201C}what\u{2019}s on my calendar tomorrow?\u{201D} Vox asks before it sends or changes anything.")
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 Section {
-                    TextField("URL", text: $url, prompt: Text("https://…/mcp"))
-                    TextField("Header", text: $headerName, prompt: Text("Optional, e.g. x-api-key or Authorization"))
-                    if !headerName.isEmpty { SecureField("Header value", text: $headerValue) }
-                } footer: {
-                    Text("For Composio: dashboard.composio.dev → MCP → create a server with the apps you want, then copy its URL (and API key header if it shows one).")
-                        .foregroundStyle(.secondary)
+                    TextField("Name", text: $name, prompt: Text("composio"))
+                    Picker("Type", selection: $kind) {
+                        Text("URL").tag("http")
+                        Text("URL (SSE)").tag("sse")
+                        Text("Command").tag("stdio")
+                    }
+                    .pickerStyle(.segmented)
+                }
+                if kind == "stdio" {
+                    Section {
+                        TextField("Command", text: $command, prompt: Text("npx"))
+                        TextField("Arguments", text: $args, prompt: Text("-y @modelcontextprotocol/server-filesystem ~/Documents"))
+                        TextField("Environment variable", text: $envName, prompt: Text("Optional, e.g. API_KEY"))
+                        if !envName.isEmpty { SecureField("Value", text: $envValue) }
+                    }
+                } else {
+                    Section {
+                        TextField("URL", text: $url, prompt: Text("https://…/mcp"))
+                        TextField("Header", text: $headerName, prompt: Text("Optional, e.g. x-api-key or Authorization"))
+                        if !headerName.isEmpty { SecureField("Header value", text: $headerValue) }
+                    } footer: {
+                        Text("Any MCP server reachable by URL. For a local one, choose Command and give what starts it.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
+        .onAppear { if preset == .composio { name = "composio"; kind = "http" } }
         .formStyle(.grouped)
         .frame(width: 500)
         .fixedSize(horizontal: false, vertical: true)

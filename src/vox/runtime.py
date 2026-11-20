@@ -9,6 +9,8 @@ Two things live here:
   learning, the conversation feed) with no second code path to drift.
 * **Mode / pause.** The loop publishes which mode it's in, so ``/api/status`` and the menu bar
   can show it. ``paused`` stops the mic being treated as speech. Typed input still works while paused.
+* **The on-screen indicator feed.** ``hud(...)`` pushes "listening" / "heard" / "state" events to
+  Vox.app the instant they happen, so it can show what Vox is hearing. Nothing is stored.
 """
 
 from __future__ import annotations
@@ -67,8 +69,11 @@ paused = False
 def set_mode(mode: str) -> None:
     global _mode, _mode_since
     with _lock:
-        if mode != _mode:
+        changed = mode != _mode
+        if changed:
             _mode, _mode_since = mode, time.time()
+    if changed:
+        hud("state")
 
 
 def mode() -> tuple[str, float]:
@@ -105,6 +110,40 @@ def ptt_down() -> bool:
 def set_paused(value: bool) -> None:
     global paused
     paused = bool(value)
+    hud("state")
+
+
+# --- on-screen indicator feed -------------------------------------------------------------------
+# Vox.app's corner indicator subscribes over /api/hud/stream. Events: {"type": "listening", "on"}
+# while an utterance is being captured, {"type": "heard", "text", "ignored"} with what was
+# recognised, and {"type": "state"} when the mode or pause changes (the app re-reads /api/status).
+# Each subscriber is (event loop, asyncio queue); the voice loop publishes from its own thread.
+_hud_subs: list = []
+
+
+def hud_subscribe(loop, q) -> None:
+    _hud_subs.append((loop, q))
+
+
+def hud_unsubscribe(q) -> None:
+    _hud_subs[:] = [s for s in _hud_subs if s[1] is not q]
+
+
+def _hud_put(q, event: dict) -> None:
+    try:
+        q.put_nowait(event)
+    except Exception:  # a full queue drops the event; the indicator is never worth blocking for
+        pass
+
+
+def hud(kind: str, **fields) -> None:
+    """Publish an indicator event. Never raises: the voice loop must not depend on anyone watching."""
+    event = {"type": kind, **fields}
+    for loop, q in list(_hud_subs):
+        try:
+            loop.call_soon_threadsafe(_hud_put, q, event)
+        except Exception:
+            pass
 
 
 # --- stop button --------------------------------------------------------------------------------
@@ -114,16 +153,32 @@ def set_paused(value: bool) -> None:
 _stopped_at = 0.0
 
 
-def request_stop() -> list[str]:
-    """Stop what's in flight. Returns what was actually stopped (for the log and the API reply)."""
+def speech_state() -> dict:
+    """Who is speaking right now, in ANY process (Vox or an agent's MCP server), and whether speech
+    is paused. ``{"who": "" | "vox" | "<agent name>", "paused": bool}``."""
+    who, is_paused = "", False
+    try:
+        from vox import speech_lock, tts
+        is_paused = speech_lock.paused()
+        who = speech_lock.holder().split(" (pid")[0] or ("vox" if tts.is_speaking() else "")
+    except Exception:
+        pass
+    return {"who": who, "paused": is_paused}
+
+
+def request_stop(sleep: bool = False) -> list[str]:
+    """Stop what's in flight. Returns what was actually stopped (for the log and the API reply).
+    ``sleep`` also drops Vox out of whatever mode it's in, back to idle (the on-screen ■ button:
+    "it activated by mistake")."""
     global _stopped_at
     _stopped_at = time.time()
     stopped = []
     try:
-        from vox import tts
-        if tts.is_speaking():
+        from vox import speech_lock, tts
+        if speech_state()["who"]:
             stopped.append("speech")
         tts.stop_speaking()
+        speech_lock.request_stop()  # reaches agents speaking from their own processes, and unpauses
     except Exception:
         pass
     try:
@@ -132,6 +187,13 @@ def request_stop() -> list[str]:
             stopped.append("agent")
     except Exception:
         pass
+    if sleep and mode()[0] in ("control", "assistant", "dictation"):
+        try:  # heard like speech, so each mode leaves the way it does for the spoken phrase
+            from vox.config import CONFIG
+            submit(CONFIG.abort_phrases[0])
+            stopped.append(mode()[0] + " mode")
+        except Exception:
+            pass
     return stopped
 
 

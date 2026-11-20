@@ -1,4 +1,8 @@
-"""Silent notification bubble — a pop-up text card in a corner of the screen.
+"""Silent notification — a macOS notification, or a pop-up text card when that isn't possible.
+
+``show()`` first posts a real macOS notification through Vox.app (``Vox --notify``: Vox's name and
+icon, Notification Center, Focus modes). Without a Vox.app that can do it, or when notifications
+are switched off for Vox, it draws the card described below instead.
 
 The quiet sibling of the vox-speak MCP. `speak()` is the right heads-up when you're away from the
 keyboard; it's the wrong one in a meeting, on a call, or when three agents finish inside a minute.
@@ -61,6 +65,47 @@ def _setting(key: str, fallback):
         return fallback
 
 
+_NATIVE_WAIT = 5.0   # seconds to give Vox.app to post before drawing the card instead
+_app_bin: str | None = None   # "" once we've looked and found no Vox.app that can notify
+
+
+def _app_binary() -> str:
+    """The Vox.app binary to post through, or "". Only one that knows ``--notify``: an older build
+    would open a second copy of the app instead."""
+    global _app_bin
+    if _app_bin is None:
+        from pathlib import Path
+        here = Path(__file__).resolve()
+        found = [p for p in here.parents if p.suffix == ".app"]            # engine bundled in the app
+        found += [here.parents[2] / "app" / "build" / "Vox.app",            # a checkout's dev build
+                  Path("/Applications/Vox.app"), Path.home() / "Applications" / "Vox.app"]
+        _app_bin = ""
+        for app in found:
+            binary = app / "Contents" / "MacOS" / "Vox"
+            try:
+                if b"--notify" in binary.read_bytes():
+                    _app_bin = str(binary)
+                    break
+            except OSError:
+                continue
+    return _app_bin
+
+
+def _native(text: str, source: str) -> bool:
+    """Post a macOS notification as Vox. False if it couldn't be, so the caller draws the card."""
+    binary = _app_binary()
+    if not binary:
+        return False
+    try:
+        proc = subprocess.Popen([binary, "--notify", source or "Vox", text],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        # Not killed on timeout: it may be showing macOS's one-time "allow notifications?" prompt.
+        return proc.wait(_NATIVE_WAIT) == 0
+    except Exception:
+        return False
+
+
 def is_active() -> bool:
     """True while a bubble helper is alive (a card is on screen)."""
     return _proc is not None and _proc.poll() is None
@@ -68,7 +113,8 @@ def is_active() -> bool:
 
 def show(text: str, *, source: str = "", corner: str = "",
          duration: float = _USE_CONFIGURED) -> str:
-    """Draw ``text`` as a bubble in a screen corner. Returns the text actually shown.
+    """Notify the user of ``text``: a macOS notification, else a card in a screen corner. Returns
+    the text actually shown. ``corner`` and ``duration`` only apply to the card.
 
     ``source`` labels the card with who sent it (a registered agent name — see ``vox.agents``), so
     with several CLIs running you can tell at a glance which one is talking.
@@ -87,6 +133,8 @@ def show(text: str, *, source: str = "", corner: str = "",
     if len(body) > _MAX_CHARS:
         body = body[:_MAX_CHARS - 1].rstrip() + "…"
     who = " ".join((source or "").split())[:_MAX_SOURCE_CHARS]
+    if _native(body, who):
+        return body
 
     where = (corner or str(_setting("bubble_corner", CONFIG.bubble_corner))).strip().lower()
     if where not in _CORNERS:

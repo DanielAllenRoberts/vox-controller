@@ -88,7 +88,8 @@ def _safe_put(q: asyncio.Queue, turn: dict) -> None:
         pass
 
 
-def record_turn(role: str, text: str, *, brain: str | None = None, kind: str | None = None) -> dict:
+def record_turn(role: str, text: str, *, brain: str | None = None, kind: str | None = None,
+                source: str | None = None) -> dict:
     """Record one conversation turn: build it, buffer it, publish it.
 
     Returns the turn dict. Never raises out — recording is best-effort and must
@@ -97,6 +98,8 @@ def record_turn(role: str, text: str, *, brain: str | None = None, kind: str | N
     ``role`` is "user"|"assistant". ``brain`` is the replying brain
     ("small"|"big") on assistant turns, else None. ``kind`` tags the turn
     ("chat"|"command"|"reply"|…) so the page can render a command inline.
+    ``source`` names the specific speaker when it isn't just you or Vox — a
+    worker agent's name, say — so the page can label each message by source.
     """
     turn = {
         "id": uuid.uuid4().hex[:12],
@@ -106,6 +109,7 @@ def record_turn(role: str, text: str, *, brain: str | None = None, kind: str | N
         "text": text if isinstance(text, str) else str(text),
         "brain": brain,
         "kind": kind,
+        "source": source,
     }
     try:
         with _LOCK:

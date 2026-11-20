@@ -74,13 +74,13 @@ class Config:
     # "Vox, …" or a yes. Off by default while it's tried out. docs/plan/research/command-vs-dictation.md
     auto_dictation: bool = False
 
-    # --- Dashboard (Vox Control Center) --- a local web UI served by an embedded FastAPI
-    # bridge (vox.web.server), opened hands-free by an "open dashboard" wake phrase. Entirely
-    # additive: if the web package is missing or errors, the voice daemon keeps running.
+    # --- Dashboard --- the local API (vox.web.server) that Vox.app talks to; "open dashboard"
+    # shows Vox.app. (The React web UI it once served was removed.) Entirely additive: if the web
+    # package is missing or errors, the voice daemon keeps running.
     dashboard_enabled: bool = True
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
-    # Idle wake phrases (substring-matched) that open the dashboard in the browser.
+    # Idle wake phrases (substring-matched) that show Vox.app.
     open_dashboard_phrases: tuple[str, ...] = (
         "open dashboard", "open the dashboard", "show dashboard",
         "launch dashboard", "open vox dashboard",
@@ -400,12 +400,15 @@ class Config:
     # guard, not a queue policy: if the holder never releases, speaking anyway beats a voice loop
     # that has gone silent — the same failure mode as the Kokoro streaming-player deadlock.
     speech_queue_enabled: bool = True
-    speech_queue_timeout: float = 15.0   # seconds to wait for the speaker ahead of you
+    # Seconds to wait in the queue. Longer than max_hold on purpose: at 15 s any message over ~40
+    # words was talked over by the next speaker, which is the overlap the queue exists to stop.
+    speech_queue_timeout: float = 180.0
     # The HOLD is bounded too (issue O13): a speaker wedged inside the lock would otherwise own it
     # until its process dies and make every other speaker pay the full wait, every utterance. A
     # watchdog releases after this many seconds, and a waiter seeing a hold this old goes ahead
-    # immediately. Keep it comfortably longer than the longest real utterance.
-    speech_queue_max_hold: float = 30.0
+    # immediately. Keep it comfortably longer than the longest real utterance (an agent's 1000
+    # characters is over a minute; at 30 s the watchdog let the next voice in mid-sentence).
+    speech_queue_max_hold: float = 120.0
 
     # Audio cues for mode transitions (macOS system sounds as placeholders — swap for
     # custom files later, e.g. made in Logic). Set "" to disable a cue.

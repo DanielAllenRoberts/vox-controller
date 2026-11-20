@@ -1215,116 +1215,12 @@ def _reuse_tab(url: str) -> bool:
     return False
 
 
-_DASHBOARD_TITLE = "Vox Control Center"  # the dashboard's page <title>, used to find its window
-
-
-def _focus_dashboard(url: str) -> bool:
-    """Reuse an already-open dashboard WITHOUT yanking you to Arc's main window: only act if one is
-    actually open. Raises an existing standalone 'Little Arc' window in place, or selects a matching
-    tab — crucially activating Arc ONLY on a real match, so a fresh open (nothing to reuse) never
-    switches you out of the app you're in. Returns True if one was focused."""
-    host = urllib.parse.urlparse(url).netloc.replace('"', "")
-    if not host:
-        return False
-    # (1) An existing standalone Little Arc window — raise it in place (no Arc activate → no Space jump).
-    se = (
-        f'tell application "System Events" to tell process "{browser()}"\n'
-        f'    repeat with w in windows\n'
-        f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
-        '            perform action "AXRaise" of w\n'
-        '            return "ok"\n'
-        '        end if\n'
-        '    end repeat\n'
-        '    return "none"\n'
-        'end tell')
-    if _osa(se) == (True, "ok"):
-        return True
-    # (2) A matching tab in the current Space — activate Arc only INSIDE the match (not before it),
-    #     so checking-and-finding-nothing doesn't pull focus to Arc.
-    if browser() != "Arc":
-        return _reuse_tab(url)
-    tab = (
-        'tell application "Arc"\n'
-        '    if (count of windows) is 0 then return "none"\n'
-        '    repeat with t in tabs of (active space of front window)\n'
-        f'        if URL of t contains "{host}" then\n'
-        '            tell t to select\n'
-        '            activate\n'
-        '            return "ok"\n'
-        '        end if\n'
-        '    end repeat\n'
-        '    return "none"\n'
-        'end tell')
-    return _osa(tab) == (True, "ok")
-
-
 def close_dashboard() -> str:
-    """Close the dashboard without disrupting your workflow — no Space-switch, no focus-steal.
-    (1) If it's a normal tab, close just that tab via the browser's AppleScript.
-    (2) Otherwise press the standalone window's close button directly via accessibility — AXPress
-    needs no focus, so it never switches Spaces. The tab path runs FIRST, so a dashboard tab in the
-    main window is always closed as a tab and we never AXPress (and thus close) the main window —
-    the standalone path only fires for a genuine 'Little Arc', which Arc's AppleScript can't see.
-    Never raises."""
-    if os.environ.get("VOX_APP") == "1":  # Vox.app replaces the browser dashboard: hide it
-        subprocess.run(["osascript", "-e", 'tell application "System Events" to set visible of '
-                        '(first process whose bundle identifier is "app.vox.mac") to false'],
-                       capture_output=True, text=True)
-        return "Hid Vox."
-    url = f"http://{CONFIG.dashboard_host}:{CONFIG.dashboard_port}"
-    host = urllib.parse.urlparse(url).netloc.replace('"', "")
-    if not host:
-        return "No dashboard URL configured."
-    # (1) Close a matching TAB (incl. the active tab of the main window) — closes only the tab.
-    tab = (
-        f'tell application "{browser()}"\n'
-        '    repeat with w in windows\n'
-        '        repeat with t in tabs of w\n'
-        f'            if URL of t contains "{host}" then\n'
-        '                tell t to close\n'
-        '                return "ok"\n'
-        '            end if\n'
-        '        end repeat\n'
-        '    end repeat\n'
-        '    return "none"\n'
-        'end tell')
-    if _osa(tab) == (True, "ok"):
-        return "Closed the dashboard."
-    # (2) Standalone Little Arc window: press its close button (shallow chrome search, not the heavy
-    #     web AX tree). AXPress needs no focus → non-disruptive.
-    se = (
-        f'tell application "System Events" to tell process "{browser()}"\n'
-        f'    repeat with w in windows\n'
-        f'        if name of w contains "{_DASHBOARD_TITLE}" then\n'
-        '            repeat with g in (UI elements of w)\n'
-        '                try\n'
-        '                    repeat with b in (buttons of g)\n'
-        '                        if subrole of b is "AXCloseButton" then\n'
-        '                            perform action "AXPress" of b\n'
-        '                            return "ok"\n'
-        '                        end if\n'
-        '                    end repeat\n'
-        '                end try\n'
-        '                try\n'
-        '                    repeat with g2 in (UI elements of g)\n'
-        '                        try\n'
-        '                            repeat with b in (buttons of g2)\n'
-        '                                if subrole of b is "AXCloseButton" then\n'
-        '                                    perform action "AXPress" of b\n'
-        '                                    return "ok"\n'
-        '                                end if\n'
-        '                            end repeat\n'
-        '                        end try\n'
-        '                    end repeat\n'
-        '                end try\n'
-        '            end repeat\n'
-        '        end if\n'
-        '    end repeat\n'
-        '    return "none"\n'
-        'end tell')
-    if _osa(se) == (True, "ok"):
-        return "Closed the dashboard."
-    return "No dashboard window was open."
+    """"Close dashboard" hides Vox.app (it replaced the browser dashboard). Never raises."""
+    subprocess.run(["osascript", "-e", 'tell application "System Events" to set visible of '
+                    '(first process whose bundle identifier is "app.vox.mac") to false'],
+                   capture_output=True, text=True)
+    return "Hid Vox."
 
 
 def _search(query: str) -> str:

@@ -1,8 +1,7 @@
-"""FastAPI bridge for the Vox dashboard.
+"""FastAPI bridge between the Vox daemon and Vox.app.
 
-Foundation skeleton (dashboard iteration 1). Serves the REST API under ``/api``,
-a WebSocket at ``/api/usage/stream``, and the built frontend (``dashboard/dist``)
-as static files at ``/`` with SPA fallback. See ``docs/dashboard/CONTRACT.md``.
+Serves the REST API under ``/api`` and its WebSockets. See ``docs/dashboard/CONTRACT.md``.
+(The React web dashboard this used to serve at ``/`` was removed; Vox.app replaced it.)
 
 Design guarantees:
 - **The voice daemon must never break because of the dashboard.** ``create_app``
@@ -31,7 +30,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 
 from ..config import CONFIG
 from ..paths import DATA_DIR
@@ -72,17 +70,11 @@ def _version() -> str:
     except Exception:
         return "dev"
 
-# Built frontend lives at <repo>/dashboard/dist. This file is
-# src/vox/web/server.py → parents[3] is the repo root.
+# This file is src/vox/web/server.py → parents[3] is the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_DIST_DIR = _REPO_ROOT / "dashboard" / "dist"
 
-# Vite dev server origin (CONTRACT) — allowed for CORS so the dashboard can talk
-# to this bridge while developed with `npm run dev`.
-_DEV_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+# No browser origin may call this API (the web dashboard is gone; Vox.app isn't a browser).
+_DEV_ORIGINS: list[str] = []
 
 
 def _brain(prefix: str) -> dict:
@@ -449,9 +441,21 @@ def create_app() -> FastAPI:
         if err is not None:
             return err
         from vox import runtime
-        stopped = runtime.request_stop()
+        stopped = runtime.request_stop(sleep=bool((_body or {}).get("sleep")))
         print(f"⏹ Stop button{': ' + ', '.join(stopped) if stopped else ' (nothing was running)'}", flush=True)
         return {"ok": True, "stopped": stopped}
+
+    @app.post("/api/speech")
+    async def post_speech(request: Request):
+        """Pause / resume speaking ({"paused": true}), for Vox and for agents speaking through the
+        MCP. A paused speaker carries on from the sentence it was in. Returns the speech state."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        from vox import runtime, speech_lock
+        speech_lock.set_paused(bool(body.get("paused")))
+        print("⏸ Speech paused" if body.get("paused") else "▶ Speech resumed", flush=True)
+        return {"ok": True, **runtime.speech_state()}
 
     @app.post("/api/listening")
     async def post_listening(request: Request):
@@ -462,6 +466,24 @@ def create_app() -> FastAPI:
         from vox import runtime
         runtime.set_paused(bool(body.get("paused")))
         return {"ok": True, "paused": runtime.paused}
+
+    # --- Live mic level (onboarding's mic check + the dashboard meter) ---
+    @app.get("/api/mic/level")
+    def get_mic_level() -> dict:
+        """How loud the mic Vox has open is right now, on a 0-1 scale shared by every meter, plus where
+        the speech threshold sits on that scale. ``live`` is false when no audio is arriving."""
+        import math
+        from .. import audio
+
+        def scale(r: float) -> float:   # -60 dBFS (silence) … -10 dBFS (shouting) → 0 … 1
+            db = 20 * math.log10(max(r, 1.0) / 32768)
+            return round(min(1.0, max(0.0, (db + 60) / 50)), 3)
+
+        lv = audio.level()
+        threshold = float(settings_store.get("speech_rms") or CONFIG.speech_rms)
+        live = lv["age"] is not None and lv["age"] < 1.5
+        return {"live": live, "level": scale(lv["rms"]) if live else 0.0,
+                "threshold": scale(threshold), "rms": round(lv["rms"], 1)}
 
     # --- Setup: API keys + a brain test (used by the app's onboarding) ---
     def _secret_names() -> list[str]:
@@ -778,6 +800,32 @@ def create_app() -> FastAPI:
             pass
         finally:
             mod.unsubscribe(queue)
+
+    @app.websocket("/api/hud/stream")
+    async def hud_stream(ws: WebSocket) -> None:
+        """Live events for Vox.app's on-screen indicator (see vox.runtime.hud). Nothing is stored."""
+        from vox import runtime
+        await ws.accept()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        runtime.hud_subscribe(asyncio.get_running_loop(), queue)
+        try:
+            await ws.send_json({"type": "state"})
+            speech = None
+            while True:
+                # Speech can come from another process (an agent's MCP server), which can't publish
+                # here, so look a few times a second and report when it changes.
+                now = await asyncio.to_thread(runtime.speech_state)
+                if now != speech:
+                    speech = now
+                    await ws.send_json({"type": "speech", **now})
+                try:
+                    await ws.send_json(await asyncio.wait_for(queue.get(), timeout=0.25))
+                except asyncio.TimeoutError:
+                    pass
+        except Exception:  # disconnect, or anything else: just stop
+            pass
+        finally:
+            runtime.hud_unsubscribe(queue)
 
     # --- Personalities (guarded) ---
     @app.get("/api/personalities")
@@ -1623,9 +1671,6 @@ def create_app() -> FastAPI:
         except Exception as exc:  # snapshot() shouldn't raise, but never 500
             return {"error": f"diagnostics read failed: {exc}"}
 
-    # --- Static dashboard + SPA fallback ---
-    _mount_static(app)
-
     return app
 
 
@@ -2163,49 +2208,6 @@ def _handbook() -> list:
     out = [by_title.pop(t) for t in order if t in by_title]
     out += list(by_title.values())
     return out
-
-
-def _mount_static(app: FastAPI) -> None:
-    """Serve ``dashboard/dist`` at ``/`` with SPA fallback, if it's been built.
-
-    Mounted last so ``/api/*`` routes always win. If the frontend isn't built
-    yet, a friendly placeholder is served at ``/`` instead of a 404 wall.
-    """
-    if _DIST_DIR.is_dir():
-        assets = _DIST_DIR / "assets"
-        if assets.is_dir():
-            app.mount("/assets", StaticFiles(directory=assets), name="assets")
-
-        # index.html must NEVER be browser-cached — it references the content-hashed JS bundle, so a
-        # stale index.html keeps loading an old bundle after a rebuild (the "I rebuilt but the
-        # dashboard didn't change until a hard-refresh" gremlin). The hashed /assets are immutable
-        # and cache freely.
-        _NO_CACHE = {"Cache-Control": "no-cache, max-age=0"}
-
-        @app.get("/{full_path:path}")
-        def spa(full_path: str):
-            # Serve a real file if it exists, else fall back to index.html so the
-            # client-side router handles the route.
-            candidate = _DIST_DIR / full_path
-            if full_path and candidate.is_file():
-                if candidate.name == "index.html":
-                    return FileResponse(candidate, headers=_NO_CACHE)
-                return FileResponse(candidate)
-            index = _DIST_DIR / "index.html"
-            if index.is_file():
-                return FileResponse(index, headers=_NO_CACHE)
-            return JSONResponse({"error": "dashboard not built"}, status_code=404)
-    else:
-        @app.get("/")
-        def placeholder():
-            return JSONResponse(
-                {
-                    "status": "ok",
-                    "message": "Vox bridge running. Build the dashboard "
-                    "(dashboard/ → npm run build) to serve the UI here.",
-                    "api": "/api/status",
-                }
-            )
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:

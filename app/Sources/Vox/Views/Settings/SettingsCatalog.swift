@@ -57,7 +57,7 @@ enum SettingsCatalog {
             .init(title: "Replies", footer: nil, items: [
                 s("tts_enabled", "Speak replies", "Vox answers out loud. Turn off to read replies in the bubble instead."),
             ]),
-            .init(title: "Notification bubble", footer: "The quiet card Vox and your agents use instead of speaking.", items: [
+            .init(title: "Notification card", footer: "Vox and your agents send macOS notifications. This card is the fallback when they can't, for example when notifications are switched off for Vox in System Settings.", items: [
                 s("bubble_corner", "Position"),
                 s("bubble_duration", "Stays on screen (seconds)", "0 keeps it until you close it."),
                 s("bubble_max_width", "Width (points)"),
@@ -66,7 +66,8 @@ enum SettingsCatalog {
                 s("agent_alerts", "When an agent is waiting for you", "Says which agent needs you, e.g. \u{201C}David needs your OK.\u{201D}"),
                 s("agent_done_alerts", "Also tell me when an agent finishes"),
                 s("team_projects_root", "Projects folder", "Where Vox looks for 'the getprice folder' when you start an agent."),
-                s("team_speak_updates", "Agents speak their updates"),
+                s("team_speak_updates", "Agents speak their updates", "Vox never reads a command aloud; it says the agent needs your okay."),
+                s("team_auto_mode", "Agents run on auto", "They only stop for a push, a publish, sudo or an edit outside their folder."),
             ]),
             .init(title: "Reminders", footer: "Alarms and timers always go off on time.", items: [
                 s("reminders_wait_for_you", "Wait until I'm back", "A reminder or routine due while you're away is said when you return."),

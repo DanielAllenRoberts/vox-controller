@@ -194,8 +194,12 @@ _SYSTEM = (
     "• If it maps to a command, output just that command line (e.g. close tab).\n"
     "• For TYPE, write the actual finished text (no preamble, no quotes). For EDIT, give only the "
     "instruction — the selected text is fetched and rewritten in a separate step.\n"
-    "• To ask (rarely): CHAT: <short question>. For a real question or something you truly can't "
-    "do: CHAT: <one short spoken sentence>.\n"
+    "• To ask (rarely): CHAT: <short question>. For a real question: CHAT: <one short spoken "
+    "sentence>.\n"
+    "• For something you truly can't do: CANT: <what you would have needed, in a few words: a "
+    "command or tool that doesn't exist, being able to see or read something, or a clearer request> "
+    "| <one short spoken sentence telling the user>. The first part is logged so the gap can be "
+    "fixed; only the second part is spoken.\n"
     "• Only when you're CONFIDENT it's background talk NOT addressed to Vox (overheard "
     "conversation, third-person speech with no request for you) output exactly: IGNORE. A question "
     "— or anything that might be meant for you — is NOT chatter; answer or do it. When unsure, do "
@@ -487,7 +491,7 @@ def _schedule(body: str) -> str | None:
 # The directive prefixes the router answers with. A model sometimes opens with a sentence ("I'll set
 # both the reminder and the follow-up for you.") before them; that sentence isn't a command, and
 # reading it as one lost the whole request (issue dc62c863).
-_DIRECTIVE = re.compile(r"^(?:IGNORE\b|DICTATE\b|(?:CHAT|WEB|MENU|ISSUE|NOTE|SET|LOOK|POINT|CLICK|AGENTS?|"
+_DIRECTIVE = re.compile(r"^(?:IGNORE\b|DICTATE\b|(?:CHAT|CANT|WEB|MENU|ISSUE|NOTE|SET|LOOK|POINT|CLICK|AGENTS?|"
                         r"APPS|SCHEDULE|BOARD|TEACH|TYPE|EDIT)\s*:)", re.I)
 
 
@@ -901,6 +905,10 @@ def _start_agent(task: str) -> tuple[bool, str]:
     return True, "On it — say stop or press escape to cancel."
 
 
+# Words that ask to type by voice, mis-hears included ("dot typing", "start typ", "take dictation").
+_ASKS_TO_TYPE = re.compile(r"\b(?:typ|dictat|transcri|write|writing|keyboard)", re.IGNORECASE)
+
+
 def execute(text: str, history=None) -> tuple[bool, str]:
     """Try to fulfil an uncertain command with the small brain.
 
@@ -988,6 +996,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         reply = raw.split(":", 1)[1].strip() or assistant.respond(text, history)
         assistant._dbg("[executor]", f"decision=CHAT → speak {reply!r}")
         return False, reply
+    if upper.startswith("CANT:"):  # it can't do this: say so, and log what was missing (vox.issues)
+        missing, _, reply = raw.split(":", 1)[1].partition("|")
+        reply = reply.strip() or missing.strip() or "I can't do that."
+        from vox import issues
+        issues.missing_hint = missing.strip() if "|" in raw else ""
+        assistant._dbg("[executor]", f"decision=CANT (missing: {missing.strip()!r}) → speak {reply!r}")
+        return False, reply
     if upper.startswith("WEB:"):
         from vox import web_search
         q = raw.split(":", 1)[1].strip() or text
@@ -1036,6 +1051,13 @@ def execute(text: str, history=None) -> tuple[bool, str]:
         assistant._dbg("[executor]", f"decision=POINT target={target!r} → {result!r}")
         return result.startswith("There's"), result
     if upper.startswith("DICTATE"):  # user wants to type by voice → tell the loop to enter dictation
+        if not _ASKS_TO_TYPE.search(text or ""):
+            # Dictation types everything said next, so entering it by mistake is costly: on 17 Nov a
+            # mis-heard "Hey Vox, open Claude" ("i think lord") came back DICTATE, likely because
+            # "start typing" sat in the recent conversation, and the next four commands were typed
+            # into the terminal. Only go in when the words themselves ask to type.
+            assistant._dbg("[executor]", f"decision=DICTATE refused: {text!r} doesn't ask to type")
+            return False, "Sorry, I didn't catch that. Say it again?"
         assistant._dbg("[executor]", "decision=DICTATE → enter dictation mode")
         return True, ENTER_DICTATION
     if upper.startswith("TYPE:"):

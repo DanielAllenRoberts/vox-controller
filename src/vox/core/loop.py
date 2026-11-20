@@ -13,7 +13,6 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 
 
 from vox import actions, assistant, auto_dictation, dispatch, executor, sounds, tts
@@ -23,6 +22,9 @@ from vox.io.console import ConsoleOutput
 from vox.stats import Timer, process_stats
 from vox.stt.whisper_transcriber import WhisperTranscriber
 from vox.wakeword.backends import make_backend, normalize, phrase_match
+
+
+_LAST_USER_TURN = ""  # what the user last said, so a "couldn't do it" reply is logged against it
 
 
 def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
@@ -39,6 +41,15 @@ def _record_turn(role: str, text: str, *, brain=None, kind=None) -> None:
     try:  # repeated failures → look for a mis-heard word in the background (vox.mishear)
         from vox import mishear
         mishear.note_turn(role, text)
+    except Exception:
+        pass
+    try:  # Vox saying it couldn't do something is logged with its context, to fix later (vox.issues)
+        global _LAST_USER_TURN
+        from vox import issues
+        if role == "user":
+            _LAST_USER_TURN = str(text)
+        elif _LAST_USER_TURN and issues.is_cant(str(text)):
+            issues.note_cant(_LAST_USER_TURN, str(text))
     except Exception:
         pass
     try:
@@ -139,9 +150,7 @@ def _start_focus_watch(cfg, out, on_change=None) -> None:
             out.emit(f"  [focus] not started: {exc}")
 
 
-# Set by Vox.app when it launched this engine. The app replaces the browser dashboard, so "open
-# dashboard" brings the app forward instead of opening a tab.
-_IN_APP = os.environ.get("VOX_APP") == "1"
+# Vox.app replaced the browser dashboard, so "open dashboard" brings the app forward.
 _APP_BUNDLE_ID = "app.vox.mac"
 
 
@@ -170,27 +179,10 @@ def _start_volume_watch(out) -> None:
 
 
 def _open_dashboard(cfg, out) -> None:
-    """Open the dashboard in its own window (Arc opens external localhost links as a standalone
-    'Little Arc' window), reusing an already-open dashboard window/tab so 'open dashboard' never
-    stacks. Closing is non-disruptive — actions.close_dashboard presses the window's close button
-    via accessibility (no Space-switch). Guarded so a failure can't break the wake loop."""
-    if _IN_APP:
-        subprocess.run(["open", "-b", _APP_BUNDLE_ID], capture_output=True, text=True)
-        out.emit("🖥  Showing Vox")
-        return
-    url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
-    try:
-        if actions._focus_dashboard(url):  # reuse the existing dashboard window/tab
-            out.emit("🖥  Dashboard already open — focused it.")
-            return
-        subprocess.run(["open", url], capture_output=True, text=True)  # own window (Arc → Little Arc)
-        out.emit(f"🖥  Opening dashboard → {url}")
-    except Exception:
-        try:  # last-resort fallback to the system default browser
-            webbrowser.open(url)
-            out.emit(f"🖥  Opening dashboard → {url}")
-        except Exception as exc:
-            out.emit(f"  [dashboard] couldn't open browser: {exc}")
+    """"Open dashboard" shows Vox.app (it replaced the browser dashboard). Guarded so a failure
+    can't break the wake loop."""
+    r = subprocess.run(["open", "-b", _APP_BUNDLE_ID], capture_output=True, text=True)
+    out.emit("🖥  Showing Vox" if r.returncode == 0 else "🖥  Vox.app isn't installed, so there's no window to show.")
 
 
 def _open_mic_or_wait(cfg, out):
@@ -211,12 +203,6 @@ def _open_mic_or_wait(cfg, out):
                          f"   {cfg.assistant_name} is up (dashboard, scheduler, MCP) but can't hear. "
                          f"Connect a microphone or pick one in Settings → Voice → Microphone — "
                          f"listening starts the moment one appears.")
-                url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}/settings#voice"
-                if not _IN_APP:  # the app already shows "can't hear" in its status
-                    try:
-                        subprocess.run(["open", url], capture_output=True, text=True)
-                    except Exception:
-                        webbrowser.open(url)
             time.sleep(5)
             try:
                 sd._terminate(); sd._initialize()  # re-enumerate — PortAudio's device list is frozen at init
@@ -385,6 +371,8 @@ def _transcribe(transcriber, audio, cfg, out, hotwords: str = "") -> str:
     if text and tts.is_echo(text):
         out.emit(f"  🔁 ignored {text!r}: that's my own voice coming back through the speakers")
         return ""
+    if text.strip():
+        runtime.hud("heard", text=text.strip())
     return text
 
 
@@ -588,6 +576,7 @@ def _recognize(audio, cfg, transcriber, out, hotwords: str = "") -> str:
                             f"(Whisper was skipped — if you didn't say this, it was force-aligned)")
                 if cfg.debug:
                     out.emit(f"  [debug] heard (vosk): {r['text']!r}")
+                runtime.hud("heard", text=r["text"])
                 return r["text"]
             if log:
                 log(f"  [vosk] {'low conf ' + str(r['conf']) if r else 'no match [unk]'} → Whisper lane")
@@ -774,6 +763,9 @@ def _speak_interruptible(spoken, frames, cfg, transcriber, mic):
             audio = capture_utterance(frames, cfg, listen_timeout=cfg.barge_in_poll_seconds)
             if audio is None:
                 continue  # silence — keep speaking
+            from vox import speech_lock
+            if speech_lock.paused():
+                continue  # speech is paused so you can listen to someone: that talk isn't a barge-in
             text = transcriber.transcribe(audio, hotwords=cfg.command_hotwords)
             if not text or not _passes_interrupt_gate(audio, text, cfg):
                 continue  # blip / too short → not a real barge-in; let the reply continue
@@ -1208,6 +1200,9 @@ def _dictation_mode(frames, cfg, transcriber, out, mic=None, return_to=None):
         # Check the control phrases BEFORE paying for Whisper — "stop typing" is the phrase you say
         # most in dictation and it was the slowest to land.
         ctrl = _dictation_control(audio, cfg)
+        if ctrl:
+            from vox import runtime
+            runtime.hud("heard", text=ctrl)
         if ctrl in ("stop typing", "stop dictation", "stop dictating"):
             sounds.play(cfg.sound_dictate_stop)
             _flush(mic, settle=_CHIME_SETTLE_SECONDS)

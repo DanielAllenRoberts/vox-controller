@@ -47,7 +47,7 @@ enum Snapshotter {
                 shots.append(("settings-\(tab.rawValue)", { AnyView(SettingsTabHost(tab: tab).environment(model)) }, CGSize(width: 620, height: 600)))
             }
             for step in OnboardingView.Step.allCases {
-                shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step, aboutYou: .sample).environment(model)) }, CGSize(width: 640, height: 620)))
+                shots.append(("onboarding-\(step.rawValue)-\(step)", { AnyView(OnboardingView(step: step, aboutYou: .sample, meterPreview: MicLevel(live: true, level: 0.58, threshold: 0.27)).environment(model)) }, CGSize(width: 640, height: 620)))
             }
             shots.append(("board-card-editor", {
                 AnyView(CardEditor(card: BoardCard(id: 1, listId: 1, title: "Send the Acme invoice", body: "Net 30, attach the timesheet.",
@@ -55,6 +55,21 @@ enum Snapshotter {
                                                    checklist: [ChecklistItem(text: "Draft it", done: true), ChecklistItem(text: "Send it", done: false)]),
                                    onSave: { _ in }, onArchive: {}, onDelete: {}).environment(model))
             }, CGSize(width: 480, height: 640)))
+            shots.append(("connections-composio-sheet", { AnyView(AddConnectionSheet(preset: .composio) { _ in }.environment(model)) }, CGSize(width: 500, height: 420)))
+            // (name, mode, text, has ■, speech paused or nil for no pause button)
+            let hud: [(String, String, String?, Bool, Bool?)] = [("control-heard", "control", "\u{201C}next tab\u{201D}", true, nil),
+                                                                 ("assistant-speaking", "assistant", "Speaking…", true, false),
+                                                                 ("agent-paused", "idle", "Speech paused", true, true),
+                                                                 ("mode-flash", "idle", nil, false, nil)]
+            for (name, mode, text, stop, paused) in hud {
+                var s = model.engine.status
+                s?.mode = mode
+                let p = VoxPresence.from(engine: .running(owned: true), status: s)
+                shots.append(("hud-\(name)", {
+                    AnyView(HUDPill(presence: p, text: text, onStop: stop ? {} : nil, speechPaused: paused).padding(12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).background(.gray))
+                }, CGSize(width: 380, height: 120)))
+            }
             shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 370)))
 
             for (name, view, size) in shots where only.map({ name.contains($0) }) ?? true {

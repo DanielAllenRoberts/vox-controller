@@ -6,7 +6,7 @@ import SwiftUI
 /// permissions, so by the time they reach the Engine step it's usually done. Screen Recording isn't
 /// asked for here; it's optional and Settings → Permissions offers it when wanted.
 struct OnboardingView: View {
-    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, brain, voice, connections, aboutYou, tryIt, done }
+    enum Step: Int, CaseIterable { case welcome, microphone, accessibility, engine, micCheck, brain, voice, connections, aboutYou, tryIt, done }
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismissWindow) private var dismissWindow
@@ -16,6 +16,9 @@ struct OnboardingView: View {
     @State private var installer = Installer()
     @State private var brain = BrainSetup()
     @State var aboutYou = AboutYouSetup()
+    /// `--snapshot` only: a fixed mic reading, since no engine is polled there.
+    var meterPreview: MicLevel?
+    @State private var heardSpeech = false
     @State private var tryItSince = Date()
 
     var body: some View {
@@ -28,11 +31,12 @@ struct OnboardingView: View {
                 case .microphone: PermissionStep(kind: .microphone, perms: perms)
                 case .accessibility: PermissionStep(kind: .accessibility, perms: perms)
                 case .engine: EngineStep(installer: installer)
+                case .micCheck: MicCheckStep(heard: $heardSpeech, preview: meterPreview)
                 case .brain: BrainStep(setup: brain)
                 case .voice: VoiceStep()
                 case .connections: ConnectionsStep(perms: perms)
                 case .aboutYou: AboutYouStep(setup: aboutYou)
-                case .tryIt: TryItStep(perms: perms)
+                case .tryIt: TryItStep(perms: perms, meterPreview: meterPreview)
                 case .done: DoneStep(perms: perms)
                 }
             }
@@ -97,6 +101,7 @@ struct OnboardingView: View {
         case .microphone where perms.status(.microphone) != .granted: "Skip for Now"
         case .accessibility where perms.status(.accessibility) != .granted: "Skip for Now"
         case .engine where !model.engine.isRunning: "Skip for Now"
+        case .micCheck where !heardSpeech: "Skip"
         case .brain where !brain.passed: "Set Up Later"
         case .aboutYou: "Skip"
         case .connections: "Skip"
@@ -293,7 +298,15 @@ private struct EngineStep: View {
                             Button("Try Again") { model.boot() }
                         } else {
                             ProgressView().controlSize(.small)
-                            Text("Loading speech models. The first start can take a minute.").font(.callout).foregroundStyle(.secondary)
+                            // The first start downloads the speech models (Whisper, the voices: about
+                            // 0.6 GB) with no progress of its own, so at least show time passing.
+                            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                                let secs = max(0, Int(ctx.date.timeIntervalSince(model.engine.since)))
+                                Text("Starting the speech engine\u{2026} \(secs / 60):\(String(format: "%02d", secs % 60))")
+                                    .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                            Text("The first start downloads the speech models (about 0.6 GB). On a slow connection that takes a few minutes. Later starts take seconds.")
+                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }
                     }
                 }
@@ -319,6 +332,38 @@ private struct EngineStep: View {
     }
 }
 
+// MARK: Mic check
+
+/// Proves the microphone works before anything depends on it: a live level bar, and the microphone
+/// picker right there for when the bar stays flat (the wrong input, or AirPods asleep).
+private struct MicCheckStep: View {
+    @Environment(AppModel.self) private var model
+    @Binding var heard: Bool
+    var preview: MicLevel?
+
+    var body: some View {
+        StepLayout(symbol: heard ? "checkmark.circle.fill" : "mic.and.signal.meter", tint: heard ? .green : .accentColor,
+                   title: heard ? "Vox can hear you" : "Test your microphone",
+                   message: heard ? "The bar moves when you talk. Press Continue."
+                                  : "Say a few words, like \u{201C}testing, one, two, three\u{201D}. The bar should jump past the line.") {
+            VStack(spacing: 18) {
+                MicLevelMeter(preview: preview, heardSpeech: $heard)
+                    .frame(maxWidth: 380)
+                if model.engine.isRunning || preview != nil {
+                    MicPicker().frame(maxWidth: 380)
+                    if !heard {
+                        Text("Bar not moving? Pick another microphone above, or check it isn't muted. You can also skip this and talk to Vox by typing.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                } else {
+                    Text("The speech engine isn't running yet. Go back a step to see why, or skip this for now.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+            }
+        }
+    }
+}
+
 // MARK: Brain
 
 /// The brain step's state, owned by OnboardingView so the footer's Continue can run it.
@@ -337,8 +382,25 @@ final class BrainSetup {
     /// The preset last written to the engine, so a retry doesn't rewrite settings and restart again.
     private var applied: BrainPreset = .current
     var claudeLoggedIn: Bool?
+    /// Whether the brains already configured answered the first check. A fresh install's defaults
+    /// need accounts a new user doesn't have, so "Keep my current setup" only shows when it works.
+    private(set) var currentWorks: Bool?
 
     var isTesting: Bool { test == .testing }
+
+    /// The choices to show: the current setup only once it has proved it works.
+    var presets: [BrainPreset] { BrainPreset.allCases.filter { $0 != .current || currentWorks == true } }
+
+    /// First look: try the current setup. If it doesn't answer, start from the subscription option
+    /// instead of showing a red error for a setup the user never chose.
+    func checkCurrent(_ model: AppModel) async {
+        guard currentWorks == nil, choice == .current else { return }
+        currentWorks = await run(model)
+        if currentWorks == false {
+            choice = .subscription
+            test = .idle
+        }
+    }
     var passed: Bool { if case .passed = test { return true }; return false }
 
     func refreshKeys(_ model: AppModel) async {
@@ -372,7 +434,7 @@ final class BrainSetup {
             test = .failed("The speech engine isn't running yet. Go back a step to see why, or set this up later.")
             return false
         }
-        if let p = choice.settings, choice != applied {
+        if choice != applied, let p = await settings(for: choice, model) {
             do {
                 for (k, v) in p { try await model.api.setSetting(k, .string(v)) }
             } catch {
@@ -384,6 +446,8 @@ final class BrainSetup {
             try? await Task.sleep(for: .seconds(1))
             for _ in 0..<120 where !model.engine.isRunning { try? await Task.sleep(for: .milliseconds(500)) }
             await model.reloadSettings()
+        } else if choice == .openai, choice != applied {
+            return false   // settings(for:) has already said why
         }
         struct R: Decodable { var ok: Bool; var reply: String; var ms: Int }
         do {
@@ -394,6 +458,25 @@ final class BrainSetup {
             test = .failed(error.localizedDescription)
             return false
         }
+    }
+}
+
+extension BrainSetup {
+    /// The settings a preset writes. OpenAI's model names are read from the account rather than
+    /// hard-coded (they change faster than Vox does): its newest "mini" for everyday replies, its
+    /// newest full model for hard ones.
+    func settings(for preset: BrainPreset, _ model: AppModel) async -> [String: String]? {
+        guard preset == .openai else { return preset.settings }
+        struct R: Decodable { var models: [String] }
+        let ids = ((try? await model.api.get("brain/models?provider=chatgpt", as: R.self))?.models ?? [])
+            .filter { $0.range(of: #"^gpt-\d"#, options: .regularExpression) != nil }
+        guard let big = ids.first(where: { !$0.contains("mini") && !$0.contains("nano") }) else {
+            test = .failed("Your OpenAI key didn't list any GPT models. Check the key, or that the account has credit.")
+            return nil
+        }
+        let small = ids.first(where: { $0.contains("mini") }) ?? big
+        return ["small_brain_provider": "chatgpt", "small_brain_model": small,
+                "big_brain_provider": "chatgpt", "big_brain_model": big]
     }
 }
 
@@ -432,8 +515,8 @@ private struct BrainStep: View {
         StepLayout(symbol: "brain", title: "Choose a brain",
                    message: "Vox recognises commands on its own. A language model handles everything else.", compact: true) {
             VStack(spacing: 8) {
-                ForEach(BrainPreset.allCases) { p in
-                    PresetRow(preset: p, selected: setup.choice == p, keys: setup.keys, claudeLoggedIn: setup.claudeLoggedIn) {
+                ForEach(setup.presets) { p in
+                    PresetRow(preset: p, selected: setup.choice == p, keys: setup.keys, setup: setup) {
                         setup.choice = p
                     }
                 }
@@ -443,20 +526,24 @@ private struct BrainStep: View {
                 HStack { testStatus; Spacer() }
                     .frame(minHeight: 22)
                     .padding(.top, 4)
+                Text("No AI account? Choose Set Up Later: Vox's built-in commands work without one.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
         .task {
             await setup.refreshKeys(model)
-            setup.claudeLoggedIn = await ClaudeCLI.loggedIn()
+            setup.claudeLoggedIn = await ClaudeCLI.loggedIn(venv: model.engine.location.venvDir)
             // Keeping the current setup needs nothing from the user, so check it straight away.
-            if setup.choice == .current { _ = await setup.run(model) }
+            await setup.checkCurrent(model)
         }
     }
 
     @ViewBuilder private var testStatus: some View {
         switch setup.test {
         case .idle:
-            Text(setup.choice == .current ? "Press Continue to check it works." : "Press Continue to switch and test it.")
+            Text(setup.choice == .current ? "Press Continue to check it works."
+                 : setup.choice == .subscription && setup.claudeLoggedIn != true ? "Sign in to Claude first, then press Continue."
+                 : "Press Continue to switch and test it.")
                 .font(.callout).foregroundStyle(.secondary)
         case .testing:
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Checking the brain answers…").foregroundStyle(.secondary) }
@@ -470,7 +557,7 @@ private struct BrainStep: View {
 }
 
 enum BrainPreset: String, CaseIterable, Identifiable {
-    case current, fast, anthropic, subscription
+    case current, subscription, anthropic, openai, fast
     var id: String { rawValue }
 
     var title: String {
@@ -478,6 +565,7 @@ enum BrainPreset: String, CaseIterable, Identifiable {
         case .current: "Keep my current setup"
         case .fast: "Fast and cheap"
         case .anthropic: "Claude via API"
+        case .openai: "ChatGPT models via API"
         case .subscription: "Claude subscription"
         }
     }
@@ -487,6 +575,7 @@ enum BrainPreset: String, CaseIterable, Identifiable {
         case .current: "Use the brains already configured."
         case .fast: "DeepSeek for everyday replies (about 1 s, fractions of a cent), Claude for hard ones."
         case .anthropic: "Claude Haiku for everyday replies, Sonnet for hard ones. Pay per use."
+        case .openai: "GPT models on an OpenAI API key (not a ChatGPT plan). Pay per use."
         case .subscription: "Uses your Claude Pro or Max plan. No per-use cost, but slower (2–5 s)."
         }
     }
@@ -495,13 +584,14 @@ enum BrainPreset: String, CaseIterable, Identifiable {
         switch self {
         case .fast: ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"]
         case .anthropic: ["ANTHROPIC_API_KEY"]
+        case .openai: ["OPENAI_API_KEY"]
         default: []
         }
     }
 
     var settings: [String: String]? {
         switch self {
-        case .current: nil
+        case .current, .openai: nil   // openai: read from the account, see BrainSetup.settings(for:)
         case .fast: ["small_brain_provider": "openai", "small_brain_model": "deepseek-v4-flash",
                      "big_brain_provider": "anthropic", "big_brain_model": "claude-sonnet-4-6"]
         case .anthropic: ["small_brain_provider": "anthropic", "small_brain_model": "claude-haiku-4-5-20251001",
@@ -516,8 +606,9 @@ private struct PresetRow: View {
     var preset: BrainPreset
     var selected: Bool
     var keys: [String: Bool]
-    var claudeLoggedIn: Bool?
+    var setup: BrainSetup
     var select: () -> Void
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         Button(action: select) {
@@ -527,9 +618,17 @@ private struct PresetRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(preset.title).font(.body.weight(.medium))
                     Text(preset.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    if preset == .subscription, claudeLoggedIn == false {
-                        Text("Needs Claude Code signed in. Install it from claude.com/code, then run `claude` once.")
-                            .font(.caption).foregroundStyle(.orange)
+                    if preset == .subscription, setup.claudeLoggedIn == true {
+                        Label("Signed in to Claude", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
+                    } else if preset == .subscription, selected {
+                        HStack(spacing: 8) {
+                            Button("Sign in to Claude\u{2026}") { ClaudeCLI.openSignIn(venv: model.engine.location.venvDir) }
+                                .help("Opens a Terminal window, then your browser. Sign in there, come back and press Check Again.")
+                            Button("Check Again") {
+                                Task { setup.claudeLoggedIn = await ClaudeCLI.loggedIn(venv: model.engine.location.venvDir) }
+                            }
+                        }
+                        .controlSize(.small).padding(.top, 2)
                     }
                 }
                 Spacer(minLength: 0)
@@ -555,7 +654,18 @@ private struct KeyField: View {
         switch name {
         case "DEEPSEEK_API_KEY": "DeepSeek API key"
         case "ANTHROPIC_API_KEY": "Anthropic API key"
+        case "OPENAI_API_KEY": "OpenAI API key"
         default: name
+        }
+    }
+
+    /// Where to create one, for someone who has never made an API key.
+    static func page(for name: String) -> URL? {
+        switch name {
+        case "DEEPSEEK_API_KEY": URL(string: "https://platform.deepseek.com/api_keys")
+        case "ANTHROPIC_API_KEY": URL(string: "https://console.anthropic.com/settings/keys")
+        case "OPENAI_API_KEY": URL(string: "https://platform.openai.com/api-keys")
+        default: nil
         }
     }
 
@@ -570,19 +680,47 @@ private struct KeyField: View {
                     get: { setup.drafts[name] ?? "" }, set: { setup.drafts[name] = $0 }))
                     .textFieldStyle(.roundedBorder)
                     .help("Saved to Vox's private settings file on this Mac, readable only by you.")
+                if let url = Self.page(for: name) {
+                    Link("Get a key", destination: url).font(.callout)
+                }
             }
         }
     }
 }
 
-/// Is the Claude Code CLI installed and signed in? (Needed for the subscription brain.) Reads
-/// only the `loggedIn` flag: the full output includes the account email, which isn't shown or kept.
+/// Is Claude signed in for the subscription brain? Uses an installed Claude Code if there is one,
+/// else the copy the engine's Agent SDK ships with, so nobody has to install Claude Code first: both
+/// share the same sign-in. Reads only the `loggedIn` flag: the full output includes the account
+/// email, which isn't shown or kept.
 enum ClaudeCLI {
-    static func loggedIn() async -> Bool? {
+    static func binary(venv: URL) -> URL? {
+        let onPath = EngineLocation.childPATH.split(separator: ":")
+            .map { URL(fileURLWithPath: String($0)).appending(path: "claude") }
+        let bundled = venv.appending(path: "lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude")
+        return (onPath + [bundled]).first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    /// Sign-in is interactive (a browser, sometimes a code to paste), so it runs in a Terminal
+    /// window the user can see, opened via a .command file: no Automation permission needed.
+    static func openSignIn(venv: URL) {
+        guard let bin = binary(venv: venv) else { return }
+        let file = FileManager.default.temporaryDirectory.appending(path: "vox-claude-sign-in.command")
+        let script = """
+        #!/bin/bash
+        echo "Signing in to Claude for Vox. Your browser will open."
+        echo
+        '\(bin.path.replacingOccurrences(of: "'", with: "'\\''"))' auth login --claudeai
+        echo
+        echo "All done. Go back to Vox and press Check Again. You can close this window."
+        """
+        try? script.write(to: file, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+        NSWorkspace.shared.open(file)
+    }
+
+    static func loggedIn(venv: URL) async -> Bool? {
         await Task.detached { () -> Bool? in
-            guard let bin = EngineLocation.childPATH.split(separator: ":")
-                .map({ URL(fileURLWithPath: String($0)).appending(path: "claude") })
-                .first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else { return false }
+            guard let bin = binary(venv: venv) else { return false }
             let p = Process()
             p.executableURL = bin
             p.arguments = ["auth", "status", "--json"]
@@ -611,7 +749,8 @@ private struct VoiceStep: View {
         StepLayout(symbol: "speaker.wave.2.fill", title: "Pick a voice",
                    message: "This is how Vox answers you. Press play to hear each one.", compact: true) {
             if voices.isEmpty {
-                Text("Voices appear once the engine is running.").foregroundStyle(.secondary)
+                Text("The voices appear once the speech engine is running. Press Continue to carry on, and pick a voice later in Settings \u{2192} Voice.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
             } else {
                 ScrollView {
                     VStack(spacing: 6) {
@@ -786,6 +925,7 @@ private struct AboutYouStep: View {
 private struct TryItStep: View {
     @Environment(AppModel.self) private var model
     var perms: Permissions
+    var meterPreview: MicLevel?
     @State private var since = Date()
 
     /// The first thing said (or typed) since this step appeared, and Vox's answer to it.
@@ -804,8 +944,8 @@ private struct TryItStep: View {
                        ?? (canHear ? "Say \u{201C}Hey Vox, what time is it?\u{201D}" : "Vox can't hear you yet, but you can type to it.")) {
             VStack(spacing: 10) {
                 if heard == nil {
-                    if canHear {
-                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Listening…").foregroundStyle(.secondary) }
+                    if canHear || meterPreview != nil {
+                        MicLevelMeter(preview: meterPreview).frame(maxWidth: 380)
                         Text("Can't talk right now? Type instead:").font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                     }
                     if model.engine.isRunning { AskField(compact: true) }
@@ -835,6 +975,7 @@ private struct DoneStep: View {
                 Bullet(symbol: "command", text: "\u{201C}Take control\u{201D} to give commands. \u{201C}Stand down\u{201D} to stop.")
                 Bullet(symbol: "bubble.left", text: "\u{201C}Hey Vox\u{201D} to ask a question or chat.")
                 Bullet(symbol: "keyboard", text: "\u{201C}Start typing\u{201D} to dictate into any text field.")
+                Bullet(symbol: "option", text: "Or hold the right \u{2325} Option key, talk, and let go. No wake word needed.")
             }
         }
     }

@@ -64,9 +64,10 @@ struct APIClient {
     func say(_ text: String) async throws { try await post("say", ["text": .string(text)]) }
     func setPaused(_ paused: Bool) async throws { try await post("listening", ["paused": .bool(paused)]) }
     /// The stop button: halts speech, a pending brain call and any agent run. Returns what stopped.
-    func stop() async throws -> [String] {
+    /// `sleep` also drops Vox out of the mode it's in, back to idle (the on-screen ■ button).
+    func stop(sleep: Bool = false) async throws -> [String] {
         struct R: Decodable { var stopped: [String] }
-        let r: R = try await send("stop", method: "POST", body: [String: JSONValue]())
+        let r: R = try await send("stop", method: "POST", body: ["sleep": JSONValue.bool(sleep)])
         return r.stopped
     }
     func restart() async throws { try await post("restart") }
@@ -74,6 +75,9 @@ struct APIClient {
 
     /// URL for the live conversation websocket.
     var conversationStream: URL { URL(string: "ws://127.0.0.1:\(port)/api/conversation/stream")! }
+
+    /// URL for the corner indicator's live events (listening / heard / mode changed).
+    var hudStream: URL { URL(string: "ws://127.0.0.1:\(port)/api/hud/stream")! }
 }
 
 /// Decodes any (or no) response body. Used where only success matters.

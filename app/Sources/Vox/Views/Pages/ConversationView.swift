@@ -11,13 +11,12 @@ struct ConversationView: View {
                         LazyVStack(spacing: 6) {
                             if model.turns.isEmpty {
                                 ContentUnavailableView("No conversation yet", systemImage: "bubble.left.and.bubble.right",
-                                                       description: Text("What you say to Vox, and what it says back, appears here."))
+                                                       description: Text("What you say, what Vox says back, and anything your agents report appears here — each labelled with who said it."))
                                     .padding(.top, 80)
                             }
                             ForEach(Array(model.turns.enumerated()), id: \.element.id) { i, turn in
-                                if showsTime(at: i) {
-                                    Text(turn.date?.formatted(date: .abbreviated, time: .shortened) ?? "")
-                                        .font(.caption).foregroundStyle(.tertiary)
+                                if showsHeader(at: i) {
+                                    SpeakerHeader(turn: turn)
                                         .padding(.top, i == 0 ? 0 : 14).padding(.bottom, 2)
                                 }
                                 Bubble(turn: turn).id(turn.id)
@@ -41,10 +40,37 @@ struct ConversationView: View {
         }
     }
 
-    /// A timestamp row before the first turn and after any gap of 10+ minutes.
-    private func showsTime(at i: Int) -> Bool {
-        guard i > 0, let a = model.turns[i - 1].date, let b = model.turns[i].date else { return i == 0 }
+    /// A source+time header before the first turn, whenever the speaker changes, and after a 10+
+    /// minute gap — so every run of messages is labelled with who said it and when.
+    private func showsHeader(at i: Int) -> Bool {
+        guard i > 0 else { return true }
+        let prev = model.turns[i - 1], cur = model.turns[i]
+        if prev.speaker != cur.speaker { return true }
+        guard let a = prev.date, let b = cur.date else { return false }
         return b.timeIntervalSince(a) > 600
+    }
+}
+
+/// "You" / "Vox" / an agent's name, with the time, aligned to the bubble it heads.
+private struct SpeakerHeader: View {
+    var turn: Turn
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if turn.isUser { Spacer(minLength: 0) }
+            if turn.isAgent {
+                Image(systemName: "cpu").font(.caption2)
+                    .foregroundStyle(Color.orange)
+            }
+            Text(turn.sourceLabel)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(turn.isAgent ? Color.orange : .secondary)
+            if let d = turn.date {
+                Text(d.formatted(date: .omitted, time: .shortened))
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            if !turn.isUser { Spacer(minLength: 0) }
+        }
     }
 }
 
@@ -57,11 +83,17 @@ private struct Bubble: View {
     /// `LazySubviewPlacements` in the sample). Long turns start collapsed; "Show more" opens one.
     private var isLong: Bool { turn.text.count > 600 || turn.text.filter(\.isNewline).count > 10 }
 
+    private var background: AnyShapeStyle {
+        if turn.isUser { return AnyShapeStyle(Color.accentColor.gradient) }
+        if turn.isAgent { return AnyShapeStyle(Color.orange.opacity(0.16)) }
+        return AnyShapeStyle(.quaternary)
+    }
+
     var body: some View {
         HStack {
             if turn.isUser { Spacer(minLength: 80) }
             VStack(alignment: .leading, spacing: 4) {
-                Text(turn.text)
+                Text(turn.displayText)
                     .lineLimit(isLong && !expanded ? 8 : nil)
                     .textSelection(.enabled)
                 if isLong {
@@ -72,10 +104,17 @@ private struct Bubble: View {
             }
             .padding(.horizontal, 13).padding(.vertical, 8)
             .foregroundStyle(turn.isUser ? Color.white : Color.primary)
-            .background(turn.isUser ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(.quaternary),
-                        in: RoundedRectangle(cornerRadius: 17, style: .continuous))
-            .help(turn.kind.map { "Handled as: \($0)" } ?? "")
+            .background(background, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .help(helpText)
             if !turn.isUser { Spacer(minLength: 80) }
         }
+    }
+
+    /// Exact time (and how it was handled) on hover, so every single message is timestamped.
+    private var helpText: String {
+        var parts: [String] = []
+        if let d = turn.date { parts.append(d.formatted(date: .abbreviated, time: .standard)) }
+        if let k = turn.kind, k != "agent" { parts.append("Handled as: \(k)") }
+        return parts.joined(separator: "\n")
     }
 }

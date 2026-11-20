@@ -34,6 +34,7 @@ final class AppModel {
         guard !booted else { return }
         booted = true
         HoldToTalk.shared.start()
+        HUD.shared.start(self)
         Task { await watchEngine() }
     }
 
