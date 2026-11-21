@@ -19,6 +19,7 @@ from vox.paths import DATA_DIR
 
 import json
 import os
+import random
 import time
 
 _PATH = DATA_DIR / "agents.json"
@@ -61,6 +62,7 @@ def register(name: str, **meta) -> dict:
         "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     entry.update(meta)
+    explicit_voice = "kokoroVoice" in meta
 
     _PATH.parent.mkdir(parents=True, exist_ok=True)
     fh = None
@@ -72,6 +74,8 @@ def register(name: str, **meta) -> dict:
         fh = None  # no flock here → accept the small race rather than fail to register
     try:
         data = _read()
+        if not explicit_voice:
+            entry["kokoroVoice"] = _voice_for(data, clean.lower())
         data[clean.lower()] = entry
         _write(data)
     finally:
@@ -85,6 +89,52 @@ def register(name: str, **meta) -> dict:
     return entry
 
 
+# --- a voice of its own --------------------------------------------------------------------------
+# A name only helps once it's been said. Giving each agent its own voice means you know who's
+# talking from the first word, and get better at it the more you hear them. Picked at random when
+# the agent registers, from the voices no other running agent has, and never Vox's own voice.
+
+def voice_pool() -> list[str]:
+    """The Kokoro voices agents are given (the same English set the voice settings offer)."""
+    from vox.web.settings_store import _KOKORO_VOICE_OPTIONS
+    return [o["value"] for o in _KOKORO_VOICE_OPTIONS]
+
+
+def _system_voice() -> str:
+    """Vox's own Kokoro voice, which no agent should sound like."""
+    try:
+        from vox.web import settings_store
+        return settings_store.get("kokoro_voice") or "af_heart"
+    except Exception:
+        return "af_heart"
+
+
+def _alive(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours
+    return True
+
+
+def _voice_for(data: dict, key: str) -> str:
+    """The voice for the agent registering as ``key``. Re-registering from the same process keeps
+    its voice; otherwise a random one that no other live agent is using, falling back to any voice
+    but Vox's own once they're all taken."""
+    prior = data.get(key) or {}
+    if prior.get("pid") == os.getpid() and prior.get("kokoroVoice"):
+        return prior["kokoroVoice"]
+    pool = [v for v in voice_pool() if v != _system_voice()]
+    taken = {e.get("kokoroVoice") for k, e in data.items()
+             if k != key and _alive(int(e.get("pid") or 0))}
+    free = [v for v in pool if v not in taken]
+    return random.choice(free or pool)
+
+
 def name_for(session_id: str = "", cwd: str = "") -> str:
     """Which named agent a Claude Code hook came from. Hooks carry the session id and working
     directory but not a name; an MCP server registers its name with its own cwd, so a cwd shared by
@@ -95,7 +145,10 @@ def name_for(session_id: str = "", cwd: str = "") -> str:
         for e in data.values():
             if session_id in e.get("sessions", []):
                 return e["name"]
-    matches = [e for e in data.values() if cwd and e.get("cwd") == cwd]
+    # Only live agents: entries left by sessions that have ended would otherwise make every folder
+    # they ran in ambiguous, and the hook would fall back to "An agent".
+    matches = [e for e in data.values()
+               if cwd and e.get("cwd") == cwd and _alive(int(e.get("pid") or 0))]
     if len(matches) != 1:
         return ""
     entry = matches[0]
