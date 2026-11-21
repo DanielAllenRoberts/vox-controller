@@ -542,6 +542,13 @@ def create_app() -> FastAPI:
         from .. import agents
         return {"agents": agents.live_agents()}
 
+    @app.post("/api/agents/{name}/focus")
+    async def post_agent_focus(name: str) -> dict:
+        """Bring a named agent's terminal tab to the front (menu bar: click an agent)."""
+        from .. import agents
+        ok, why = await asyncio.to_thread(agents.focus, name)
+        return {"ok": ok, "error": why}
+
     @app.post("/api/agents/event")
     async def post_agent_event(request: Request):
         """Receives Claude Code hook events (configure a `type: "http"` hook pointing here). A

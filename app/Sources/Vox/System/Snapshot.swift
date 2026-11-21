@@ -70,7 +70,7 @@ enum Snapshotter {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).background(.gray))
                 }, CGSize(width: 380, height: 120)))
             }
-            shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 480)))
+            shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 600)))
 
             for (name, view, size) in shots where only.map({ name.contains($0) }) ?? true {
                 if let png = render(view(), size: size) {

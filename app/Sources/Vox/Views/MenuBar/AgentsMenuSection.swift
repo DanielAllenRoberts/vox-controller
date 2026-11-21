@@ -7,6 +7,7 @@ struct AgentsMenuSection: View {
     @Environment(AppModel.self) private var model
     @State private var agents: [LiveAgent] = []
     @State private var expanded: String?
+    @State private var failed: [String: String] = [:]
 
     var body: some View {
         // A VStack, not a Group: a Group hands its modifiers to its children, and while the list is
@@ -40,6 +41,17 @@ struct AgentsMenuSection: View {
                 Text(a.folder).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 0)
                 if let latest { Text(Self.ago(latest.at)).font(.caption2).foregroundStyle(.tertiary) }
+                Button { expanded = open ? nil : a.name } label: {
+                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .frame(width: 18, height: 18).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .help(open ? "Hide updates" : "Show recent updates")
+                .accessibilityLabel(open ? "Hide \(a.name)'s updates" : "Show \(a.name)'s updates")
+            }
+            if let why = failed[a.name] {
+                Text(why).font(.caption2).foregroundStyle(.orange)
             }
             if open {
                 if a.updates.isEmpty {
@@ -62,9 +74,21 @@ struct AgentsMenuSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(open ? 0.8 : 0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(Rectangle())
-        .onTapGesture { expanded = open ? nil : a.name }
-        .accessibilityElement(children: .combine)
-        .accessibilityHint(open ? "Collapse" : "Show recent updates")
+        .onTapGesture { Task { await switchTo(a.name) } }
+        .help("Switch to \(a.name)'s terminal tab")
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Switches to its terminal tab")
+    }
+
+    /// Bring the agent's terminal tab to the front. A failure shows under the row for a few seconds.
+    private func switchTo(_ name: String) async {
+        struct R: Decodable { var ok: Bool; var error: String }
+        let r: R? = try? await model.api.send("agents/\(name)/focus", method: "POST", body: [String: JSONValue]())
+        guard let r, !r.ok else { failed[name] = nil; return }
+        failed[name] = r.error.isEmpty ? "Couldn't switch to \(name)." : r.error
+        try? await Task.sleep(for: .seconds(5))
+        failed[name] = nil
     }
 
     /// Refresh every few seconds while the panel is open; the task ends when it closes.

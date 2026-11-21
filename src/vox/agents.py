@@ -20,6 +20,8 @@ from vox.paths import DATA_DIR
 import json
 import os
 import random
+import re
+import subprocess
 import time
 
 _PATH = DATA_DIR / "agents.json"
@@ -207,6 +209,108 @@ def live_agents(limit: int = 5) -> list[dict]:
         })
     out.sort(key=lambda a: a["updates"][0]["at"] if a["updates"] else 0, reverse=True)
     return out
+
+
+# --- switch to an agent's terminal tab -----------------------------------------------------------
+# Clicking an agent in the menu bar brings its terminal tab forward. The agent's MCP server shares
+# its session's tty; walking up its parents reaches the terminal app. Ghostty (1.4+) and Terminal
+# both script tabs by tty.
+
+_FOCUS_SCRIPTS = {
+    "Ghostty": """tell application "Ghostty"
+    repeat with w in windows
+        repeat with t in tabs of w
+            repeat with s in terminals of t
+                if tty of s is "{tty}" then
+                    select tab t
+                    focus s
+                    activate
+                    return "ok"
+                end if
+            end repeat
+        end repeat
+    end repeat
+    return "missing"
+end tell""",
+    "Terminal": """tell application "Terminal"
+    repeat with w in windows
+        repeat with t in tabs of w
+            if tty of t is "{tty}" then
+                set selected of t to true
+                set index of w to 1
+                activate
+                return "ok"
+            end if
+        end repeat
+    end repeat
+    return "missing"
+end tell""",
+}
+
+
+def _ps(pid: int) -> tuple[int, str, str] | None:
+    """(parent pid, tty, command) for ``pid``, or None if it isn't running."""
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=,tty=,comm=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=3).stdout.strip()
+    except Exception:
+        return None
+    parts = out.split(None, 2)
+    if len(parts) < 3 or not parts[0].isdigit():
+        return None
+    return int(parts[0]), parts[1], parts[2]
+
+
+def _osascript(script: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return False, str(exc)
+    if r.returncode != 0:
+        return False, (r.stderr or "").strip()[:200] or "The terminal didn't answer."
+    if r.stdout.strip() != "ok":
+        return False, "That terminal tab isn't open any more."
+    return True, ""
+
+
+def terminal_for(name: str) -> tuple[str, str] | None:
+    """(terminal app, tty device) that agent ``name`` runs in, e.g. ("Ghostty", "/dev/ttys015")."""
+    entry = get(name)
+    if entry is None:
+        return None
+    # The terminal is the OUTERMOST app on the way up: the agent's own Python can itself run from an
+    # app bundle (Homebrew's Python.app), so the first match isn't the answer.
+    pid, tty, app = int(entry.get("pid") or 0), "", ""
+    for _ in range(16):
+        row = _ps(pid)
+        if row is None:
+            break
+        ppid, t, command = row
+        if not tty and t not in ("", "??"):
+            tty = "/dev/" + t
+        bundle = re.search(r"/([^/]+)\.app/Contents/MacOS/", command)
+        if bundle:
+            app = bundle.group(1)
+        if ppid <= 1:
+            break
+        pid = ppid
+    return (app, tty) if app and tty else None
+
+
+def focus(name: str) -> tuple[bool, str]:
+    """Bring agent ``name``'s terminal tab to the front. Returns (ok, why not)."""
+    if get(name) is None:
+        return False, f"No running agent called {name}."
+    found = terminal_for(name)
+    if found is None:
+        return False, f"Can't find the terminal {name} is running in."
+    app, tty = found
+    script = _FOCUS_SCRIPTS.get(app)
+    if script is None:
+        return False, f"Switching to {app} isn't supported yet (Ghostty and Terminal are)."
+    if not re.fullmatch(r"/dev/ttys\d+", tty):
+        return False, f"Can't find the terminal {name} is running in."
+    return _osascript(script.replace("{tty}", tty))
 
 
 def name_for(session_id: str = "", cwd: str = "") -> str:
