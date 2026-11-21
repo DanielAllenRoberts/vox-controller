@@ -46,9 +46,18 @@ def installed_apps(limit: int = 120) -> list[str]:
     return sorted(n for n in names if n not in _BORING)[:limit]
 
 
-def preview(engine: str, voice: str) -> None:
-    """Say the preview line in a voice, in the background. No AI involved."""
+def preview(engine: str, voice: str) -> dict:
+    """Say the preview line in a voice, in the background. No AI involved. Returns {"ready", ...}.
+
+    Kokoro voices download (~350 MB) on first use. Until they're ready nothing is queued, since a
+    preview that plays minutes later, or not at all, is worse than none. The download is started
+    instead, and the status returned so setup can show it."""
     from vox import tts
+
+    if engine != "say":
+        status = tts.prepare_kokoro()
+        if status["state"] != "ready":
+            return {"ready": False, **status}
 
     def run():
         try:
@@ -59,6 +68,7 @@ def preview(engine: str, voice: str) -> None:
         except Exception:
             pass
     threading.Thread(target=run, daemon=True).start()
+    return {"ready": True, "state": "ready"}
 
 
 def questions() -> dict:
