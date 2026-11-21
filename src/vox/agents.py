@@ -135,6 +135,80 @@ def _voice_for(data: dict, key: str) -> str:
     return random.choice(free or pool)
 
 
+# --- updates: what each agent has said, for the menu bar's Agents list ----------------------------
+# vox-speak's spoken lines and silent notices, and approval requests from the Claude Code hook, are
+# kept as JSON lines. Each carries the pid of the agent that sent it, so a later session reusing a
+# name starts clean. Trimmed to the newest _UPDATES_KEEP once it doubles.
+
+_UPDATES = DATA_DIR / "agent_updates.jsonl"
+_UPDATES_KEEP = 300
+
+
+def add_update(name: str, text: str, kind: str) -> None:
+    """Record that registered agent ``name`` said ``text``. ``kind``: spoke / notice / approval.
+    Unknown names are ignored: the list only shows agents that registered."""
+    entry = get(name)
+    text = " ".join((text or "").split())
+    if entry is None or not text:
+        return
+    row = {"at": time.time(), "name": entry["name"], "pid": entry.get("pid"), "kind": kind,
+           "text": text[:400]}
+    _UPDATES.parent.mkdir(parents=True, exist_ok=True)
+    with open(_UPDATES, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+    _trim_updates()
+
+
+def _trim_updates() -> None:
+    try:
+        lines = _UPDATES.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    if len(lines) <= _UPDATES_KEEP * 2:
+        return
+    tmp = _UPDATES.with_suffix(".jsonl.tmp")
+    tmp.write_text("\n".join(lines[-_UPDATES_KEEP:]) + "\n", encoding="utf-8")
+    os.replace(tmp, _UPDATES)
+
+
+def _read_updates() -> list[dict]:
+    try:
+        rows = _UPDATES.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    out = []
+    for line in rows:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue  # a half-written line from a concurrent append
+    return out
+
+
+def live_agents(limit: int = 5) -> list[dict]:
+    """The registered agents whose process is still running, each with its newest ``limit``
+    updates (newest first). Agents with the most recent news come first."""
+    updates = _read_updates()
+    out = []
+    for e in _read().values():
+        pid = int(e.get("pid") or 0)
+        if not _alive(pid):
+            continue
+        mine = [u for u in updates
+                if str(u.get("name", "")).lower() == e["name"].lower() and u.get("pid") == pid]
+        mine.reverse()
+        out.append({
+            "name": e["name"],
+            "folder": os.path.basename(str(e.get("cwd", "")).rstrip("/")),
+            "cwd": e.get("cwd", ""),
+            "kokoroVoice": e.get("kokoroVoice", ""),
+            "registeredAt": e.get("registered_at", ""),
+            "updates": mine[:limit],
+        })
+    out.sort(key=lambda a: a["updates"][0]["at"] if a["updates"] else 0, reverse=True)
+    return out
+
+
 def name_for(session_id: str = "", cwd: str = "") -> str:
     """Which named agent a Claude Code hook came from. Hooks carry the session id and working
     directory but not a name; an MCP server registers its name with its own cwd, so a cwd shared by

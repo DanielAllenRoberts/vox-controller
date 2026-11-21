@@ -99,6 +99,17 @@ def _mcp_voice():
         )
 
 
+def _record(text: str, kind: str) -> None:
+    """Keep what this named agent said for the Agents list in Vox's menu bar panel."""
+    if not _AGENT_NAME:
+        return
+    try:
+        from vox import agents
+        agents.add_update(_AGENT_NAME, text, kind)
+    except Exception:
+        pass  # a missing list entry must never stop the agent from talking
+
+
 def _say(text: str, voice: str, rate: int) -> str:
     text = (text or "").strip()
     if not text:
@@ -107,6 +118,7 @@ def _say(text: str, voice: str, rate: int) -> str:
     # something finished but not what. A registered name goes in front of the words. Prefix first,
     # THEN truncate, so the cap covers what actually gets spoken.
     if _AGENT_NAME:
+        _record(text, "spoke")
         text = f"{_AGENT_NAME} here — {text}"
     text = text[:_MAX_CHARS]
     engine, say_voice, kokoro_voice = _mcp_voice()
@@ -199,6 +211,7 @@ def notify(text: str, source: str = "", corner: str = "", duration: float = -1) 
     except Exception as exc:  # bare run outside the repo venv — nothing to draw with
         return f"(notify unavailable: {exc})"
     try:
+        _record(text, "notice")
         shown = bubble.show(text, source=source or _AGENT_NAME,
                             corner=corner, duration=duration)
     except Exception as exc:  # never crash the MCP client over a failed notification

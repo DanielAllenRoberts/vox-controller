@@ -536,6 +536,12 @@ def create_app() -> FastAPI:
         return {"ok": not failed, "reply": reply[:300], "ms": round(ms)}
 
     # --- Agent hooks: "David needs you" (research/agent-messaging.md, feature 1) ---
+    @app.get("/api/agents")
+    def get_agents() -> dict:
+        """Your running named Claude sessions and what each has said lately (menu bar Agents list)."""
+        from .. import agents
+        return {"agents": agents.live_agents()}
+
     @app.post("/api/agents/event")
     async def post_agent_event(request: Request):
         """Receives Claude Code hook events (configure a `type: "http"` hook pointing here). A
