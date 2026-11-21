@@ -47,6 +47,10 @@ _DEFAULT_CUE = "/System/Library/Sounds/Tink.aiff"
 # up front; otherwise the agent names ITSELF at runtime by calling `register_agent`, which is the
 # self-registration model that design settled on — no central config guessing which terminal is who.
 _AGENT_NAME = os.environ.get("VOX_AGENT_NAME", "").strip()
+# The Kokoro voice the registry gave this agent (agents.register picks one at random, unused by any
+# other running agent). Empty until registration; then every spoken line uses it, so you learn to
+# tell agents apart by ear.
+_AGENT_VOICE = ""
 
 
 def _cue_path():
@@ -106,6 +110,7 @@ def _say(text: str, voice: str, rate: int) -> str:
         text = f"{_AGENT_NAME} here — {text}"
     text = text[:_MAX_CHARS]
     engine, say_voice, kokoro_voice = _mcp_voice()
+    kokoro_voice = _AGENT_VOICE or kokoro_voice
     # Prefer Vox's own TTS engine (supports the neural Kokoro engine + the independent MCP voice);
     # fall back to a bare `say` if the vox package isn't importable from this process.
     try:
@@ -205,21 +210,25 @@ def notify(text: str, source: str = "", corner: str = "", duration: float = -1) 
 def register_agent(name: str) -> str:
     """Give THIS agent a name, so the user can tell which one is talking.
 
-    Call this when the user names you ("your name is David"). From then on your spoken heads-up is
-    prefixed with the name and your notification bubbles are labelled with it — which is what makes
-    several CLIs running at once distinguishable rather than a chorus of anonymous voices.
+    Call this when the user names you ("your name is David"), or, if you have no name yet, choose
+    one yourself: any short, distinctive first name that list_agents doesn't show already in use.
+    From then on your spoken heads-up is prefixed with the name, your notification bubbles are
+    labelled with it, and you speak in a voice of your own (picked at random, unused by any other
+    running agent), which is what makes several CLIs running at once distinguishable rather than a
+    chorus of anonymous voices.
 
     Args:
         name: The name to answer to (e.g. "David").
     """
-    global _AGENT_NAME
+    global _AGENT_NAME, _AGENT_VOICE
     try:
         from vox import agents
         entry = agents.register(name)
     except Exception as exc:
         return f"(couldn't register: {exc})"
     _AGENT_NAME = entry["name"]
-    return f"registered as {entry['name']!r} (pid {entry['pid']})"
+    _AGENT_VOICE = entry.get("kokoroVoice", "")
+    return f"registered as {entry['name']!r} (pid {entry['pid']}, voice {_AGENT_VOICE or 'default'})"
 
 
 @mcp.tool()
