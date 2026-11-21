@@ -70,6 +70,14 @@ def paused() -> bool:
     return on and time.time() - since < PAUSE_MAX
 
 
+def paused_since(t: float) -> bool:
+    """True if speech is paused now, or was paused at some point after wall-clock time ``t``.
+    The file only keeps the latest change, so any change after ``t`` counts: a pause, or a resume
+    (which can only follow a pause), or a pause that has since run out at PAUSE_MAX."""
+    _, changed = _pause_state()
+    return paused() or changed >= t
+
+
 def set_paused(value: bool) -> None:
     try:
         _PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)

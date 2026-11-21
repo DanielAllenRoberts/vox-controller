@@ -162,7 +162,8 @@ def _warn_kokoro_fallback(e: Exception) -> None:
 
 
 def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
-               rate=None, speed=None, label: str = "", before=None) -> None:
+               rate=None, speed=None, label: str = "", before=None,
+               drop_if_paused: bool = False) -> bool:
     """Speak `text` with EXPLICIT engine/voice overrides, bypassing the active persona's voice and
     the global tts_enabled gate. Used by the vox-speak MCP so the assistant's heads-up voice can be
     DIFFERENT from the system's (and can independently use the neural Kokoro engine). `engine` "" =
@@ -171,14 +172,25 @@ def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None
 
     `label` names this speaker in the shared speech queue (e.g. a registered agent name), so the
     lock file says who you're waiting for. `before` runs once our turn comes, just ahead of the
-    words (the MCP's chime), so it can't sound over whoever is still speaking."""
+    words (the MCP's chime), so it can't sound over whoever is still speaking.
+
+    `drop_if_paused` (agents): don't queue behind a pause. A message asked for while speech is
+    paused, or whose turn hadn't come when a pause began, is dropped rather than kept for resume;
+    otherwise every agent's backlog plays back to back the moment the pause lifts. Returns False
+    when the text was dropped, True otherwise."""
     if not text.strip():
-        return
+        return True
+    asked = time.time()
+    if drop_if_paused and speech_lock.paused():
+        return False
     with speech_lock.hold(label or "mcp"):
+        if drop_if_paused and speech_lock.paused_since(asked):
+            return False
         if before is not None:
             before()
         _speak_with_now(text, engine=engine, say_voice=say_voice, kokoro_voice=kokoro_voice,
                         rate=rate, speed=speed)
+    return True
 
 
 def _speak_with_now(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
