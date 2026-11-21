@@ -124,6 +124,21 @@ def test_api_focus():
     assert len(ran) == 1
 
 
+
+def test_speech_state_marks_a_registered_agent_as_switchable():
+    from vox import runtime, speech_lock
+    originals = (speech_lock.holder, speech_lock.paused)
+    speech_lock.paused = lambda: False
+    try:
+        _plant("Jeff", 500)
+        speech_lock.holder = lambda: "Jeff (pid 500)"
+        assert runtime.speech_state() == {"who": "Jeff", "paused": False, "agent": True}
+        speech_lock.holder = lambda: "mcp (pid 501)"   # an agent that never took a name
+        assert runtime.speech_state()["agent"] is False
+    finally:
+        speech_lock.holder, speech_lock.paused = originals
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
