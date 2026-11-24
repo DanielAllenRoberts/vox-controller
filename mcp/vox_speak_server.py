@@ -127,7 +127,7 @@ def _say(text: str, voice: str, rate: int) -> str:
     # fall back to a bare `say` if the vox package isn't importable from this process.
     try:
         from vox import tts
-        tts.speak_with(
+        spoke = tts.speak_with(
             text,
             engine=engine,
             say_voice=voice or say_voice,
@@ -135,7 +135,10 @@ def _say(text: str, voice: str, rate: int) -> str:
             rate=(rate or None),
             label=_AGENT_NAME or "mcp",   # names this speaker in the shared speech queue
             before=_play_cue,   # short chime first, once it's our turn, so the voice doesn't come out of nowhere
+            drop_if_paused=True,   # the user paused speech: don't save this up to play on resume
         )
+        if spoke is False:
+            return "(not spoken: the user has paused speech in Vox; don't retry this message)"
         return f"spoke aloud: {text[:80]!r}"
     except Exception:
         pass  # vox package not importable here → bare `say` fallback below
