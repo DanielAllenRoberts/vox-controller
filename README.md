@@ -89,8 +89,9 @@ Accessibility permissions instead of Vox). Requires macOS 14+ and the Xcode Comm
 **Requirements:** macOS (Apple Silicon) and [uv](https://docs.astral.sh/uv/). The project pins **Python 3.12** (uv fetches it for you).
 
 ```bash
-uv sync          # create the venv + install deps
+uv sync          # create the venv + install deps (pytest included, as a dev dependency)
 uv run vox       # start Vox: say "Hey Vox", then speak — your words print to the console
+uv run pytest    # run the tests
 ```
 
 - First run downloads the wake-word and Whisper models (one-time).

@@ -47,6 +47,10 @@ _DEFAULT_CUE = "/System/Library/Sounds/Tink.aiff"
 # up front; otherwise the agent names ITSELF at runtime by calling `register_agent`, which is the
 # self-registration model that design settled on — no central config guessing which terminal is who.
 _AGENT_NAME = os.environ.get("VOX_AGENT_NAME", "").strip()
+# The Kokoro voice the registry gave this agent (agents.register picks one at random, unused by any
+# other running agent). Empty until registration; then every spoken line uses it, so you learn to
+# tell agents apart by ear.
+_AGENT_VOICE = ""
 
 
 def _cue_path():
@@ -95,6 +99,17 @@ def _mcp_voice():
         )
 
 
+def _record(text: str, kind: str) -> None:
+    """Keep what this named agent said for the Agents list in Vox's menu bar panel."""
+    if not _AGENT_NAME:
+        return
+    try:
+        from vox import agents
+        agents.add_update(_AGENT_NAME, text, kind)
+    except Exception:
+        pass  # a missing list entry must never stop the agent from talking
+
+
 def _vox_quit() -> str:
     """Why nothing was said, if Vox isn't running; "" if it is. Quitting Vox (say, before leaving
     the Mac) means agents should stop talking to the room, not carry on without it."""
@@ -118,14 +133,16 @@ def _say(text: str, voice: str, rate: int) -> str:
     # something finished but not what. A registered name goes in front of the words. Prefix first,
     # THEN truncate, so the cap covers what actually gets spoken.
     if _AGENT_NAME:
+        _record(text, "spoke")
         text = f"{_AGENT_NAME} here — {text}"
     text = text[:_MAX_CHARS]
     engine, say_voice, kokoro_voice = _mcp_voice()
+    kokoro_voice = _AGENT_VOICE or kokoro_voice
     # Prefer Vox's own TTS engine (supports the neural Kokoro engine + the independent MCP voice);
     # fall back to a bare `say` if the vox package isn't importable from this process.
     try:
         from vox import tts
-        tts.speak_with(
+        spoke = tts.speak_with(
             text,
             engine=engine,
             say_voice=voice or say_voice,
@@ -133,7 +150,10 @@ def _say(text: str, voice: str, rate: int) -> str:
             rate=(rate or None),
             label=_AGENT_NAME or "mcp",   # names this speaker in the shared speech queue
             before=_play_cue,   # short chime first, once it's our turn, so the voice doesn't come out of nowhere
+            drop_if_paused=True,   # the user paused speech: don't save this up to play on resume
         )
+        if spoke is False:
+            return "(not spoken: the user has paused speech in Vox; don't retry this message)"
         return f"spoke aloud: {text[:80]!r}"
     except Exception:
         pass  # vox package not importable here → bare `say` fallback below
@@ -212,6 +232,7 @@ def notify(text: str, source: str = "", corner: str = "", duration: float = -1) 
     except Exception as exc:  # bare run outside the repo venv — nothing to draw with
         return f"(notify unavailable: {exc})"
     try:
+        _record(text, "notice")
         shown = bubble.show(text, source=source or _AGENT_NAME,
                             corner=corner, duration=duration)
     except Exception as exc:  # never crash the MCP client over a failed notification
@@ -223,21 +244,25 @@ def notify(text: str, source: str = "", corner: str = "", duration: float = -1) 
 def register_agent(name: str) -> str:
     """Give THIS agent a name, so the user can tell which one is talking.
 
-    Call this when the user names you ("your name is David"). From then on your spoken heads-up is
-    prefixed with the name and your notification bubbles are labelled with it — which is what makes
-    several CLIs running at once distinguishable rather than a chorus of anonymous voices.
+    Call this when the user names you ("your name is David"), or, if you have no name yet, choose
+    one yourself: any short, distinctive first name that list_agents doesn't show already in use.
+    From then on your spoken heads-up is prefixed with the name, your notification bubbles are
+    labelled with it, and you speak in a voice of your own (picked at random, unused by any other
+    running agent), which is what makes several CLIs running at once distinguishable rather than a
+    chorus of anonymous voices.
 
     Args:
         name: The name to answer to (e.g. "David").
     """
-    global _AGENT_NAME
+    global _AGENT_NAME, _AGENT_VOICE
     try:
         from vox import agents
         entry = agents.register(name)
     except Exception as exc:
         return f"(couldn't register: {exc})"
     _AGENT_NAME = entry["name"]
-    return f"registered as {entry['name']!r} (pid {entry['pid']})"
+    _AGENT_VOICE = entry.get("kokoroVoice", "")
+    return f"registered as {entry['name']!r} (pid {entry['pid']}, voice {_AGENT_VOICE or 'default'})"
 
 
 @mcp.tool()

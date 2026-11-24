@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 
@@ -162,7 +163,8 @@ def _warn_kokoro_fallback(e: Exception) -> None:
 
 
 def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
-               rate=None, speed=None, label: str = "", before=None) -> None:
+               rate=None, speed=None, label: str = "", before=None,
+               drop_if_paused: bool = False) -> bool:
     """Speak `text` with EXPLICIT engine/voice overrides, bypassing the active persona's voice and
     the global tts_enabled gate. Used by the vox-speak MCP so the assistant's heads-up voice can be
     DIFFERENT from the system's (and can independently use the neural Kokoro engine). `engine` "" =
@@ -171,14 +173,25 @@ def speak_with(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None
 
     `label` names this speaker in the shared speech queue (e.g. a registered agent name), so the
     lock file says who you're waiting for. `before` runs once our turn comes, just ahead of the
-    words (the MCP's chime), so it can't sound over whoever is still speaking."""
+    words (the MCP's chime), so it can't sound over whoever is still speaking.
+
+    `drop_if_paused` (agents): don't queue behind a pause. A message asked for while speech is
+    paused, or whose turn hadn't come when a pause began, is dropped rather than kept for resume;
+    otherwise every agent's backlog plays back to back the moment the pause lifts. Returns False
+    when the text was dropped, True otherwise."""
     if not text.strip():
-        return
+        return True
+    asked = time.time()
+    if drop_if_paused and speech_lock.paused():
+        return False
     with speech_lock.hold(label or "mcp"):
+        if drop_if_paused and speech_lock.paused_since(asked):
+            return False
         if before is not None:
             before()
         _speak_with_now(text, engine=engine, say_voice=say_voice, kokoro_voice=kokoro_voice,
                         rate=rate, speed=speed)
+    return True
 
 
 def _speak_with_now(text: str, *, engine: str = "", say_voice=None, kokoro_voice=None,
@@ -334,6 +347,12 @@ def _say_timeout(text: str, rate=None) -> float:
 # is cached across calls so the load/download cost is paid once.
 
 _KOKORO = None  # cached kokoro_onnx.Kokoro instance once loaded
+# One download/load at a time: setup's voice step, a preview and a reply can all ask at once, and
+# two downloads would race on the same .part file.
+_KOKORO_LOCK = threading.Lock()
+# What setup's voice step shows while the ~350 MB first download runs (see kokoro_status).
+# state: idle (not asked for yet) / downloading / loading / ready / error.
+_KOKORO_PREP: dict = {"state": "idle", "downloaded_bytes": 0, "error": ""}
 
 # Combined model + voices files the kokoro-onnx library expects, from its GitHub release.
 _KOKORO_MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
@@ -346,26 +365,75 @@ def _kokoro_cache_dir() -> str:
     return d
 
 
-def _ensure_file(url: str, name: str) -> str:
-    """Download `url` to the kokoro cache as `name` on first use; return the local path."""
+def _ensure_file(url: str, name: str, progress=None) -> str:
+    """Download `url` to the kokoro cache as `name` on first use; return the local path.
+    `progress(n)` is called with each chunk's byte count as it arrives."""
     path = os.path.join(_kokoro_cache_dir(), name)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
     import urllib.request
     tmp = path + ".part"
-    urllib.request.urlretrieve(url, tmp)  # no auth needed for public release assets
+    hook = None
+    if progress is not None:
+        def hook(_blocks: int, block_size: int, _total: int) -> None:
+            progress(block_size)
+    urllib.request.urlretrieve(url, tmp, reporthook=hook)  # no auth needed for public release assets
     os.replace(tmp, path)
     return path
 
 
+def _count_download(n: int) -> None:
+    _KOKORO_PREP["state"] = "downloading"
+    _KOKORO_PREP["downloaded_bytes"] += n
+
+
 def _get_kokoro():
     """Lazily import kokoro-onnx, ensure the model + voices are present, and cache the instance."""
-    global _KOKORO
     if _KOKORO is not None:
         return _KOKORO
+    with _KOKORO_LOCK:
+        if _KOKORO is not None:  # someone else finished while we waited
+            return _KOKORO
+        try:
+            _load_kokoro()
+        except Exception as exc:
+            _KOKORO_PREP.update(state="error", error=str(exc) or type(exc).__name__)
+            raise
+        _KOKORO_PREP.update(state="ready", error="")
+        return _KOKORO
+
+
+def kokoro_status() -> dict:
+    """Where the Kokoro voices are: {"state", "downloadedMB", "error"} (see _KOKORO_PREP)."""
+    state = "ready" if _KOKORO is not None else _KOKORO_PREP["state"]
+    return {"state": state, "downloadedMB": _KOKORO_PREP["downloaded_bytes"] // (1024 * 1024),
+            "error": _KOKORO_PREP["error"]}
+
+
+def prepare_kokoro() -> dict:
+    """Start downloading and loading the Kokoro voices in the background, once. Returns the status
+    straight away. Setup calls this when the voice step opens, so the ~350 MB download runs while the
+    person reads the list instead of silently swallowing their first preview."""
+    if _KOKORO is None and _KOKORO_PREP["state"] in ("idle", "error"):
+        _KOKORO_PREP.update(state="loading", downloaded_bytes=0, error="")
+
+        def run() -> None:
+            try:
+                _get_kokoro()
+            except Exception:
+                pass  # recorded in _KOKORO_PREP for the voice step to show
+
+        threading.Thread(target=run, name="vox-kokoro-prepare", daemon=True).start()
+    return kokoro_status()
+
+
+def _load_kokoro() -> None:
+    """Download (if needed) and load the model. Called with _KOKORO_LOCK held."""
+    global _KOKORO
     from kokoro_onnx import Kokoro  # deferred: only imported on the kokoro path
-    model_path = _ensure_file(_KOKORO_MODEL_URL, "kokoro-v1.0.onnx")
-    voices_path = _ensure_file(_KOKORO_VOICES_URL, "voices-v1.0.bin")
+    model_path = _ensure_file(_KOKORO_MODEL_URL, "kokoro-v1.0.onnx", progress=_count_download)
+    voices_path = _ensure_file(_KOKORO_VOICES_URL, "voices-v1.0.bin", progress=_count_download)
+    _KOKORO_PREP["state"] = "loading"
     threads = CONFIG.kokoro_threads
     if threads > 0:
         # Kokoro(...) builds its InferenceSession with default options = one thread per core (all 10
@@ -379,7 +447,6 @@ def _get_kokoro():
         _KOKORO = Kokoro.from_session(sess, voices_path)
     else:
         _KOKORO = Kokoro(model_path, voices_path)
-    return _KOKORO
 
 
 def _speak_kokoro(text: str, voice=None, speed=None) -> bool:

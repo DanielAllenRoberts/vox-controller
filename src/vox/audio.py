@@ -61,7 +61,7 @@ class MicStream:
     """Streams mono int16 audio frames from the microphone via a callback queue."""
 
     def __init__(self, sample_rate: int, frame_samples: int, device: int | None = None,
-                 on_log=None, stall_restart_seconds: float = 12.0):
+                 on_log=None, stall_restart_seconds: float = 12.0, release_grace: float = 1.5):
         self._sample_rate = sample_rate
         self._frame_samples = frame_samples
         self._device = device
@@ -73,6 +73,13 @@ class MicStream:
         self._ever_healthy = False               # have we EVER received a frame? (guards restart loops)
         self._recovering = False                 # a background re-open is in flight
         self._recover_attempts = 0
+        # Paused → the stream is CLOSED, not just ignored (see frames()). `release_grace` keeps it
+        # open a moment after the talk key comes up, so a quick second press doesn't re-open it.
+        self._release_grace = release_grace
+        self._released = False
+        self._last_wanted = time.monotonic()
+        self._frame_seconds = frame_samples / sample_rate
+        self._silence = np.zeros(frame_samples, dtype=np.int16)
         self._stream = self._make_stream()
 
     def _log(self, msg: str) -> None:
@@ -103,8 +110,22 @@ class MicStream:
         audio-device change — opening an app that grabs audio, a Bluetooth/headphone switch): we
         re-open the stream in the background, and if audio still doesn't return within
         ``stall_restart_seconds`` we raise ``MicStreamDead`` so the daemon self-restarts, instead of
-        hanging silently in ``queue.get`` forever."""
+        hanging silently in ``queue.get`` forever.
+
+        While paused (and the talk key isn't held) the microphone is RELEASED: the stream is closed,
+        so Bluetooth headphones drop out of hands-free call mode and macOS's mic indicator goes out.
+        The loop is fed silent frames at the normal rate meanwhile, so typed input keeps working and
+        nothing looks like a stall. Unpausing, or holding the talk key, opens the mic again."""
         while True:
+            if not self._mic_wanted():
+                if not self._released and time.monotonic() - self._last_wanted >= self._release_grace:
+                    self._release()
+                if self._released:
+                    time.sleep(self._frame_seconds)
+                    yield self._silence
+                    continue
+            elif self._released:
+                self._reacquire()
             try:
                 frame = self._queue.get(timeout=3.0)
             except queue.Empty:
@@ -114,6 +135,39 @@ class MicStream:
             self._ever_healthy = True
             self._recover_attempts = 0
             yield frame
+
+    def _mic_wanted(self) -> bool:
+        from vox import runtime
+        if not runtime.paused or runtime.ptt_down():
+            self._last_wanted = time.monotonic()
+            return True
+        return False
+
+    def _release(self) -> None:
+        """Let go of the microphone while paused. Torn down off the main loop, like _recover."""
+        self._released = True
+        self._stall_since = None
+        old, self._stream = self._stream, None
+        self.flush()
+
+        def close() -> None:
+            try:
+                if old is not None:
+                    old.abort()
+                    old.close()
+            except Exception:
+                pass
+        threading.Thread(target=close, daemon=True).start()
+        self._log("🎙️  mic paused — microphone released.")
+
+    def _reacquire(self) -> None:
+        """Open the microphone again after a pause (or for the talk key while paused)."""
+        self._released = False
+        self._stall_since = None
+        self._log("🎙️  mic on.")
+        if not self._recovering:
+            self._recovering = True
+            threading.Thread(target=self._recover, kwargs={"announce": False}, daemon=True).start()
 
     def _on_stall(self) -> None:
         now = time.monotonic()
@@ -135,7 +189,7 @@ class MicStream:
         self._log(f"⚠️  mic input stalled — re-opening the audio stream (attempt {self._recover_attempts})…")
         threading.Thread(target=self._recover, daemon=True).start()
 
-    def _recover(self) -> None:
+    def _recover(self, announce: bool = True) -> None:
         """Re-open the input stream OFF the main loop. Tearing the old stream down (Pa_StopStream →
         CoreAudio DeviceStop) can deadlock on a device change, so we do it on a daemon thread — if it
         wedges, the main loop is unaffected and the watchdog in _on_stall still triggers a restart."""
@@ -154,8 +208,13 @@ class MicStream:
             try:
                 stream = self._make_stream()
                 stream.start()
+                if self._released:   # paused while we were opening it: don't hold the mic
+                    stream.abort()
+                    stream.close()
+                    return
                 self._stream = stream
-                self._log("🎙️  mic stream re-opened — listening again.")
+                if announce:
+                    self._log("🎙️  mic stream re-opened — listening again.")
             except Exception as exc:
                 self._log(f"⚠️  couldn't re-open mic ({exc}); will retry…")
         finally:
@@ -170,6 +229,10 @@ class MicStream:
     def _switch(self, device) -> None:
         while self._recovering:          # let an in-flight re-open finish first
             time.sleep(0.05)
+        if self._released:               # paused: remember the choice, open it when unpaused
+            self._device = device
+            self._log(f"🎙️  mic set to {device!r}; it opens when you unpause.")
+            return
         self._recovering = True
         try:
             previous = self._device

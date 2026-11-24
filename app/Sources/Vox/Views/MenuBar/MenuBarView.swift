@@ -34,6 +34,7 @@ struct MenuBarView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
+                AgentsMenuSection()
                 VStack(spacing: 6) {
                     SwitchRow("Listening", isOn: Binding(get: { !model.isPaused }, set: { _ in model.togglePaused() }))
                     SwitchRow("Speak replies", isOn: model.binding(bool: "tts_enabled"))

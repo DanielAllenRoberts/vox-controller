@@ -741,6 +741,17 @@ enum ClaudeCLI {
 private struct VoiceStep: View {
     @Environment(AppModel.self) private var model
     @State private var previewing: String?
+    @State private var kokoro: KokoroStatus?
+
+    /// The voices are a one-time ~350 MB download. Until it's done a preview has nothing to play.
+    private struct KokoroStatus: Decodable {
+        var state: String
+        var downloadedMB: Int
+        var error: String
+    }
+
+    /// Unknown (engine not answering yet) counts as ready, so the buttons behave as they always did.
+    private var voicesReady: Bool { kokoro == nil || kokoro?.state == "ready" }
 
     private var voices: [SettingOption] { model.setting("kokoro_voice")?.options ?? [] }
     private var current: String { model.value("kokoro_voice").string }
@@ -752,6 +763,7 @@ private struct VoiceStep: View {
                 Text("The voices appear once the speech engine is running. Press Continue to carry on, and pick a voice later in Settings \u{2192} Voice.")
                     .foregroundStyle(.secondary).multilineTextAlignment(.center)
             } else {
+                downloadStatus
                 ScrollView {
                     VStack(spacing: 6) {
                         ForEach(voices, id: \.value) { v in row(v) }
@@ -760,6 +772,38 @@ private struct VoiceStep: View {
                 }
                 .frame(maxHeight: 280)
             }
+        }
+        .task(id: voices.isEmpty) { await prepareVoices() }
+    }
+
+    @ViewBuilder private var downloadStatus: some View {
+        if let k = kokoro {
+            switch k.state {
+            case "downloading":
+                Label("Downloading the voices (about 350 MB)\u{2026} \(k.downloadedMB) MB so far", systemImage: "arrow.down.circle")
+                    .font(.callout).foregroundStyle(.secondary)
+            case "idle", "loading":
+                Label("Getting the voices ready\u{2026}", systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(.secondary)
+            case "error":
+                VStack(spacing: 6) {
+                    Label("Couldn't download the voices: \(k.error). Until they're here, Vox uses your Mac's built-in voice.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.callout).foregroundStyle(.orange).multilineTextAlignment(.center)
+                    Button("Try again") { Task { await prepareVoices() } }
+                }
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    /// Start the voice download as soon as this step opens, then follow it until it's done.
+    private func prepareVoices() async {
+        kokoro = try? await model.api.send("voices/kokoro/prepare", method: "POST", body: [String: JSONValue]())
+        while !Task.isCancelled, let k = kokoro, k.state != "ready", k.state != "error" {
+            try? await Task.sleep(for: .milliseconds(500))
+            if let next: KokoroStatus = try? await model.api.get("voices/kokoro") { kokoro = next }
         }
     }
 
@@ -784,7 +828,8 @@ private struct VoiceStep: View {
                 Image(systemName: previewing == v.value ? "speaker.wave.2.fill" : "play.circle")
                     .font(.title3)
             }
-            .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+            .buttonStyle(.plain).foregroundStyle(voicesReady ? Color.accentColor : Color.secondary)
+            .disabled(!voicesReady)
             .accessibilityLabel("Play \(Self.name(v))")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
