@@ -20,6 +20,8 @@ from vox.paths import DATA_DIR
 import json
 import os
 import random
+import re
+import subprocess
 import time
 
 _PATH = DATA_DIR / "agents.json"
@@ -133,6 +135,182 @@ def _voice_for(data: dict, key: str) -> str:
              if k != key and _alive(int(e.get("pid") or 0))}
     free = [v for v in pool if v not in taken]
     return random.choice(free or pool)
+
+
+# --- updates: what each agent has said, for the menu bar's Agents list ----------------------------
+# vox-speak's spoken lines and silent notices, and approval requests from the Claude Code hook, are
+# kept as JSON lines. Each carries the pid of the agent that sent it, so a later session reusing a
+# name starts clean. Trimmed to the newest _UPDATES_KEEP once it doubles.
+
+_UPDATES = DATA_DIR / "agent_updates.jsonl"
+_UPDATES_KEEP = 300
+
+
+def add_update(name: str, text: str, kind: str) -> None:
+    """Record that registered agent ``name`` said ``text``. ``kind``: spoke / notice / approval.
+    Unknown names are ignored: the list only shows agents that registered."""
+    entry = get(name)
+    text = " ".join((text or "").split())
+    if entry is None or not text:
+        return
+    row = {"at": time.time(), "name": entry["name"], "pid": entry.get("pid"), "kind": kind,
+           "text": text[:400]}
+    _UPDATES.parent.mkdir(parents=True, exist_ok=True)
+    with open(_UPDATES, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+    _trim_updates()
+
+
+def _trim_updates() -> None:
+    try:
+        lines = _UPDATES.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    if len(lines) <= _UPDATES_KEEP * 2:
+        return
+    tmp = _UPDATES.with_suffix(".jsonl.tmp")
+    tmp.write_text("\n".join(lines[-_UPDATES_KEEP:]) + "\n", encoding="utf-8")
+    os.replace(tmp, _UPDATES)
+
+
+def _read_updates() -> list[dict]:
+    try:
+        rows = _UPDATES.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    out = []
+    for line in rows:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue  # a half-written line from a concurrent append
+    return out
+
+
+def live_agents(limit: int = 5) -> list[dict]:
+    """The registered agents whose process is still running, each with its newest ``limit``
+    updates (newest first). Agents with the most recent news come first."""
+    updates = _read_updates()
+    out = []
+    for e in _read().values():
+        pid = int(e.get("pid") or 0)
+        if not _alive(pid):
+            continue
+        mine = [u for u in updates
+                if str(u.get("name", "")).lower() == e["name"].lower() and u.get("pid") == pid]
+        mine.reverse()
+        out.append({
+            "name": e["name"],
+            "folder": os.path.basename(str(e.get("cwd", "")).rstrip("/")),
+            "cwd": e.get("cwd", ""),
+            "kokoroVoice": e.get("kokoroVoice", ""),
+            "registeredAt": e.get("registered_at", ""),
+            "updates": mine[:limit],
+        })
+    out.sort(key=lambda a: a["updates"][0]["at"] if a["updates"] else 0, reverse=True)
+    return out
+
+
+# --- switch to an agent's terminal tab -----------------------------------------------------------
+# Clicking an agent in the menu bar brings its terminal tab forward. The agent's MCP server shares
+# its session's tty; walking up its parents reaches the terminal app. Ghostty (1.4+) and Terminal
+# both script tabs by tty.
+
+_FOCUS_SCRIPTS = {
+    "Ghostty": """tell application "Ghostty"
+    repeat with w in windows
+        repeat with t in tabs of w
+            repeat with s in terminals of t
+                if tty of s is "{tty}" then
+                    select tab t
+                    focus s
+                    activate
+                    return "ok"
+                end if
+            end repeat
+        end repeat
+    end repeat
+    return "missing"
+end tell""",
+    "Terminal": """tell application "Terminal"
+    repeat with w in windows
+        repeat with t in tabs of w
+            if tty of t is "{tty}" then
+                set selected of t to true
+                set index of w to 1
+                activate
+                return "ok"
+            end if
+        end repeat
+    end repeat
+    return "missing"
+end tell""",
+}
+
+
+def _ps(pid: int) -> tuple[int, str, str] | None:
+    """(parent pid, tty, command) for ``pid``, or None if it isn't running."""
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=,tty=,comm=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=3).stdout.strip()
+    except Exception:
+        return None
+    parts = out.split(None, 2)
+    if len(parts) < 3 or not parts[0].isdigit():
+        return None
+    return int(parts[0]), parts[1], parts[2]
+
+
+def _osascript(script: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return False, str(exc)
+    if r.returncode != 0:
+        return False, (r.stderr or "").strip()[:200] or "The terminal didn't answer."
+    if r.stdout.strip() != "ok":
+        return False, "That terminal tab isn't open any more."
+    return True, ""
+
+
+def terminal_for(name: str) -> tuple[str, str] | None:
+    """(terminal app, tty device) that agent ``name`` runs in, e.g. ("Ghostty", "/dev/ttys015")."""
+    entry = get(name)
+    if entry is None:
+        return None
+    # The terminal is the OUTERMOST app on the way up: the agent's own Python can itself run from an
+    # app bundle (Homebrew's Python.app), so the first match isn't the answer.
+    pid, tty, app = int(entry.get("pid") or 0), "", ""
+    for _ in range(16):
+        row = _ps(pid)
+        if row is None:
+            break
+        ppid, t, command = row
+        if not tty and t not in ("", "??"):
+            tty = "/dev/" + t
+        bundle = re.search(r"/([^/]+)\.app/Contents/MacOS/", command)
+        if bundle:
+            app = bundle.group(1)
+        if ppid <= 1:
+            break
+        pid = ppid
+    return (app, tty) if app and tty else None
+
+
+def focus(name: str) -> tuple[bool, str]:
+    """Bring agent ``name``'s terminal tab to the front. Returns (ok, why not)."""
+    if get(name) is None:
+        return False, f"No running agent called {name}."
+    found = terminal_for(name)
+    if found is None:
+        return False, f"Can't find the terminal {name} is running in."
+    app, tty = found
+    script = _FOCUS_SCRIPTS.get(app)
+    if script is None:
+        return False, f"Switching to {app} isn't supported yet (Ghostty and Terminal are)."
+    if not re.fullmatch(r"/dev/ttys\d+", tty):
+        return False, f"Can't find the terminal {name} is running in."
+    return _osascript(script.replace("{tty}", tty))
 
 
 def name_for(session_id: str = "", cwd: str = "") -> str:

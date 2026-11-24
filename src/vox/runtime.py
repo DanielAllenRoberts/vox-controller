@@ -155,15 +155,22 @@ _stopped_at = 0.0
 
 def speech_state() -> dict:
     """Who is speaking right now, in ANY process (Vox or an agent's MCP server), and whether speech
-    is paused. ``{"who": "" | "vox" | "<agent name>", "paused": bool}``."""
-    who, is_paused = "", False
+    is paused. ``{"who": "" | "vox" | "<agent name>", "paused": bool, "agent": bool}``. ``agent``
+    is True when ``who`` is a registered agent, so the indicator can offer to switch to its tab."""
+    who, is_paused, is_agent = "", False, False
     try:
         from vox import speech_lock, tts
         is_paused = speech_lock.paused()
         who = speech_lock.holder().split(" (pid")[0] or ("vox" if tts.is_speaking() else "")
     except Exception:
         pass
-    return {"who": who, "paused": is_paused}
+    if who and who != "vox":
+        try:
+            from vox import agents
+            is_agent = agents.get(who) is not None
+        except Exception:
+            pass
+    return {"who": who, "paused": is_paused, "agent": is_agent}
 
 
 def request_stop(sleep: bool = False) -> list[str]:

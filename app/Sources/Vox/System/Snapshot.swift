@@ -60,17 +60,20 @@ enum Snapshotter {
             let hud: [(String, String, String?, Bool, Bool?)] = [("control-heard", "control", "\u{201C}next tab\u{201D}", true, nil),
                                                                  ("assistant-speaking", "assistant", "Speaking…", true, false),
                                                                  ("agent-paused", "idle", "Speech paused", true, true),
+                                                                 ("agent-speaking", "idle", "Jeff is speaking…", true, false),
                                                                  ("mode-flash", "idle", nil, false, nil)]
             for (name, mode, text, stop, paused) in hud {
                 var s = model.engine.status
                 s?.mode = mode
                 let p = VoxPresence.from(engine: .running(owned: true), status: s)
                 shots.append(("hud-\(name)", {
-                    AnyView(HUDPill(presence: p, text: text, onStop: stop ? {} : nil, speechPaused: paused).padding(12)
+                    AnyView(HUDPill(presence: p, text: text, onStop: stop ? {} : nil, speechPaused: paused,
+                                    openName: name == "agent-speaking" ? "Jeff" : nil,
+                                    onOpen: name == "agent-speaking" ? {} : nil).padding(12)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).background(.gray))
                 }, CGSize(width: 380, height: 120)))
             }
-            shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 370)))
+            shots.append(("menubar", { AnyView(Roots.menuBar(model).background(.regularMaterial)) }, CGSize(width: 320, height: 600)))
 
             for (name, view, size) in shots where only.map({ name.contains($0) }) ?? true {
                 if let png = render(view(), size: size) {

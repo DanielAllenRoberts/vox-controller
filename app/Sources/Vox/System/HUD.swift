@@ -30,6 +30,7 @@ final class HUD {
         var text: String?
         var who: String?
         var paused: Bool?
+        var agent: Bool?
     }
 
     private enum Phase { case quiet, listening, recognising }
@@ -47,7 +48,10 @@ final class HUD {
     private var phaseUntil = Date.distantPast
     private var line = ""
     private var speaker = ""          // who is speaking: "", "vox" or an agent's name
+    private var speakerIsAgent = false // a registered agent, so clicking the pill switches to its tab
     private var speechPaused = false
+    private var note = ""             // why switching to an agent's tab didn't work, briefly
+    private var noteUntil = Date.distantPast
     private var lineUntil = Date.distantPast
     private var flashUntil = Date.distantPast
     private var lastTitle: String?
@@ -95,6 +99,7 @@ final class HUD {
             lineUntil = now.addingTimeInterval(Self.heardFor)
         case "speech":
             speaker = e.who ?? ""
+            speakerIsAgent = e.agent == true
             speechPaused = e.paused == true
         default:
             return
@@ -123,19 +128,23 @@ final class HUD {
             case .listening: "Listening…"
             case .recognising: "…"
             case .quiet:
-                if speechPaused { "Speech paused" }
+                if now < noteUntil { note }
+                else if speechPaused { "Speech paused" }
                 else if showLine { "\u{201C}\(line)\u{201D}" }
                 else if speaker == "vox" { "Speaking…" }
                 else if !speaker.isEmpty { "\(speaker) is speaking…" }
                 else { nil }
             }
             let canStop = inMode || phase != .quiet || speaking
+            let agent = speakerIsAgent && !speaker.isEmpty ? speaker : nil
             show(HUDPill(presence: presence, text: text,
                          onStop: canStop ? { [weak self] in self?.stop() } : nil,
                          speechPaused: speaking ? speechPaused : nil,
-                         onPause: { [weak self] in self?.togglePause() }))
+                         onPause: { [weak self] in self?.togglePause() },
+                         openName: agent,
+                         onOpen: agent.map { name in { [weak self] in self?.switchTo(name) } }))
             // Come back when the next thing expires (a line, a flash, a transcript that never came).
-            let next = [phaseUntil, lineUntil, flashUntil].filter { $0 > now && $0 != .distantFuture }.min()
+            let next = [phaseUntil, lineUntil, flashUntil, noteUntil].filter { $0 > now && $0 != .distantFuture }.min()
             if let next {
                 let work = DispatchWorkItem { [weak self] in self?.update() }
                 recheck = work
@@ -154,6 +163,20 @@ final class HUD {
         Task { _ = try? await api.stop(sleep: true) }
     }
 
+    /// Clicking an agent's "… is speaking" line: bring its terminal tab to the front, like the menu
+    /// bar's Agents list. If that can't be done, say why in the pill for a few seconds.
+    private func switchTo(_ name: String) {
+        guard let api = model?.api else { return }
+        Task { @MainActor in
+            struct R: Decodable { var ok: Bool; var error: String }
+            let r: R? = try? await api.send("agents/\(name)/focus", method: "POST", body: [String: JSONValue]())
+            guard r?.ok != true else { return }
+            note = r?.error.isEmpty == false ? r!.error : "Couldn't switch to \(name)."
+            noteUntil = Date().addingTimeInterval(Self.heardFor)
+            update()
+        }
+    }
+
     private func togglePause() {
         guard let api = model?.api else { return }
         speechPaused.toggle()   // move now; the engine's next "speech" event confirms it
@@ -168,7 +191,7 @@ final class HUD {
         let panel = self.panel ?? makePanel()
         self.panel = panel
         hosting?.rootView = pill
-        panel.ignoresMouseEvents = pill.onStop == nil && pill.speechPaused == nil
+        panel.ignoresMouseEvents = pill.onStop == nil && pill.speechPaused == nil && pill.onOpen == nil
         // The panel is exactly the pill, so with buttons showing it only takes clicks on itself.
         // Top-right of whichever screen the pointer is on: that's the one you're looking at.
         let size = hosting?.fittingSize ?? .zero
@@ -220,19 +243,25 @@ struct HUDPill: View {
     /// nil hides the pause button; otherwise whether speech is paused right now.
     var speechPaused: Bool?
     var onPause: () -> Void = {}
+    /// The agent that's speaking, when clicking the text should switch to its terminal tab.
+    var openName: String?
+    var onOpen: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 7) {
-                    Circle().fill(presence.tone == .paused || presence.tone == .off ? Color.gray : presence.color)
-                        .frame(width: 8, height: 8)
-                    Image(systemName: presence.symbol).font(.caption)
-                    Text(presence.tone == .idle ? "Vox" : presence.title).font(.callout.weight(.semibold))
+            if let onOpen, let openName {
+                Button(action: onOpen) {
+                    HStack(alignment: .center, spacing: 8) {
+                        info
+                        Image(systemName: "arrow.up.forward.app").font(.caption).opacity(0.75)
+                    }
+                    .contentShape(Rectangle())
                 }
-                if let text {
-                    Text(text).font(.callout).lineLimit(3).multilineTextAlignment(.leading)
-                }
+                .buttonStyle(.plain)
+                .help("Switch to \(openName)'s terminal tab")
+                .accessibilityLabel("Switch to \(openName)'s terminal tab")
+            } else {
+                info
             }
             if onStop != nil || speechPaused != nil {
                 HStack(spacing: 6) {
@@ -252,6 +281,21 @@ struct HUDPill: View {
         .frame(maxWidth: 360)
         .fixedSize()
         .accessibilityElement(children: .contain)
+    }
+
+    /// Mode on top, what Vox is hearing (or who's speaking) underneath.
+    private var info: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 7) {
+                Circle().fill(presence.tone == .paused || presence.tone == .off ? Color.gray : presence.color)
+                    .frame(width: 8, height: 8)
+                Image(systemName: presence.symbol).font(.caption)
+                Text(presence.tone == .idle ? "Vox" : presence.title).font(.callout.weight(.semibold))
+            }
+            if let text {
+                Text(text).font(.callout).lineLimit(3).multilineTextAlignment(.leading)
+            }
+        }
     }
 
     private func button(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> some View {
