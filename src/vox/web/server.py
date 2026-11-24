@@ -619,8 +619,19 @@ def create_app() -> FastAPI:
         if err is not None:
             return err
         from .. import onboarding
-        onboarding.preview(str(body.get("engine", "kokoro")), str(body.get("voice", "")))
-        return {"ok": True}
+        return {"ok": True, **onboarding.preview(str(body.get("engine", "kokoro")), str(body.get("voice", "")))}
+
+    @app.get("/api/voices/kokoro")
+    def get_kokoro_status() -> dict:
+        """{"state": idle|downloading|loading|ready|error, "downloadedMB", "error"} for setup's voice step."""
+        from .. import tts
+        return tts.kokoro_status()
+
+    @app.post("/api/voices/kokoro/prepare")
+    def post_kokoro_prepare() -> dict:
+        """Start the one-time Kokoro download/load in the background; returns the status at once."""
+        from .. import tts
+        return tts.prepare_kokoro()
 
     @app.get("/api/onboarding/questions")
     async def get_onboarding_questions() -> dict:
