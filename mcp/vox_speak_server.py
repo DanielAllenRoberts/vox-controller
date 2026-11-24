@@ -110,10 +110,25 @@ def _record(text: str, kind: str) -> None:
         pass  # a missing list entry must never stop the agent from talking
 
 
+def _vox_quit() -> str:
+    """Why nothing was said, if Vox isn't running; "" if it is. Quitting Vox (say, before leaving
+    the Mac) means agents should stop talking to the room, not carry on without it."""
+    try:
+        from vox import running
+    except Exception:
+        return ""  # bare run outside the repo venv: can't tell, so behave as before
+    if running.vox_running():
+        return ""
+    return "(Vox isn't running, so nothing was spoken or shown: the user is likely away. Carry on without voice updates.)"
+
+
 def _say(text: str, voice: str, rate: int) -> str:
     text = (text or "").strip()
     if not text:
         return "(nothing to speak)"
+    quit_note = _vox_quit()
+    if quit_note:
+        return quit_note
     # With several CLIs running, an unattributed voice is worse than no voice — you hear that
     # something finished but not what. A registered name goes in front of the words. Prefix first,
     # THEN truncate, so the cap covers what actually gets spoken.
@@ -209,6 +224,9 @@ def notify(text: str, source: str = "", corner: str = "", duration: float = -1) 
         duration: Seconds on screen. 0 stays until the user clicks the card's ✕; a negative value
                   (the default) uses the user's configured preference.
     """
+    quit_note = _vox_quit()
+    if quit_note:
+        return quit_note
     try:
         from vox import bubble
     except Exception as exc:  # bare run outside the repo venv — nothing to draw with
