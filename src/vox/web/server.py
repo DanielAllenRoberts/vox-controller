@@ -115,6 +115,22 @@ def _service_unavailable(what: str) -> JSONResponse:
     )
 
 
+_CUE_SUFFIXES = {".aiff", ".aif", ".wav", ".mp3", ".m4a", ".caf"}
+
+
+def _play_cue(path: str) -> None:
+    """The chime an agent plays just before it speaks (/api/speak). Only an existing sound file;
+    never blocks the speech for long, never raises."""
+    p = Path(path).expanduser()
+    if p.suffix.lower() not in _CUE_SUFFIXES or not p.is_file() or not shutil.which("afplay"):
+        return
+    try:
+        subprocess.run(["afplay", str(p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5)
+    except Exception:
+        pass
+
+
 async def _json_body(request: Request):
     """Parse a JSON object body. Returns ``(body, None)`` on success, or
     ``({}, JSONResponse)`` with a 400 when the body is missing/not a JSON object."""
@@ -252,6 +268,33 @@ def create_app() -> FastAPI:
         if not runtime.submit(str(body.get("text", ""))):
             raise HTTPException(status_code=400, detail="empty text, or too many queued")
         return {"ok": True}
+
+    @app.post("/api/speak")
+    async def post_speak(request: Request):
+        """Speak a line for another process, in the voice it asks for: how agents' vox-speak MCP
+        servers talk, so they use Vox's one Kokoro model instead of each loading their own (~1 GB
+        apiece). Waits for its turn in the speech queue and returns once spoken.
+        Body: {text, label?, engine?, sayVoice?, kokoroVoice?, rate?, cue?, dropIfPaused?}.
+        Returns {"ok": true, "spoken": false} when a pause dropped the line."""
+        body, err = await _json_body(request)
+        if err is not None:
+            return err
+        text = str(body.get("text") or "").strip()[:2000]
+        if not text:
+            return _bad_request("text is required")
+        from vox import tts
+        cue = str(body.get("cue") or "")
+        rate = body.get("rate")
+        spoken = await asyncio.to_thread(
+            tts.speak_with, text,
+            engine=str(body.get("engine") or ""),
+            say_voice=body.get("sayVoice"),
+            kokoro_voice=body.get("kokoroVoice"),
+            rate=rate if isinstance(rate, (int, float)) and rate > 0 else None,
+            label=str(body.get("label") or "mcp")[:60],
+            before=(lambda: _play_cue(cue)) if cue else None,
+            drop_if_paused=bool(body.get("dropIfPaused")))
+        return {"ok": True, "spoken": spoken is not False}
 
     @app.post("/api/ptt")
     async def post_ptt(request: Request):
