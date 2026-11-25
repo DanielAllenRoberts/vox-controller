@@ -141,6 +141,19 @@ def _say(text: str, voice: str, rate: int) -> str:
     # Prefer Vox's own TTS engine (supports the neural Kokoro engine + the independent MCP voice);
     # fall back to a bare `say` if the vox package isn't importable from this process.
     try:
+        from vox import speak_client
+        # Vox speaks it with its own already-loaded model. Speaking here instead would load a
+        # second Kokoro model into this process and keep it (~1 GB per agent session).
+        spoke = speak_client.speak_via_vox(
+            text, engine=engine, say_voice=voice or say_voice, kokoro_voice=kokoro_voice,
+            rate=(rate or None), label=_AGENT_NAME or "mcp", cue=_cue_path(), drop_if_paused=True)
+    except Exception:
+        spoke = None
+    if spoke is False:
+        return "(not spoken: the user has paused speech in Vox; don't retry this message)"
+    if spoke:
+        return f"spoke aloud: {text[:80]!r}"
+    try:  # Vox isn't answering: speak in this process
         from vox import tts
         spoke = tts.speak_with(
             text,
