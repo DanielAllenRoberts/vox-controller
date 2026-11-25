@@ -579,6 +579,19 @@ def create_app() -> FastAPI:
         return {"ok": not failed, "reply": reply[:300], "ms": round(ms)}
 
     # --- Agent hooks: "David needs you" (research/agent-messaging.md, feature 1) ---
+    @app.get("/api/agents")
+    def get_agents() -> dict:
+        """Your running named Claude sessions and what each has said lately (menu bar Agents list)."""
+        from .. import agents
+        return {"agents": agents.live_agents()}
+
+    @app.post("/api/agents/{name}/focus")
+    async def post_agent_focus(name: str) -> dict:
+        """Bring a named agent's terminal tab to the front (menu bar: click an agent)."""
+        from .. import agents
+        ok, why = await asyncio.to_thread(agents.focus, name)
+        return {"ok": ok, "error": why}
+
     @app.post("/api/agents/event")
     async def post_agent_event(request: Request):
         """Receives Claude Code hook events (configure a `type: "http"` hook pointing here). A
@@ -662,8 +675,19 @@ def create_app() -> FastAPI:
         if err is not None:
             return err
         from .. import onboarding
-        onboarding.preview(str(body.get("engine", "kokoro")), str(body.get("voice", "")))
-        return {"ok": True}
+        return {"ok": True, **onboarding.preview(str(body.get("engine", "kokoro")), str(body.get("voice", "")))}
+
+    @app.get("/api/voices/kokoro")
+    def get_kokoro_status() -> dict:
+        """{"state": idle|downloading|loading|ready|error, "downloadedMB", "error"} for setup's voice step."""
+        from .. import tts
+        return tts.kokoro_status()
+
+    @app.post("/api/voices/kokoro/prepare")
+    def post_kokoro_prepare() -> dict:
+        """Start the one-time Kokoro download/load in the background; returns the status at once."""
+        from .. import tts
+        return tts.prepare_kokoro()
 
     @app.get("/api/onboarding/questions")
     async def get_onboarding_questions() -> dict:
